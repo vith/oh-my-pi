@@ -221,7 +221,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; evaluateToolCalls?: boolean },
 	): void {
 		this.runtime.sendMessage(message, options);
 	}
