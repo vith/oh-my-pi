@@ -1164,10 +1164,14 @@ export interface ExtensionAPI {
 	 * `deliverAs: "nextTurn"` keeps the message hidden from the editable pending-message UI.
 	 * If `triggerTurn` is also true while the current turn is still unwinding, the session schedules
 	 * an internal continuation that consumes the message on the next turn.
+	 *
+	 * `evaluateToolCalls: true` parses tool-call XML (`<invoke name="..."><parameter …>`) from
+	 * the message content, executes each tool, and injects an assistant message + tool results.
+	 * Works alongside any `deliverAs` mode.
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; evaluateToolCalls?: boolean },
 	): void;
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set. */
@@ -1353,12 +1357,7 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: CustomMessagePayload<T>,
-	/**
-	 * `deliverAs: "nextTurn"` queues hidden custom context for the next turn.
-	 * When paired with `triggerTurn: true` during prompt teardown, the session schedules
-	 * an internal continuation without surfacing the message in the editable pending queue.
-	 */
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; evaluateToolCalls?: boolean },
 ) => void;
 
 export type SendUserMessageHandler = (
