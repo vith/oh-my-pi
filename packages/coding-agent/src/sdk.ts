@@ -2461,8 +2461,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const mountedTools: Tool[] = [];
 			for (const name of initialToolNames) {
 				const tool = toolRegistry.get(name);
-				if (tool && isMountableUnderXdev(tool)) mountedTools.push(tool);
-				else topLevelToolNames.push(name);
+				if (tool && isMountableUnderXdev(tool)) {
+					mountedTools.push(tool);
+				} else if (!toolSession.xdevRegistry.get(name)) {
+					// Not a discoverable tool in the tool registry, and not already
+					// mounted as a built-in xdev device (by createTools) — keep at
+					// top level so it ships a schema to the model.
+					topLevelToolNames.push(name);
+				}
+				// else: already a built-in xdev device (mounted by createTools),
+				// drop from the top-level set so it never ships a schema.
 			}
 			toolSession.xdevRegistry.reconcile(mountedTools);
 			initialMountedXdevToolNames = mountedTools.map(tool => tool.name);
