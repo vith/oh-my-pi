@@ -13,8 +13,8 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
-import * as fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
@@ -31,6 +31,7 @@ import {
 	type AgentMessage,
 	type AgentState,
 	type AgentTool,
+	type AgentToolContext,
 	type AgentToolResult,
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
@@ -104,7 +105,6 @@ import type {
 	SimpleStreamOptions,
 	TextContent,
 	ToolCall,
-	ToolResultMessage,
 	ToolChoice,
 	Usage,
 	UsageReport,
@@ -129,8 +129,8 @@ import { type RepeatedToolCallDetection, ToolCallLoopGuard } from "@oh-my-pi/pi-
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import type { Api } from "@oh-my-pi/pi-catalog/types";
+import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
 	escapeXmlText,
 	extractHttpStatusFromError,
@@ -8771,7 +8771,6 @@ export class AgentSession {
 		this.#scheduleIdleQueueDrain();
 	}
 
-
 	/**
 	 * Build tool-call messages from content. Parses XML, executes tools,
 	 * returns [assistantMessage, ...toolResultMessages] for delivery.
@@ -8794,6 +8793,24 @@ export class AgentSession {
 		const now = Date.now();
 		const toolCallBlocks: ToolCall[] = [];
 		const toolResultMessages: ToolResultMessage[] = [];
+		// Mirrors `buildAskReanswerContext`: a standalone `AgentToolContext` for
+		// running a tool outside a normal agent turn. No `ui` — this dispatch
+		// path is headless, so approval falls back to yolo (see
+		// `ExtensionToolWrapper.execute`), which is correct here since the
+		// caller is our own trusted extension code, not an interactive user.
+		const toolContext: AgentToolContext = {
+			sessionManager: this.sessionManager,
+			modelRegistry: this.#modelRegistry,
+			model: this.model,
+			isIdle: () => !this.isStreaming,
+			hasQueuedMessages: () => this.queuedMessageCount > 0,
+			abort: () => {
+				this.agent.abort();
+			},
+			settings: this.settings,
+			hasUI: false,
+		};
+		const executionSignal = this.#postPromptTasksAbortController.signal;
 
 		for (const tc of parsed) {
 			const tool = this.#toolRegistry.get(tc.name);
@@ -8810,7 +8827,7 @@ export class AgentSession {
 			});
 
 			try {
-				const result = await tool.execute(tc.id, tc.args);
+				const result = await tool.execute(tc.id, tc.args, executionSignal, undefined, toolContext);
 				toolResultMessages.push({
 					role: "toolResult",
 					toolCallId: tc.id,
@@ -8843,7 +8860,14 @@ export class AgentSession {
 			api: (modelInfo?.api ?? "openai-completions") as Api,
 			provider: modelInfo?.provider ?? "system",
 			model: modelInfo?.id ?? "unknown",
-			usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
 			stopReason: "toolUse",
 			timestamp: now,
 		};
