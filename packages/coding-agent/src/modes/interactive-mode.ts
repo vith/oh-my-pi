@@ -1093,7 +1093,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Spec §9.1: surface the permission-migration mapping notices once per
 		// session start through the root UI notify, and install the root
 		// answering handler for parked subagent approvals (spec §6).
-		showFirstRunNotices(this.settings, notice => this.#extensionUiController.showHookNotify(notice));
+		showFirstRunNotices(this.settings, (notice, type) => this.#extensionUiController.showHookNotify(notice, type));
 		this.#permissionController.install();
 
 		// Restore mode from session (e.g. plan mode on resume)

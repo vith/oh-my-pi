@@ -209,9 +209,19 @@ export class PermissionController {
  * calls this once per session start (its init guard makes it once per
  * instance).
  */
-export function showFirstRunNotices(settings: Settings, notify: (message: string) => void): boolean {
+export function showFirstRunNotices(
+	settings: Settings,
+	notify: (message: string, type?: "info" | "warning" | "error") => void,
+): boolean {
 	const notices = firstRunNotice(settings);
 	if (!notices) return false;
-	for (const notice of notices) notify(notice);
+	// The legacy keys are hidden from the settings UI yet still govern the
+	// engine, so this must be unmissable: a warning-level summary naming the
+	// remediation command, followed by the per-key mapping notices.
+	const summary =
+		"Permission migration pending: legacy permission settings (tools.approvalMode / tools.approval / bash.patterns) still govern the permission engine and are hidden from the settings UI. Run /permissions migrate to move them into permission rules and permissions.default.";
+	logger.warn(summary);
+	notify(summary, "warning");
+	for (const notice of notices) notify(notice, "warning");
 	return true;
 }
