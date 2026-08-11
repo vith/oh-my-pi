@@ -17,6 +17,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { type AuditRecord, appendAudit, auditFilePath } from "../../tools/permissions/audit";
 import { type EngineContext, type EngineDecision, evaluatePermission } from "../../tools/permissions/engine";
 import { type PromptResolution, promptForDecision, renderAllowSuggestion } from "../../tools/permissions/prompt";
+import { type PendingApproval, parkApproval } from "../../tools/permissions/subagent";
 import { createSuggestionProvider } from "../../tools/permissions/suggest";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
@@ -408,21 +409,51 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// Provider safety checks fail closed without an interactive prompt. Unlike
 			// ordinary tier approval, no setting or yolo mode may bypass this gate.
 			if (!this.runner.hasUI()) {
-				await this.#recordAudit(decision, resolvedArgs, "blocked", context, engineCtx);
-				const reason = "no interactive UI available";
-				await emitApprovalResolved(false, reason);
 				if (pendingSafetyChecks.length > 0) {
+					await this.#recordAudit(decision, resolvedArgs, "blocked", context, engineCtx);
+					await emitApprovalResolved(false, "no interactive UI available");
 					throw new Error(
 						`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
 					);
 				}
-				throw new Error(
-					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
-						`Options:\n` +
-						`  1. Set tools.approvalMode: yolo in /settings\n` +
-						`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
-						`  3. Use an interactive UI to approve the tool call`,
+				// Ordinary pending decisions park (spec §6): the call blocks on a
+				// promise until the root session's permission handler answers or
+				// the agent is aborted. Without a handler anywhere up the session
+				// tree parkApproval throws the legacy no-UI error — fail-closed,
+				// preserving print/RPC/ACP behavior.
+				const pending: PendingApproval = {
+					key: `${this.tool.name}:${toolCallId}`,
+					sessionId,
+					toolName: this.tool.name,
+					args: resolvedArgs,
+					decision,
+					// The parked promise is owned by parkApproval, which installs
+					// the real resolvers; these stubs only satisfy the interface.
+					resolve: () => {},
+					reject: () => {},
+				};
+				let resolution: { policy: "allow" | "deny" };
+				try {
+					resolution = await parkApproval(pending);
+				} catch (err) {
+					await this.#recordAudit(decision, resolvedArgs, "blocked", context, engineCtx);
+					await emitApprovalResolved(false, "no interactive UI available");
+					throw err;
+				}
+				await emitApprovalResolved(
+					resolution.policy === "allow",
+					resolution.policy === "deny" ? "denied by user" : undefined,
 				);
+				if (resolution.policy === "deny") {
+					await this.#recordAudit(
+						{ ...decision, policy: "deny" as const, reason: "denied by user" },
+						resolvedArgs,
+						"blocked",
+						context,
+						engineCtx,
+					);
+					throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				}
 			}
 
 			const uiContext = this.runner.getUIContext();
