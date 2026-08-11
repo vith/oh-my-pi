@@ -1,4 +1,4 @@
-import { CRITICAL_BASH_PATTERNS } from "../bash";
+import { CRITICAL_BASH_PATTERNS } from "./critical-patterns";
 
 export const CURATED_ALLOW_TOOLS = [
 	"read",

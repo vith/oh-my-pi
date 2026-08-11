@@ -34,19 +34,25 @@ describe("tools.approvalMode setting", () => {
 	// own settings. So a single shared session exercises every mode — we only vary the context
 	// settings per assertion. This avoids paying createAgentSession's cost (model registry,
 	// auth-storage discovery, settings init) nine times over.
+	//
+	// BashTool.approval, however, evaluates the engine against the *session's* settings (at
+	// runtime the context settings ARE the session's), so assertions that configure a posture
+	// or policy must create a session carrying the same configuration; modeSessions tracks
+	// those for disposal.
 	let tempDir: string;
 	let session: AgentSession;
+	const modeSessions: AgentSession[] = [];
 
-	beforeAll(async () => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-approval-mode-${Snowflake.next()}-`));
-		const cwd = path.join(tempDir, "cwd");
+	async function createBashSession(extraSettings: Record<string, unknown> = {}): Promise<AgentSession> {
+		const index = modeSessions.length + 1;
+		const cwd = path.join(tempDir, `cwd-${index}`);
 		fs.mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, path.join(tempDir, "sessions"));
+		const sessionManager = SessionManager.create(cwd, path.join(tempDir, `sessions-${index}`));
 		const created = await createAgentSession({
 			cwd,
-			agentDir: tempDir,
+			agentDir: path.join(tempDir, `agent-${index}`),
 			sessionManager,
-			settings: Settings.isolated(BASE_SETTINGS),
+			settings: Settings.isolated({ ...BASE_SETTINGS, ...extraSettings }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -58,11 +64,17 @@ describe("tools.approvalMode setting", () => {
 			enableLsp: false,
 			toolNames: ["bash"],
 		});
-		session = created.session;
+		modeSessions.push(created.session);
+		return created.session;
+	}
+
+	beforeAll(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-approval-mode-${Snowflake.next()}-`));
+		session = await createBashSession();
 	});
 
 	afterAll(async () => {
-		await session.dispose();
+		for (const modeSession of [...modeSessions].reverse()) await modeSession.dispose();
 		// Windows can briefly hold tempdir handles after session.dispose(); retry a few times.
 		for (let attempt = 0; attempt < 5; attempt++) {
 			try {
@@ -81,8 +93,8 @@ describe("tools.approvalMode setting", () => {
 		return Settings.isolated({ ...BASE_SETTINGS, ...extraSettings });
 	}
 
-	function bashTool() {
-		const bash = session.getToolByName("bash");
+	function bashTool(target?: AgentSession) {
+		const bash = (target ?? session).getToolByName("bash");
 		if (!bash) throw new Error("Expected bash tool");
 		return bash;
 	}
@@ -90,9 +102,13 @@ describe("tools.approvalMode setting", () => {
 	it("yolo mode bypasses approval for non-overriding tool calls", async () => {
 		// The engine's default posture is deny-by-default `prompt` for
 		// unconfigured settings; yolo must be explicitly configured to map onto
-		// the allow posture (permissions.default / tools.approvalMode).
+		// the allow posture (permissions.default / tools.approvalMode). The
+		// session carries the mode too — BashTool.approval echoes the session's
+		// engine decision (at runtime context and session settings are the same
+		// object), so an unconfigured session would surface a tool-level prompt.
+		const modeSession = await createBashSession({ "tools.approvalMode": "yolo" });
 		const settings = approvalSettings({ "tools.approvalMode": "yolo" });
-		const result = await bashTool().execute("yolo", { command: "echo ok" }, undefined, undefined, {
+		const result = await bashTool(modeSession).execute("yolo", { command: "echo ok" }, undefined, undefined, {
 			settings,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("ok");
@@ -108,13 +124,26 @@ describe("tools.approvalMode setting", () => {
 	});
 
 	it("per-tool allow overrides are honored in every mode", async () => {
+		// The session carries the per-tool policy too: BashTool.approval
+		// evaluates pieces against the session's settings, where the legacy
+		// tools.approval.bash allow resolves inside the piece pipeline.
+		const modeSession = await createBashSession({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "allow" },
+		});
 		const settings = approvalSettings({
 			"tools.approvalMode": "always-ask",
 			"tools.approval": { bash: "allow" },
 		});
-		const result = await bashTool().execute("always-ask-allow", { command: "echo allowed" }, undefined, undefined, {
-			settings,
-		} as AgentToolContext);
+		const result = await bashTool(modeSession).execute(
+			"always-ask-allow",
+			{ command: "echo allowed" },
+			undefined,
+			undefined,
+			{
+				settings,
+			} as AgentToolContext,
+		);
 		expect(textOf(result)).toContain("allowed");
 	});
 
@@ -157,11 +186,21 @@ describe("tools.approvalMode setting", () => {
 	});
 
 	it("CLI --auto-approve forces yolo mode for non-overriding tool calls", async () => {
+		// main.ts reflects --auto-approve into the session settings
+		// (settingsInstance.override("tools.approvalMode", "yolo")), which is
+		// what BashTool.approval sees; the context flag keeps driving the gate.
+		const modeSession = await createBashSession({ "tools.approvalMode": "yolo" });
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
-		const result = await bashTool().execute("cli-override", { command: "echo override" }, undefined, undefined, {
-			settings,
-			autoApprove: true,
-		} as AgentToolContext);
+		const result = await bashTool(modeSession).execute(
+			"cli-override",
+			{ command: "echo override" },
+			undefined,
+			undefined,
+			{
+				settings,
+				autoApprove: true,
+			} as AgentToolContext,
+		);
 		expect(textOf(result)).toContain("override");
 	});
 
@@ -183,15 +222,21 @@ describe("tools.approvalMode setting", () => {
 		).rejects.toThrow(/blocked by user policy/);
 	});
 
-	it("xd:// dispatch approval (xdevApproved) suppresses the tier-only re-prompt", async () => {
-		// The write tool's outer gate already prompted at the device tool's tier;
-		// without the flag this exact call rejects (see the always-ask test above).
+	it("xdevApproved does not bypass tool-declared bash prompts", async () => {
+		// xdevApproved only suppresses *tier-only* prompts (decision from the
+		// mode tier, source posture). Since Task 8, BashTool.approval surfaces
+		// the engine's decision as a tool-declared override prompt, which the
+		// wrapper deliberately never bypasses — the xd:// dispatch of a bash
+		// command therefore faces the full gate instead of double-asking at the
+		// write tool's tier only.
+		const modeSession = await createBashSession({ "tools.approvalMode": "always-ask" });
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
-		const result = await bashTool().execute("xdev-tier", { command: "echo dispatched" }, undefined, undefined, {
-			settings,
-			xdevApproved: true,
-		} as AgentToolContext);
-		expect(textOf(result)).toContain("dispatched");
+		await expect(
+			bashTool(modeSession).execute("xdev-tier", { command: "echo dispatched" }, undefined, undefined, {
+				settings,
+				xdevApproved: true,
+			} as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
 
 	it("xdevApproved does not bypass explicit per-tool prompt or deny policies", async () => {
