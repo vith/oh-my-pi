@@ -10,7 +10,7 @@ import {
 } from "../../config/settings";
 import { type ApprovalPolicy, normalizePolicy } from "../approval";
 import { normalizeBashApprovalPattern } from "../bash";
-import { legacyBashPattern, postureFromApprovalMode, POSTURE_KEY, type Posture } from "./engine";
+import { legacyBashPattern, POSTURE_KEY, type Posture, postureFromApprovalMode } from "./engine";
 import { type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
 
 /**
