@@ -47,6 +47,7 @@ import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import type { ComputerTool } from "../tools/computer";
 import { computerExposureMode } from "../tools/computer/exposure";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
+import { runPermissionCommand } from "../tools/permissions/manage";
 import { urlHyperlinkAlways } from "../tui";
 import {
 	getChangelogPath,
@@ -1687,6 +1688,34 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleSSHCommand(command.text);
+		},
+	},
+	{
+		name: "permissions",
+		description: "Inspect and manage permission rules (list, show, add, remove, edit, test, log, status, migrate)",
+		acpDescription: "Manage permission rules",
+		acpInputHint: "<list|show|add|remove|edit|test|log|status|migrate>",
+		subcommands: [
+			{ name: "list", description: "List merged permission rules by layer with audit match counts" },
+			{ name: "show", description: "Show a rule's details and last audit hits", usage: "<id>" },
+			{ name: "add", description: "Add a rule to the user layer", usage: "<yaml>" },
+			{ name: "remove", description: "Remove a rule from the user layer", usage: "<id>" },
+			{ name: "edit", description: "Replace a user-layer rule by id", usage: "<id> <yaml>" },
+			{ name: "test", description: "Dry-run a bash command against the permission engine", usage: '"<command>"' },
+			{ name: "log", description: "Show recent permission audit entries" },
+			{ name: "status", description: "Show posture, rule counts, and rule file paths" },
+			{ name: "migrate", description: "Plan the legacy settings migration", usage: "[--apply]" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			await runtime.output(
+				await runPermissionCommand(command.args, {
+					cwd: runtime.cwd,
+					settings: runtime.settings,
+					sessionId: runtime.sessionManager.getSessionId(),
+				}),
+			);
+			return commandConsumed();
 		},
 	},
 	{

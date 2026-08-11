@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent, toError } from "@oh-my-pi/pi-utils";
+import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 
 /**
@@ -222,15 +223,47 @@ export function isRuleExpired(rule: PermissionRule, now: number = Date.now()): b
 
 /**
  * Append or replace (by `id`) a rule in the dynamic rules file. The write is
- * atomic: the file is re-serialized to a temp file on the same filesystem and
- * renamed over the target. The `layer` field is derived from the file's
- * position at load time and is not stored.
+ * atomic and serialized with other writers through an OS-backed file lock
+ * (Task 2 deferred minor; the management surface adds real callers). The
+ * `layer` field is derived from the file's position at load time and is not
+ * stored.
  */
 export async function writeDynamicRule(
 	file: string,
 	rule: Omit<PermissionRule, "layer"> & { layer?: RuleLayer },
 ): Promise<void> {
-	const doc = await readDynamicDoc(file);
+	await upsertRuleInFile(file, rule);
+}
+
+/**
+ * Append or replace (by `id`) a rule in the user rules file (the management
+ * surface's write path). Same atomic + locked semantics as
+ * {@link writeDynamicRule}.
+ */
+export async function writeUserRule(
+	file: string,
+	rule: Omit<PermissionRule, "layer"> & { layer?: RuleLayer },
+): Promise<void> {
+	await upsertRuleInFile(file, rule);
+}
+
+async function upsertRuleInFile(
+	file: string,
+	rule: Omit<PermissionRule, "layer"> & { layer?: RuleLayer },
+): Promise<void> {
+	const entry = ruleToEntry(rule);
+	await mutateRuleDoc(file, rules => {
+		const existingIndex = rules.findIndex(candidate => candidate.id === entry.id);
+		if (existingIndex >= 0) {
+			rules[existingIndex] = entry;
+		} else {
+			rules.push(entry);
+		}
+		return rules;
+	});
+}
+
+function ruleToEntry(rule: Omit<PermissionRule, "layer"> & { layer?: RuleLayer }): Record<string, unknown> {
 	const entry: Record<string, unknown> = {
 		id: rule.id,
 		tool: rule.tool,
@@ -239,14 +272,7 @@ export async function writeDynamicRule(
 	};
 	if (rule.reason !== undefined) entry.reason = rule.reason;
 	if (rule.ttl !== undefined) entry.ttl = rule.ttl;
-
-	const existingIndex = doc.rules.findIndex(candidate => candidate.id === rule.id);
-	if (existingIndex >= 0) {
-		doc.rules[existingIndex] = entry;
-	} else {
-		doc.rules.push(entry);
-	}
-	await writeYamlAtomically(file, doc);
+	return entry;
 }
 
 /**
@@ -254,11 +280,52 @@ export async function writeDynamicRule(
  * Returns whether a rule with that id existed (and the file was rewritten).
  */
 export async function removeDynamicRule(file: string, id: string): Promise<boolean> {
-	const doc = await readDynamicDoc(file);
-	const remaining = doc.rules.filter(candidate => candidate.id !== id);
-	if (remaining.length === doc.rules.length) return false;
-	await writeYamlAtomically(file, { rules: remaining });
-	return true;
+	return removeRuleFromFile(file, id);
+}
+
+/**
+ * Remove a rule by `id` from the user rules file (the management surface's
+ * remove path). Returns whether a rule with that id existed.
+ */
+export async function removeUserRule(file: string, id: string): Promise<boolean> {
+	return removeRuleFromFile(file, id);
+}
+
+async function removeRuleFromFile(file: string, id: string): Promise<boolean> {
+	let removed = false;
+	await mutateRuleDoc(file, rules => {
+		const remaining = rules.filter(candidate => candidate.id !== id);
+		removed = remaining.length !== rules.length;
+		return remaining;
+	});
+	return removed;
+}
+
+/**
+ * Serialize a `{ rules }` document to `file` under the file lock: the whole
+ * read-modify-write cycle of every rules-file writer runs inside the lock, so
+ * concurrent writers cannot interleave (a bare read + rename would). The
+ * parent directory is created first because the lock directory
+ * (`${file}.lock`) is made with a non-recursive mkdir.
+ */
+export async function writeRulesFile(file: string, rules: Record<string, unknown>[]): Promise<void> {
+	await fs.promises.mkdir(path.dirname(file), { recursive: true });
+	await withFileLock(file, async () => writeYamlAtomically(file, { rules }));
+}
+
+/**
+ * Read-modify-write a rules file's `rules` list under the file lock, applying
+ * `mutate` to the parsed list and re-serializing the document.
+ */
+async function mutateRuleDoc(
+	file: string,
+	mutate: (rules: Record<string, unknown>[]) => Record<string, unknown>[],
+): Promise<void> {
+	await fs.promises.mkdir(path.dirname(file), { recursive: true });
+	await withFileLock(file, async () => {
+		const doc = await readDynamicDoc(file);
+		await writeYamlAtomically(file, { rules: mutate(doc.rules) });
+	});
 }
 
 /** Read a dynamic rules file as a `{ rules }` document; missing or empty files yield no rules. */

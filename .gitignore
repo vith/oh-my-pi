@@ -44,6 +44,7 @@ packages/ai/test/.temp-images/
 # Project specific
 !.omp/
 .omp/plugins/
+**/.omp/permissions-audit.jsonl
 .pi_config/
 .opencode/
 .worktrees/
