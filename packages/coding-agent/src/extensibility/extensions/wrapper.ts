@@ -9,11 +9,12 @@ import type {
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type SettingPath, Settings, type SettingValue } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import { type ApprovalMode, formatApprovalPrompt, truncateForPrompt } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
+import { type AuditRecord, appendAudit, auditFilePath } from "../../tools/permissions/audit";
 import { type EngineContext, type EngineDecision, evaluatePermission } from "../../tools/permissions/engine";
 import { type PromptResolution, promptForDecision, renderAllowSuggestion } from "../../tools/permissions/prompt";
 import { createSuggestionProvider } from "../../tools/permissions/suggest";
@@ -177,6 +178,16 @@ function blockedByPolicyError(toolName: string, decision: EngineDecision, args?:
 	return new Error(base);
 }
 
+/** Audit failures are silent; the first one per process logs a warning. */
+let auditWarned = false;
+
+/** The command under evaluation, when the call carries one (bash). */
+function auditCommand(args: unknown): string | undefined {
+	if (typeof args !== "object" || args === null) return undefined;
+	const command = (args as { command?: unknown }).command;
+	return typeof command === "string" ? command : undefined;
+}
+
 /**
  * Wraps a tool with extension callbacks for interception.
  * - Emits tool_call event before execution (can block)
@@ -215,6 +226,55 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	}
 
 	/**
+	 * Persist the engine's final decision for this call into the audit log
+	 * (spec §7). Runs at the final decision point only: gate-time denies
+	 * record before execute, allowed calls record after execute with the
+	 * execution outcome. Guarded by `permissions.audit.enabled`; a session
+	 * manager is required because the log lives under the session cwd — the
+	 * production loop always provides one, and without it there is no
+	 * meaningful file target (the rule engine's `process.cwd()` fallback is
+	 * in-memory only; a persisted log must not scatter into arbitrary
+	 * working directories). Failures are silent — the tool call never
+	 * breaks because the log is unwritable (warned once).
+	 */
+	async #recordAudit(
+		decision: EngineDecision,
+		args: unknown,
+		outcome: "executed" | "blocked" | "error",
+		context: AgentToolContext | undefined,
+		engineCtx: EngineContext,
+	): Promise<void> {
+		if (!context?.sessionManager) return;
+		if (engineCtx.settings.get("permissions.audit.enabled") !== true) return;
+		const record: AuditRecord = {
+			ts: Date.now(),
+			sessionId: context.sessionManager.getSessionId(),
+			tool: this.tool.name,
+			args,
+			decision: decision.policy,
+			outcome,
+		};
+		const command = auditCommand(args);
+		if (command !== undefined) record.command = command;
+		if (decision.ruleId !== undefined) record.ruleId = decision.ruleId;
+		if (decision.layer !== undefined) record.layer = decision.layer;
+		if (decision.reason !== undefined) record.reason = decision.reason;
+		if (decision.pieces !== undefined) record.pieces = decision.pieces;
+		try {
+			await appendAudit(
+				auditFilePath(engineCtx.cwd),
+				record,
+				engineCtx.settings.get("permissions.audit.maxEntries"),
+			);
+		} catch (err) {
+			if (!auditWarned) {
+				auditWarned = true;
+				logger.warn("Permission audit append failed", { error: err instanceof Error ? err.message : String(err) });
+			}
+		}
+	}
+
+	/**
 	 * Forward browser mode changes when available.
 	 */
 	restartForModeChange(): Promise<void> {
@@ -246,9 +306,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
 		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
 		const engineCtx = this.#engineContext(context, settings);
-		const shortCircuit = evaluatePermission(this.tool, approvalArgs(params, context), engineCtx);
+		const shortCircuitArgs = approvalArgs(params, context);
+		const shortCircuit = evaluatePermission(this.tool, shortCircuitArgs, engineCtx);
 		if (shortCircuit.policy === "deny") {
-			throw blockedByPolicyError(this.tool.name, shortCircuit, approvalArgs(params, context));
+			await this.#recordAudit(shortCircuit, shortCircuitArgs, "blocked", context, engineCtx);
+			throw blockedByPolicyError(this.tool.name, shortCircuit, shortCircuitArgs);
 		}
 
 		// 1. Emit tool_call event first - extensions can block execution or revise the input the tool
@@ -295,6 +357,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const decision = evaluatePermission(this.tool, resolvedArgs, engineCtx);
 		context?.xdevTierResolved?.(decision.tier);
 		if (decision.policy === "deny") {
+			await this.#recordAudit(decision, resolvedArgs, "blocked", context, engineCtx);
 			throw blockedByPolicyError(this.tool.name, decision, resolvedArgs);
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
@@ -345,6 +408,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			// Provider safety checks fail closed without an interactive prompt. Unlike
 			// ordinary tier approval, no setting or yolo mode may bypass this gate.
 			if (!this.runner.hasUI()) {
+				await this.#recordAudit(decision, resolvedArgs, "blocked", context, engineCtx);
 				const reason = "no interactive UI available";
 				await emitApprovalResolved(false, reason);
 				if (pendingSafetyChecks.length > 0) {
@@ -395,6 +459,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				resolution.policy === "deny" ? "denied by user" : undefined,
 			);
 			if (resolution.policy === "deny") {
+				await this.#recordAudit(
+					{ ...decision, policy: "deny" as const, reason: "denied by user" },
+					resolvedArgs,
+					"blocked",
+					context,
+					engineCtx,
+				);
 				throw new Error(`Tool call denied by user: ${this.tool.name}`);
 			}
 			if (pendingSafetyChecks.length > 0) {
@@ -416,6 +487,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				details: undefined as TDetails,
 			};
 		}
+
+		// Record the final decision after the actual execution outcome is known.
+		await this.#recordAudit(decision, resolvedArgs, executionError ? "error" : "executed", context, engineCtx);
 
 		// Emit tool_result event - extensions can modify the result and error status
 		if (this.runner.hasHandlers("tool_result")) {
