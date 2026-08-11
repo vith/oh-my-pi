@@ -130,6 +130,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	interaction: [
 		"Input",
 		"Approvals",
+		"Permissions",
 		"Notifications",
 		"Speech",
 		"Collab",
@@ -3714,7 +3715,7 @@ export const SETTINGS_SCHEMA = {
 		default: "prompt",
 		ui: {
 			tab: "interaction",
-			group: "Approvals",
+			group: "Permissions",
 			label: "Default Permission Posture",
 			description:
 				"Default posture for tool calls with no matching permission rule. 'Prompt' asks before executing; 'allow' auto-approves; 'deny' blocks.",

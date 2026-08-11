@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a unified permission engine that gates every tool call with a deny-by-default posture: layered permission rules (dynamic → project → user → curated), a curated read-only allowlist, a curated hard-deny prelude for critical bash patterns, and the `/permissions` management surface.
+- Added real shell-command splitting for bash permission evaluation: compound commands are parsed with a shell parser and each piece is evaluated independently.
+- Replaced the binary approval prompt with a permission dialog offering rule candidates (exact / pattern / tool-wide, with YAML previews) and LLM-suggested rules appended behind a spinner.
+- Added subagent park-and-bubble approvals: a headless subagent's pending tool call parks on a promise and bubbles a notice to the root session, where the user answers in the focused subagent view.
+- Added a permission audit log at `.omp/permissions-audit.jsonl` with rotation (`permissions.audit.maxEntries`) and `/permissions log`.
+- Added the `/permissions` management surface (`list`, `show`, `add`, `remove`, `edit`, `test`, `log`, `status`, `migrate`) plus a read-only `permissions` model tool for `list`/`test`.
+
+### Changed
+
+- Legacy `tools.approvalMode`, `tools.approval.<tool>`, and `bash.patterns` settings now map onto the permission engine (posture, legacy user policy, and legacy rule layer) instead of driving the old approval path; `/permissions migrate` rewrites them into rule files.
+
+### Removed
+
+- Removed the binary Approve/Deny approval prompt.
+- Removed the fragment tokenizer (`&&`, `||`, `;`, `|`, `&`, newlines) from the approval path in favor of the shell parser.
+
 ## [17.2.9] - 2026-08-05
 
 ### Breaking Changes
