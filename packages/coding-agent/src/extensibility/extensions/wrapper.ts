@@ -158,10 +158,11 @@ function autoApproveSettings(base: Settings): Pick<Settings, "get" | "isConfigur
  * Deny error for the approval gate. True user-policy denies keep the
  * remediation hint naming the legacy settings key; every other deny (tool
  * declarations, curated critical patterns, file rules) names the engine's
- * reason so the blocker is actionable (plan ruling, round 2). Rule/curated/
- * posture denies also carry the exact allow-rule YAML (spec §5.2) so the
- * model can negotiate in chat; tool-declared and legacy user-policy denies
- * skip it because a dynamic rule cannot override those layers.
+ * reason so the blocker is actionable (plan ruling, round 2). Only
+ * posture-source denies (permissions.default: deny) also carry the exact
+ * allow-rule YAML (spec §5.2) — a dynamic allow rule can unblock a posture
+ * deny, but deny is absolute against curated/rule/tool/user layers, so a
+ * suggestion there would tell the model a rule that cannot work.
  */
 function blockedByPolicyError(toolName: string, decision: EngineDecision, args?: unknown): Error {
 	const base =
@@ -169,7 +170,7 @@ function blockedByPolicyError(toolName: string, decision: EngineDecision, args?:
 			? `Tool "${toolName}" is blocked by user policy.\n` +
 				`To allow: remove "tools.approval.${toolName}: deny" from config.`
 			: `Tool "${toolName}" is blocked: ${decision.reason ?? "denied by permission policy"}`;
-	if (args !== undefined && decision.source !== "tool" && decision.source !== "user") {
+	if (args !== undefined && decision.source === "posture") {
 		return new Error(`${base}\n${renderAllowSuggestion(toolName, args)}`);
 	}
 	return new Error(base);

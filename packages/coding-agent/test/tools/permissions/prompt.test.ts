@@ -121,6 +121,16 @@ describe("buildCandidates", () => {
 		expect(c.length).toBeGreaterThan(0);
 		expect(c.every(x => x.rule.action === "allow")).toBe(true);
 	});
+
+	it("candidate ids are distinct across scopes", () => {
+		// Exact {command:"git"} and pattern {command:"git *"} slug identically;
+		// they must never share an id or re-remembering would replace the other.
+		const c = buildCandidates("bash", { command: "git" });
+		const ids = new Set(c.map(x => x.rule.id));
+		expect(ids.size).toBe(c.length);
+		const singleToken = buildCandidates("write", { path: "./**" });
+		expect(new Set(singleToken.map(x => x.rule.id)).size).toBe(singleToken.length);
+	});
 });
 
 describe("promptForDecision", () => {
@@ -187,6 +197,25 @@ describe("promptForDecision", () => {
 		const written = doc.rules.find(r => (r.match as Record<string, unknown>).command === "git status -s");
 		expect(written).toBeDefined();
 		expect(written?.action).toBe("deny");
+	});
+
+	it("remembering exact then pattern for a single-token command keeps both rules", async () => {
+		const home = tempHome();
+		const { ui } = queuedSelectUi(["Allow & remember…", "Exact: git", "Allow & remember…", "Pattern: git *"]);
+		const decision = fakeDecision({ pieces: [pendingPiece("git")] });
+		const ctx = fakeCtx(home);
+		const first = await promptForDecision(ui, "bash", { command: "git" }, decision, ctx);
+		expect(first.policy).toBe("allow");
+		const second = await promptForDecision(ui, "bash", { command: "git" }, decision, ctx);
+		expect(second.policy).toBe("allow");
+
+		const file = ruleFiles(ctx.cwd, home).dynamic;
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		const commands = doc.rules.map(r => (r.match as Record<string, unknown>).command);
+		expect(commands).toContain("git");
+		expect(commands).toContain("git *");
+		const ids = doc.rules.map(r => r.id as string);
+		expect(new Set(ids).size).toBe(ids.length);
 	});
 
 	it("PTY calls prompt once for the whole command, not per piece", async () => {

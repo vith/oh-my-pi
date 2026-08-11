@@ -70,15 +70,23 @@ function stringEntries(args: unknown): Record<string, string> {
 	return entries;
 }
 
+/** Candidate scopes (spec §5.1); part of the id so exact/pattern/tool never collide. */
+type CandidateScope = "exact" | "pattern" | "tool";
+
 /** Deterministic per-candidate id so re-remembering the same rule replaces it. */
-function candidateRuleId(tool: string, match: Record<string, unknown>, action: RuleAction): string {
+function candidateRuleId(
+	tool: string,
+	scope: CandidateScope,
+	match: Record<string, unknown>,
+	action: RuleAction,
+): string {
 	const slug = (value: string) =>
 		value
 			.toLowerCase()
 			.replace(/[^a-z0-9]+/g, "-")
 			.replace(/^-+|-+$/g, "");
 	const matchSlug = slug(Object.values(match).join("-")).slice(0, 24) || "all";
-	return `remember-${slug(tool)}-${matchSlug}-${action}`;
+	return `remember-${slug(tool)}-${scope}-${matchSlug}-${action}`;
 }
 
 /**
@@ -97,9 +105,15 @@ export function renderCandidateYaml(rule: Omit<PermissionRule, "layer">): string
 	return YAML.stringify(entry);
 }
 
-function candidate(toolName: string, action: RuleAction, match: Record<string, unknown>, label: string): CandidateRule {
+function candidate(
+	toolName: string,
+	action: RuleAction,
+	scope: CandidateScope,
+	match: Record<string, unknown>,
+	label: string,
+): CandidateRule {
 	const rule: Omit<PermissionRule, "layer"> = {
-		id: candidateRuleId(toolName, match, action),
+		id: candidateRuleId(toolName, scope, match, action),
 		tool: toolName,
 		match,
 		action,
@@ -113,9 +127,9 @@ function bashCandidates(toolName: string, command: string, action: RuleAction): 
 	const pattern = `${firstToken} *`;
 	const deny = action === "deny";
 	return [
-		candidate(toolName, action, { command }, `${deny ? "Deny exact" : "Exact"}: ${command}`),
-		candidate(toolName, action, { command: pattern }, `${deny ? "Deny pattern" : "Pattern"}: ${pattern}`),
-		candidate(toolName, action, { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
+		candidate(toolName, action, "exact", { command }, `${deny ? "Deny exact" : "Exact"}: ${command}`),
+		candidate(toolName, action, "pattern", { command: pattern }, `${deny ? "Deny pattern" : "Pattern"}: ${pattern}`),
+		candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
 	];
 }
 
@@ -125,9 +139,9 @@ function fileCandidates(toolName: string, key: string, fileArg: string, action: 
 	const glob = parent === "." ? "./**" : `${parent}/**`;
 	const deny = action === "deny";
 	return [
-		candidate(toolName, action, { [key]: fileArg }, `${deny ? "Deny exact" : "Exact"}: ${fileArg}`),
-		candidate(toolName, action, { [key]: glob }, `${deny ? "Deny pattern" : "Pattern"}: ${glob}`),
-		candidate(toolName, action, { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
+		candidate(toolName, action, "exact", { [key]: fileArg }, `${deny ? "Deny exact" : "Exact"}: ${fileArg}`),
+		candidate(toolName, action, "pattern", { [key]: glob }, `${deny ? "Deny pattern" : "Pattern"}: ${glob}`),
+		candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
 	];
 }
 
@@ -137,9 +151,11 @@ function genericCandidates(toolName: string, args: unknown, action: RuleAction):
 	const deny = action === "deny";
 	const candidates: CandidateRule[] = [];
 	if (Object.keys(exactArgs).length > 0) {
-		candidates.push(candidate(toolName, action, exactArgs, deny ? "Deny exact call" : "Exact call"));
+		candidates.push(candidate(toolName, action, "exact", exactArgs, deny ? "Deny exact call" : "Exact call"));
 	}
-	candidates.push(candidate(toolName, action, { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`));
+	candidates.push(
+		candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
+	);
 	return candidates;
 }
 
