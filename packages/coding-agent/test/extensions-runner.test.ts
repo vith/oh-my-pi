@@ -2000,6 +2000,7 @@ describe("ExtensionRunner", () => {
 				abort: () => {},
 				settings: {
 					get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+					isConfigured: (key: string) => key === "tools.approvalMode",
 				} as never,
 				toolCall: {
 					batchId: "batch-preview",
