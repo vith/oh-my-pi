@@ -5,9 +5,11 @@
  * origin, i.e. the upstream repo).
  *
  * Version shape: `<nearest vX.Y.Z tag, patch+1>+<identifier>`, default
- * identifier `vith-fork` (override via OMP_FORK_IDENTIFIER). Commits the bump
- * but creates no tag and pushes nothing; re-run after syncing upstream to
- * derive the next patch automatically.
+ * identifier `vith-fork` (override via OMP_FORK_IDENTIFIER). Re-running on
+ * the same upstream tag iterates the build metadata (`17.2.13+vith-fork` →
+ * `17.2.13+vith-fork.2`) so another fork build can be produced without
+ * syncing upstream; a newer tag or a different identifier starts a fresh
+ * sequence. Commits the bump but creates no tag and pushes nothing.
  */
 import { $, Glob } from "bun";
 import { compareVersions } from "../packages/utils/src/version.ts";
@@ -21,7 +23,6 @@ if (!IDENTIFIER_RE.test(FORK_IDENTIFIER)) {
 
 const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const packageJsonGlob = new Glob("packages/*/package.json");
-const cargoTomlGlob = new Glob("crates/*/Cargo.toml");
 
 function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false ${args}`;
@@ -31,6 +32,28 @@ function bumpPatch(version: string): string {
 	const match = version.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)$/);
 	if (!match) throw new Error(`Cannot bump non-numeric version: ${version}`);
 	return `${Number(match[1])}.${Number(match[2])}.${Number(match[3]) + 1}`;
+}
+
+/**
+ * Derive the next fork version.
+ *
+ * The base is the nearest upstream tag's patch+1 (or the current core version
+ * when no tag is reachable) plus the fork identifier. When `currentVersion`
+ * is already a fork build of that base, the build metadata is iterated
+ * (`17.2.13+vith-fork` → `17.2.13+vith-fork.2`) so the script can be re-run
+ * for another fork build on the same upstream version. A newer `base` (after
+ * syncing upstream) or a different identifier starts a fresh sequence.
+ */
+export function deriveForkVersion(base: string | undefined, currentVersion: string, identifier: string): string {
+	const patchBase = base ?? currentVersion.split("+")[0];
+	const baseFork = `${bumpPatch(patchBase)}+${identifier}`;
+	const iterationPrefix = `${baseFork}.`;
+	if (currentVersion === baseFork || currentVersion.startsWith(iterationPrefix)) {
+		const suffix = currentVersion.slice(iterationPrefix.length);
+		const iteration = /^\d+$/.test(suffix) ? Number(suffix) : 1;
+		return `${baseFork}.${iteration + 1}`;
+	}
+	return baseFork;
 }
 
 /** Nearest reachable tag matching upstream release style `vX.Y.Z` (e.g. `v17.2.12`). */
@@ -70,31 +93,34 @@ async function promoteChangelogs(version: string): Promise<void> {
 async function main(): Promise<void> {
 	console.log("\n=== Fork Version Bump ===\n");
 
-	// 1. Pre-flight: clean tree only (release.ts's `main`-branch check is
-	// intentionally dropped; `git add .` below would sweep unrelated work
-	// into the bump commit otherwise).
+	// 1. Pre-flight: no tracked changes. Untracked files are ignored — the pi
+	// sandbox (ASRT/bwrap) leaves empty read-only mount-point files in the cwd
+	// of any sandboxed session (e.g. .bashrc, .gitconfig, .claude/*); they are
+	// not the user's work and must not block the bump. `git add -u` below
+	// stages only tracked changes, so untracked files can never be swept into
+	// the bump commit.
 	const status = await git(["status", "--porcelain"]).text();
-	if (status.trim()) {
+	const trackedChanges = status.split("\n").filter(line => line.length > 0 && !line.startsWith("??"));
+	if (trackedChanges.length > 0) {
 		console.error("Error: Uncommitted changes detected. Commit or stash first.");
-		console.error(status);
+		console.error(trackedChanges.join("\n"));
 		process.exit(1);
 	}
 
-	// 2. Derive the fork version: nearest upstream tag (or current
-	// packages/utils version when no tag is reachable), patch+1, `+` suffix.
+	// 2. Derive the fork version: nearest upstream tag (or the current core
+	// version when no tag is reachable), patch+1, `+` suffix. If the current
+	// version is already a fork build of the same base, the build metadata is
+	// iterated so a second fork build on the same upstream version is possible.
 	const tag = await nearestTagVersion();
 	const current = (await Bun.file("packages/utils/package.json").json()) as { version: string };
-	const base = tag ?? current.version;
-	const version = `${bumpPatch(base)}+${FORK_IDENTIFIER}`;
-	console.log(`  base: ${base} (${tag ? "git tag" : "package.json fallback"}), target: ${version}`);
+	const version = deriveForkVersion(tag, current.version, FORK_IDENTIFIER);
+	console.log(
+		`  base: ${tag ?? current.version.split("+")[0]} (${tag ? "git tag" : "package.json fallback"}), target: ${version}`,
+	);
 
 	if (tag && compareVersions(version, tag) <= 0) {
 		console.error(`Error: Version ${version} must be greater than latest tag v${tag}`);
 		process.exit(1);
-	}
-	if (current.version === version) {
-		console.log(`  Already at ${version} — nothing to do.`);
-		return;
 	}
 
 	// 3. Rewrite every public package.json version (mirrors release.ts:
@@ -160,7 +186,7 @@ async function main(): Promise<void> {
 	// 10. Commit only — no tag, no push (deliberate: a fork tag would become
 	// the nearest `v[0-9]*` tag and poison the next derivation).
 	console.log("Committing...");
-	await git(["add", "."]);
+	await git(["add", "-u"]);
 	await git(["commit", "-m", `chore: bump version to ${version}`]);
 	console.log("\nDone. Run `bun --cwd=packages/coding-agent run build` to produce a binary.");
 }
