@@ -18,10 +18,11 @@ pub fn parse_script(command: &str) -> Result<Program, brush_parser::ParseError> 
 	parser.parse_program()
 }
 
-/// Parse `command` and serialize it as a compact JSON node list:
-/// `[{kind, text, words?, redirects?, substitutions?, children}, ...]`.
-/// `substitutions` carries the command texts of `$(…)`/backtick substitutions
-/// inside a simple command's words (grammar-level, quote-aware).
+/// Parse `command` with brush and emit a compact JSON node list.
+///
+/// Nodes are `{kind, text, words?, redirects?, substitutions?, children}`;
+/// `substitutions` holds the `$(…)`/backtick command texts collected from a
+/// simple command's words (grammar-level, quote-aware).
 pub fn parse_script_json(command: &str) -> Result<String, brush_parser::ParseError> {
 	let program = parse_script(command)?;
 	let options = ParserOptions::default();
@@ -196,28 +197,30 @@ fn collect_piece_substitutions(
 		WordPiece::ParameterExpansion(expr) => {
 			// Value-carrying expansions (`${x:-$(cmd)}` & friends) can smuggle
 			// a command through the default/alternative/pattern strings.
-			let values: Vec<String> = match expr {
+			match &expr {
 				ParameterExpr::UseDefaultValues { default_value: Some(v), .. }
-				| ParameterExpr::AssignDefaultValues { default_value: Some(v), .. } => vec![v.clone()],
+				| ParameterExpr::AssignDefaultValues { default_value: Some(v), .. } => {
+					return collect_substitutions(v, options, out);
+				},
 				ParameterExpr::UseAlternativeValue { alternative_value: Some(v), .. } => {
-					vec![v.clone()]
+					return collect_substitutions(v, options, out);
 				},
 				ParameterExpr::IndicateErrorIfNullOrUnset { error_message: Some(v), .. } => {
-					vec![v.clone()]
+					return collect_substitutions(v, options, out);
 				},
 				ParameterExpr::RemoveSmallestSuffixPattern { pattern: Some(v), .. }
 				| ParameterExpr::RemoveLargestSuffixPattern { pattern: Some(v), .. }
 				| ParameterExpr::RemoveSmallestPrefixPattern { pattern: Some(v), .. }
-				| ParameterExpr::RemoveLargestPrefixPattern { pattern: Some(v), .. } => vec![v.clone()],
-				ParameterExpr::ReplaceSubstring { pattern, replacement: Some(r), .. } => {
-					vec![pattern.clone(), r.clone()]
+				| ParameterExpr::RemoveLargestPrefixPattern { pattern: Some(v), .. } => {
+					return collect_substitutions(v, options, out);
 				},
-				_ => vec![],
-			};
-			for value in values {
-				if !collect_substitutions(&value, options, out) {
-					return false;
-				}
+				ParameterExpr::ReplaceSubstring { pattern, replacement: Some(r), .. } => {
+					if !collect_substitutions(pattern, options, out) {
+						return false;
+					}
+					return collect_substitutions(r, options, out);
+				},
+				_ => {},
 			}
 			true
 		},
