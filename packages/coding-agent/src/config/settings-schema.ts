@@ -3738,6 +3738,22 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// LLM-generated permission rule suggestions (interaction tab).
+	"permissions.llmSuggestions": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Permissions",
+			label: "LLM Rule Suggestions",
+		},
+	},
+
+	// Permission audit log (persisted history of engine decisions).
+	"permissions.audit.enabled": { type: "boolean", default: true },
+
+	"permissions.audit.maxEntries": { type: "number", default: 10000 },
+
 	// Todo tool
 	"todo.enabled": {
 		type: "boolean",
