@@ -3704,6 +3704,40 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Default posture for the permission engine (interaction tab, governs every tool gate).
+	//   "allow"  — auto-approve any call the engine does not deny.
+	//   "prompt" — prompt for any call not allowed by a rule (deny-by-default).
+	//   "deny"   — block any call not explicitly allowed by a rule.
+	"permissions.default": {
+		type: "enum",
+		values: ["allow", "prompt", "deny"] as const,
+		default: "prompt",
+		ui: {
+			tab: "interaction",
+			group: "Approvals",
+			label: "Default Permission Posture",
+			description:
+				"Default posture for tool calls with no matching permission rule. 'Prompt' asks before executing; 'allow' auto-approves; 'deny' blocks.",
+			options: [
+				{
+					value: "allow",
+					label: "Allow",
+					description: "Auto-approve every tool call the engine does not deny.",
+				},
+				{
+					value: "prompt",
+					label: "Prompt",
+					description: "Ask before executing calls that no permission rule allows.",
+				},
+				{
+					value: "deny",
+					label: "Deny",
+					description: "Block calls that no permission rule allows.",
+				},
+			],
+		},
+	},
+
 	// Todo tool
 	"todo.enabled": {
 		type: "boolean",

@@ -212,11 +212,11 @@ interface BashApprovalPatternRule {
 	approval: BashPatternApproval;
 }
 
-function normalizeBashApprovalPattern(value: string): string {
+export function normalizeBashApprovalPattern(value: string): string {
 	return value.trim().replace(/\s+/gu, " ");
 }
 
-function bashApprovalPatternToRegExp(pattern: string): RegExp {
+export function bashApprovalPatternToRegExp(pattern: string): RegExp {
 	const escaped = normalizeBashApprovalPattern(pattern)
 		.split("*")
 		.map(part => part.replace(/[\\^$+?.()|[\]{}]/gu, "\\$&"))

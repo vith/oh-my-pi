@@ -41,7 +41,7 @@ const APPROVAL_MODE_MAX_TIER: Record<ApprovalMode, ToolTier> = {
 const DEFAULT_PROMPT_TRUNCATE_CHARS = 2000;
 
 /** Best-effort conversion of an arbitrary user-supplied value to a policy. */
-function normalizePolicy(value: unknown): ApprovalPolicy | undefined {
+export function normalizePolicy(value: unknown): ApprovalPolicy | undefined {
 	if (typeof value !== "string") return undefined;
 	const lowered = value.trim().toLowerCase();
 	return POLICY_VALUES.has(lowered as ApprovalPolicy) ? (lowered as ApprovalPolicy) : undefined;
@@ -72,7 +72,7 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 	return { tier: "exec", override: false };
 }
 
-function getToolDecision(
+export function getToolDecision(
 	tool: ApprovalSubject,
 	args: unknown,
 ): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
