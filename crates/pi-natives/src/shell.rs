@@ -352,6 +352,15 @@ async fn pump_chunks(rx: flume::Receiver<String>, mut forward: impl AsyncFnMut(S
 	}
 }
 
+/// Parse a bash command string with the vendored brush parser and return a
+/// compact JSON node list (`[{kind, text, children}, ...]`).
+/// Throws on syntax errors.
+#[napi]
+pub fn parse_shell_command(command: String) -> Result<String> {
+	pi_shell::parse_script_json(&command)
+		.map_err(|err| Error::from_reason(format!("Shell parse error: {err}")))
+}
+
 #[cfg(test)]
 mod tests {
 	use std::time::Duration;
