@@ -10,6 +10,7 @@ import {
 	removeDynamicRule,
 	ruleFiles,
 	writeDynamicRule,
+	writeRulesFile,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -119,5 +120,26 @@ describe("dynamic store", () => {
 		expect(afterWrite.rules.some(r => r.id === "d1")).toBe(true);
 		expect(await removeDynamicRule(file, "d1")).toBe(true);
 		expect(loadRuleLayers(project, home).rules.some(r => r.id === "d1")).toBe(false);
+	});
+
+	it("writeRulesFile replaces the whole rules list under the lock", async () => {
+		const file = path.join(home, ".omp", "agent", "permissions.dynamic.yml");
+		await writeRulesFile(file, [{ id: "a", tool: "bash", match: { command: "x" }, action: "allow" }]);
+		await writeRulesFile(file, [{ id: "b", tool: "bash", match: { command: "y" }, action: "deny" }]);
+		const dynamicRules = loadRuleLayers(project, home).rules.filter(rule => rule.layer === "dynamic");
+		expect(dynamicRules.map(rule => rule.id)).toEqual(["b"]);
+	});
+
+	it("remove of an unknown id returns false without touching the file", async () => {
+		const file = path.join(home, ".omp", "agent", "permissions.dynamic.yml");
+		// A missing file stays missing: no-op removes never create it.
+		fs.rmSync(file, { force: true });
+		expect(await removeDynamicRule(file, "nope")).toBe(false);
+		expect(fs.existsSync(file)).toBe(false);
+		// An existing file keeps its exact bytes: no-op removes never rewrite it.
+		write(file, "rules:\n  - id: d1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n");
+		const before = fs.readFileSync(file, "utf8");
+		expect(await removeDynamicRule(file, "nope")).toBe(false);
+		expect(fs.readFileSync(file, "utf8")).toBe(before);
 	});
 });

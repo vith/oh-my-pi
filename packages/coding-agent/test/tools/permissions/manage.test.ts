@@ -121,6 +121,12 @@ describe("runPermissionCommand add/remove/edit", () => {
 		expect(loadRuleLayers(cwd, home).rules.some(rule => rule.id === "git1")).toBe(false);
 	});
 
+	it("remove of an unknown id reports it without creating the user file", async () => {
+		const output = await runPermissionCommand("remove missing-rule", await ctx());
+		expect(output).toContain('No rule with id "missing-rule"');
+		expect(fs.existsSync(userRulesFile)).toBe(false);
+	});
+
 	it("edit replaces a user-layer rule by id", async () => {
 		await runPermissionCommand("add tool: bash\nmatch: { command: 'git *' }\naction: allow\nid: git1", await ctx());
 

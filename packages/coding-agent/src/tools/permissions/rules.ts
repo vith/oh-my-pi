@@ -253,13 +253,16 @@ async function upsertRuleInFile(
 ): Promise<void> {
 	const entry = ruleToEntry(rule);
 	await mutateRuleDoc(file, rules => {
-		const existingIndex = rules.findIndex(candidate => candidate.id === entry.id);
+		// Always a new array: the RMW core treats the original reference as
+		// "unchanged" and would otherwise skip the write for in-place edits.
+		const next = [...rules];
+		const existingIndex = next.findIndex(candidate => candidate.id === entry.id);
 		if (existingIndex >= 0) {
-			rules[existingIndex] = entry;
+			next[existingIndex] = entry;
 		} else {
-			rules.push(entry);
+			next.push(entry);
 		}
-		return rules;
+		return next;
 	});
 }
 
@@ -292,39 +295,56 @@ export async function removeUserRule(file: string, id: string): Promise<boolean>
 }
 
 async function removeRuleFromFile(file: string, id: string): Promise<boolean> {
-	let removed = false;
-	await mutateRuleDoc(file, rules => {
+	return await mutateRuleDoc(file, rules => {
 		const remaining = rules.filter(candidate => candidate.id !== id);
-		removed = remaining.length !== rules.length;
-		return remaining;
+		// Returning the original reference signals "unchanged": the core then
+		// skips the write entirely, so a no-op remove neither rewrites nor
+		// creates the file.
+		return remaining.length === rules.length ? rules : remaining;
 	});
-	return removed;
 }
 
 /**
- * Serialize a `{ rules }` document to `file` under the file lock: the whole
- * read-modify-write cycle of every rules-file writer runs inside the lock, so
- * concurrent writers cannot interleave (a bare read + rename would). The
- * parent directory is created first because the lock directory
- * (`${file}.lock`) is made with a non-recursive mkdir.
+ * mkdir then run `fn` under the file lock — the single lock-acquisition site
+ * for the rules files. The parent directory is created first because the lock
+ * directory (`${file}.lock`) is made with a non-recursive mkdir.
+ */
+async function withRulesFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
+	await fs.promises.mkdir(path.dirname(file), { recursive: true });
+	return await withFileLock(file, fn);
+}
+
+/** Serialize a `{ rules }` document atomically. Must run inside {@link withRulesFileLock}. */
+function writeRulesDoc(file: string, rules: Record<string, unknown>[]): Promise<void> {
+	return writeYamlAtomically(file, { rules });
+}
+
+/**
+ * Replace the whole `rules` list of a rules file under the file lock. This is
+ * the public whole-list writer; the mutating writers ({@link writeDynamicRule}
+ * et al.) share the same locked read-modify-write core, so every write to a
+ * rules file is serialized (a bare read + rename could interleave).
  */
 export async function writeRulesFile(file: string, rules: Record<string, unknown>[]): Promise<void> {
-	await fs.promises.mkdir(path.dirname(file), { recursive: true });
-	await withFileLock(file, async () => writeYamlAtomically(file, { rules }));
+	await withRulesFileLock(file, () => writeRulesDoc(file, rules));
 }
 
 /**
  * Read-modify-write a rules file's `rules` list under the file lock, applying
- * `mutate` to the parsed list and re-serializing the document.
+ * `mutate` to the parsed list. Returns whether the file was rewritten: a
+ * mutation that returns the original array reference (no change) neither
+ * writes nor creates the file.
  */
 async function mutateRuleDoc(
 	file: string,
 	mutate: (rules: Record<string, unknown>[]) => Record<string, unknown>[],
-): Promise<void> {
-	await fs.promises.mkdir(path.dirname(file), { recursive: true });
-	await withFileLock(file, async () => {
+): Promise<boolean> {
+	return await withRulesFileLock(file, async () => {
 		const doc = await readDynamicDoc(file);
-		await writeYamlAtomically(file, { rules: mutate(doc.rules) });
+		const next = mutate(doc.rules);
+		if (next === doc.rules) return false;
+		await writeRulesDoc(file, next);
+		return true;
 	});
 }
 
