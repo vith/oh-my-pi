@@ -385,16 +385,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		});
 		switch (decision.policy) {
 			case "deny":
-				return {
-					tier: "exec",
-					override: true,
-					policy: "deny",
-					reason: decision.reason ?? "Blocked by permission policy",
-				};
+				return { tier: "exec", policy: "deny", reason: decision.reason ?? "Blocked by permission policy" };
 			case "prompt":
-				return { tier: "exec", override: true, policy: "prompt", reason: decision.reason };
+				// Bare tier with no override/policy (plan ruling R4): prompting is
+				// the gate's job, so wrapper-level context autoApprove and
+				// xdevApproved semantics flow through unhindered.
+				return { tier: "exec" };
 			default:
-				return decision.source === "curated" ? "exec" : { tier: "write", policy: "allow" };
+				return { tier: "write", policy: "allow" };
 		}
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {

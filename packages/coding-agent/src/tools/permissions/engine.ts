@@ -140,6 +140,82 @@ function matchPatternValue(key: string, value: unknown, pattern: unknown): boole
 	return value === pattern;
 }
 
+const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
+	"\n": true,
+	"\r": true,
+	";": true,
+	"&": true,
+	"|": true,
+	"<": true,
+	">": true,
+	"`": true,
+	$: true,
+	"(": true,
+	")": true,
+};
+const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
+
+/**
+ * Restored from the pre-engine bash approval fn (plan ruling R1): an `allow`
+ * rule must never vouch for a command that can smuggle a second command
+ * through shell control syntax — pipelines, substitutions, redirects, `-c`
+ * reinterpreting options — even when the whole line parses as one piece.
+ * Conservative text-based scan on the piece text; false positives over-prompt
+ * (safe).
+ */
+function hasBashApprovalShellControl(command: string): boolean {
+	let quote: "'" | '"' | undefined;
+	let hasReinterpretableShellControl = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "'") {
+			if (ch === "'") {
+				quote = undefined;
+			} else if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, ch)) {
+				hasReinterpretableShellControl = true;
+			}
+			continue;
+		}
+		if (ch === "\\") {
+			const escaped = command[i + 1];
+			if (escaped && Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, escaped)) {
+				hasReinterpretableShellControl = true;
+			}
+			i++;
+			continue;
+		}
+		if (quote === '"') {
+			if (ch === '"') {
+				quote = undefined;
+				continue;
+			}
+			// Expansion is active inside double quotes even in the original line.
+			if (ch === "`" || ch === "$") return true;
+			// Other control characters are literal here but become executable if a
+			// `-c`/`-e` option reinterprets the argument through another shell.
+			if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, ch)) hasReinterpretableShellControl = true;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			continue;
+		}
+		if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, ch)) return true;
+	}
+	// Options such as `git -c alias.x='!...'` and `sh -c "..."` reinterpret
+	// otherwise literal quoted or escaped arguments as executable code.
+	return hasReinterpretableShellControl && BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE.test(command);
+}
+
+/**
+ * An allow rule matching a bash command must not auto-approve when the command
+ * carries shell control (ruling R1): return `true` when the rule should
+ * degrade to a prompt instead.
+ */
+function bashAllowDegradedByShellControl(toolName: string, command: string | undefined): boolean {
+	return toolName === "bash" && command !== undefined && hasBashApprovalShellControl(command);
+}
+
 /**
  * Rule matching per the Global Constraints: the tool must match (or the rule is
  * `*`), every `match` entry must hold (AND), and a single-entry match whose
@@ -253,15 +329,19 @@ function evaluatePermissionInner(
 		return { policy: "allow", tier: decision.tier, source: "user", override: false };
 	}
 
-	// Legacy allow patterns only vouch for a single-piece command: the gate is
+	// Legacy patterns only vouch for a single-piece command: the gate is
 	// enabled by evaluateBashCommand for whole-command analysis and re-checked
 	// against the command seen here so direct calls never under-analyze.
+	// Non-deny actions honor list order. `allow` degrades to a prompt when the
+	// command carries shell control (ruling R1); `prompt` rules match any piece
+	// text (ruling R2 — they were previously never consulted).
 	const legacyAllowActive = legacyAllowEnabled && command !== undefined && isSinglePiece(command);
-	if (legacyAllowActive) {
-		for (const rule of legacy) {
-			if (rule.action === "allow" && matchRule(rule, tool.name, args)) {
+	for (const rule of legacy) {
+		if (rule.action === "allow") {
+			if (!legacyAllowActive || !matchRule(rule, tool.name, args)) continue;
+			if (bashAllowDegradedByShellControl(tool.name, command)) {
 				return {
-					policy: "allow",
+					policy: "prompt",
 					tier: decision.tier,
 					ruleId: rule.id,
 					layer: rule.layer,
@@ -270,11 +350,42 @@ function evaluatePermissionInner(
 					override: false,
 				};
 			}
+			return {
+				policy: "allow",
+				tier: decision.tier,
+				ruleId: rule.id,
+				layer: rule.layer,
+				reason: rule.reason,
+				source: "rule",
+				override: false,
+			};
+		}
+		if (rule.action === "prompt" && matchRule(rule, tool.name, args)) {
+			return {
+				policy: "prompt",
+				tier: decision.tier,
+				ruleId: rule.id,
+				layer: rule.layer,
+				reason: rule.reason,
+				source: "rule",
+				override: false,
+			};
 		}
 	}
 
 	for (const rule of rules) {
 		if (rule.action !== "deny" && matchRule(rule, tool.name, args)) {
+			if (rule.action === "allow" && bashAllowDegradedByShellControl(tool.name, command)) {
+				return {
+					policy: "prompt",
+					tier: decision.tier,
+					ruleId: rule.id,
+					layer: rule.layer,
+					reason: rule.reason,
+					source: "rule",
+					override: false,
+				};
+			}
 			return {
 				policy: rule.action,
 				tier: decision.tier,
@@ -360,6 +471,30 @@ export function evaluateBashCommand(command: string, ctx: EngineContext): Engine
 			ruleId: piece.ruleId,
 			layer: piece.layer,
 			source: denied.source,
+			override: false,
+			pieces: evaluations,
+		};
+	}
+
+	// Ruling R3: the piece tokenizer normalizes some critical shapes (fork
+	// bombs, process substitution) past the per-piece curated patterns, so also
+	// match the curated deny set against the RAW command. Runs after the
+	// per-piece deny so legacy/file rule attribution is preserved, and before
+	// pending/allow so a normalized critical shape denies instead of prompting.
+	const rawCurated = matchCuratedDeny("bash", command);
+	if (rawCurated) {
+		const piece: PieceEvaluation = {
+			text: command.trim(),
+			policy: "deny",
+			layer: "curated",
+			reason: `matches curated critical pattern /${rawCurated.pattern.source}/`,
+		};
+		return {
+			policy: "deny",
+			tier: "exec",
+			reason: denyReason(piece),
+			layer: "curated",
+			source: "curated",
 			override: false,
 			pieces: evaluations,
 		};

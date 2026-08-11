@@ -30,24 +30,22 @@ function textOf(result: { content?: ReadonlyArray<{ type: string; text?: string 
 
 describe("wrapper approval gate resolves through the permission engine", () => {
 	// The per-tool approval gate (ExtensionToolWrapper) resolves via
-	// evaluatePermission with the execute-time AgentToolContext's settings.
-	// BashTool.approval now evaluates the engine against the *session's*
-	// settings, so assertions that vary the posture must create a session whose
-	// settings carry it — at runtime the context settings ARE the session's.
+	// evaluatePermission with the execute-time AgentToolContext's settings. A
+	// single shared session exercises every combination — we only vary the
+	// context settings per assertion.
 	let tempDir: string;
 	let session: AgentSession;
-	const modeSessions: AgentSession[] = [];
 
-	async function createBashSession(extraSettings: Record<string, unknown> = {}): Promise<AgentSession> {
-		const index = modeSessions.length + 1;
-		const cwd = path.join(tempDir, `cwd-${index}`);
+	beforeAll(async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-permission-gate-${Snowflake.next()}-`));
+		const cwd = path.join(tempDir, "cwd");
 		fs.mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, path.join(tempDir, `sessions-${index}`));
+		const sessionManager = SessionManager.create(cwd, path.join(tempDir, "sessions"));
 		const created = await createAgentSession({
 			cwd,
-			agentDir: path.join(tempDir, `agent-${index}`),
+			agentDir: tempDir,
 			sessionManager,
-			settings: Settings.isolated({ ...BASE_SETTINGS, ...extraSettings }),
+			settings: Settings.isolated(BASE_SETTINGS),
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -59,17 +57,11 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 			enableLsp: false,
 			toolNames: ["bash"],
 		});
-		modeSessions.push(created.session);
-		return created.session;
-	}
-
-	beforeAll(async () => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-permission-gate-${Snowflake.next()}-`));
-		session = await createBashSession();
+		session = created.session;
 	});
 
 	afterAll(async () => {
-		for (const modeSession of [...modeSessions].reverse()) await modeSession.dispose();
+		await session.dispose();
 		// Windows can briefly hold tempdir handles after session.dispose(); retry a few times.
 		for (let attempt = 0; attempt < 5; attempt++) {
 			try {
@@ -88,8 +80,8 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 		return Settings.isolated({ ...BASE_SETTINGS, ...extraSettings });
 	}
 
-	function bashTool(target?: AgentSession) {
-		const bash = (target ?? session).getToolByName("bash");
+	function bashTool() {
+		const bash = session.getToolByName("bash");
 		if (!bash) throw new Error("Expected bash tool");
 		return bash;
 	}
@@ -108,27 +100,16 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 	it("engine posture allow lets unruled calls through even with always-ask mode", async () => {
 		// Pre-engine: always-ask prompts (no UI) and this rejects. Post-engine:
 		// the explicitly configured permissions.default: allow posture wins.
-		// The session carries the same posture (BashTool.approval echoes the
-		// session's engine decision — at runtime context and session settings
-		// are the same object), so the tool-level decision is allow too.
-		const modeSession = await createBashSession({ "permissions.default": "allow" });
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask", "permissions.default": "allow" });
-		const result = await bashTool(modeSession).execute(
-			"posture-allow",
-			{ command: "echo ok" },
-			undefined,
-			undefined,
-			{
-				settings,
-			} as AgentToolContext,
-		);
+		const result = await bashTool().execute("posture-allow", { command: "echo ok" }, undefined, undefined, {
+			settings,
+		} as AgentToolContext);
 		expect(textOf(result)).toContain("ok");
 	});
 
 	it("legacy yolo mode still maps to allow posture", async () => {
-		const modeSession = await createBashSession({ "tools.approvalMode": "yolo" });
 		const settings = approvalSettings({ "tools.approvalMode": "yolo" });
-		const result = await bashTool(modeSession).execute("yolo-legacy", { command: "echo ok" }, undefined, undefined, {
+		const result = await bashTool().execute("yolo-legacy", { command: "echo ok" }, undefined, undefined, {
 			settings,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("ok");
