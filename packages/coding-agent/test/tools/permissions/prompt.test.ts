@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionUIContext, PermissionDialogRequest } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type {
 	EngineContext,
 	EngineDecision,
@@ -14,6 +14,7 @@ import {
 	renderAllowSuggestion,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/prompt";
 import { normalizeRule, ruleFiles } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
+import type { Suggestion } from "@oh-my-pi/pi-coding-agent/tools/permissions/suggest";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 
@@ -277,6 +278,134 @@ describe("promptForDecision", () => {
 		const res = await promptForDecision(ui, "bash", { command: "echo a" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("allow");
 		expect(dialogCalls).toBe(1);
+	});
+});
+
+describe("promptForDecision with a suggestionsProvider", () => {
+	const allowSuggestion: Suggestion = {
+		rule: { id: "s-allow", tool: "bash", match: { command: "git status -s" }, action: "allow", reason: "read-only" },
+		rationale: "read-only",
+	};
+	const denySuggestion: Suggestion = {
+		rule: { id: "s-deny", tool: "bash", match: { command: "git push" }, action: "deny", reason: "risky" },
+		rationale: "risky",
+	};
+
+	function capturingDialogUi(captured: { request?: PermissionDialogRequest }, pickIndex: number | undefined) {
+		return {
+			...noopUi(),
+			showPermissionDialog: async (request: PermissionDialogRequest) => {
+				captured.request = request;
+				return pickIndex;
+			},
+		} as unknown as ExtensionUIContext;
+	}
+
+	it("fires the provider per pending unit and passes a suggestions promise to the dialog", async () => {
+		const captured: { request?: PermissionDialogRequest } = {};
+		const ui = capturingDialogUi(captured, 0); // "Allow once" for both units
+		const firedPieces: string[] = [];
+		const provider = async (piece: string): Promise<Suggestion[]> => {
+			firedPieces.push(piece);
+			return [allowSuggestion];
+		};
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		expect(firedPieces).toEqual(["echo a", "echo b"]);
+		expect(captured.request?.suggestions).toBeDefined();
+		const options = await captured.request!.suggestions!;
+		expect(options).toHaveLength(1);
+		expect(options[0]?.label).toContain("Allow bash");
+		expect(options[0]?.description).toContain("git status -s");
+	});
+
+	it("picking a suggested allow option remembers its rule", async () => {
+		const home = tempHome();
+		const captured: { request?: PermissionDialogRequest } = {};
+		const ui = {
+			...noopUi(),
+			showPermissionDialog: async (request: PermissionDialogRequest) => {
+				captured.request = request;
+				// 4 base options, then the appended suggestion — index 4.
+				return 4;
+			},
+		} as unknown as ExtensionUIContext;
+		const provider = async (): Promise<Suggestion[]> => [allowSuggestion];
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const ctx = fakeCtx(home);
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, ctx, {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		expect(res.remembered?.id).toBe("s-allow");
+		const file = ruleFiles(ctx.cwd, home).dynamic;
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		expect(doc.rules.some(r => r.id === "s-allow")).toBe(true);
+	});
+
+	it("picking a suggested deny option resolves to deny and remembers it", async () => {
+		const home = tempHome();
+		const captured: { request?: PermissionDialogRequest } = {};
+		const ui = {
+			...noopUi(),
+			showPermissionDialog: async (request: PermissionDialogRequest) => {
+				captured.request = request;
+				return 4;
+			},
+		} as unknown as ExtensionUIContext;
+		const provider = async (): Promise<Suggestion[]> => [denySuggestion];
+		const decision = fakeDecision({ pieces: [pendingPiece("git push")] });
+		const ctx = fakeCtx(home);
+		const res = await promptForDecision(ui, "bash", { command: "git push" }, decision, ctx, {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("deny");
+		expect(res.remembered?.id).toBe("s-deny");
+		const file = ruleFiles(ctx.cwd, home).dynamic;
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		expect(doc.rules.some(r => r.id === "s-deny")).toBe(true);
+	});
+
+	it("provider failure degrades to the base options", async () => {
+		const captured: { request?: PermissionDialogRequest } = {};
+		const ui = capturingDialogUi(captured, 0);
+		const provider = async (): Promise<Suggestion[]> => {
+			throw new Error("provider down");
+		};
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		expect(await captured.request!.suggestions!).toEqual([]);
+	});
+
+	it("does not fire the provider for forced prompts", async () => {
+		const captured: { request?: PermissionDialogRequest } = {};
+		const ui = capturingDialogUi(captured, 0);
+		const provider = vi.fn(async (): Promise<Suggestion[]> => []);
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a")] });
+		await promptForDecision(ui, "bash", { command: "echo a" }, decision, fakeCtx(tempHome()), {
+			includeCandidates: false,
+			suggestionsProvider: provider,
+		});
+		expect(provider).not.toHaveBeenCalled();
+		expect(captured.request?.suggestions).toBeUndefined();
+	});
+
+	it("an appended option index maps back to the suggestion label", async () => {
+		const captured: { request?: PermissionDialogRequest } = {};
+		const ui = capturingDialogUi(captured, 4);
+		const provider = async (): Promise<Suggestion[]> => [allowSuggestion];
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		expect(res.remembered?.id).toBe("s-allow");
 	});
 });
 

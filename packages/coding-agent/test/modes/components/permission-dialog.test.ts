@@ -1,6 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import type { PermissionDialogOption } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { PermissionDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/permission-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { setKeybindings } from "@oh-my-pi/pi-tui";
@@ -103,5 +104,67 @@ describe("PermissionDialogComponent", () => {
 		component.handleInput("j");
 		component.handleInput(ENTER);
 		expect(selected).toEqual([1]);
+	});
+
+	it("shows a spinner row while suggestions are pending and appends them on settle", async () => {
+		const selected: number[] = [];
+		const deferred = Promise.withResolvers<PermissionDialogOption[]>();
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }],
+			index => selected.push(index),
+			() => {},
+			{ suggestions: deferred.promise },
+		);
+		expect(render(component)).toContain("Suggesting rules…");
+		deferred.resolve([{ label: "Allow bash: git push", description: "action: allow" }]);
+		await deferred.promise;
+		// Flush the component's .then chain.
+		await Bun.sleep(0);
+		const out = render(component);
+		expect(out).not.toContain("Suggesting rules…");
+		expect(out).toContain("2. Allow bash: git push");
+		component.handleInput("j");
+		component.handleInput(ENTER);
+		expect(selected).toEqual([1]);
+	});
+
+	it("drops suggestions that resolve after the user already chose", async () => {
+		const deferred = Promise.withResolvers<PermissionDialogOption[]>();
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }],
+			() => {},
+			() => {},
+			{ suggestions: deferred.promise },
+		);
+		component.handleInput(ENTER);
+		deferred.resolve([{ label: "Allow bash: git push" }]);
+		await deferred.promise;
+		await Bun.sleep(0);
+		const out = render(component);
+		expect(out).toContain("1. Allow once");
+		expect(out).not.toContain("Allow bash: git push");
+		expect(out).not.toContain("Suggesting rules…");
+	});
+
+	it("removes the spinner row when the suggestion promise rejects", async () => {
+		const deferred = Promise.withResolvers<PermissionDialogOption[]>();
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }],
+			() => {},
+			() => {},
+			{ suggestions: deferred.promise },
+		);
+		expect(render(component)).toContain("Suggesting rules…");
+		deferred.reject(new Error("provider down"));
+		await Bun.sleep(0);
+		const out = render(component);
+		expect(out).not.toContain("Suggesting rules…");
+		expect(out).toContain("1. Allow once");
 	});
 });

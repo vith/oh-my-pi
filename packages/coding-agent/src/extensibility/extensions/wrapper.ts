@@ -16,6 +16,7 @@ import { type ApprovalMode, formatApprovalPrompt, truncateForPrompt } from "../.
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { type EngineContext, type EngineDecision, evaluatePermission } from "../../tools/permissions/engine";
 import { type PromptResolution, promptForDecision, renderAllowSuggestion } from "../../tools/permissions/prompt";
+import { createSuggestionProvider } from "../../tools/permissions/suggest";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -366,13 +367,24 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
 					: basePrompt;
+			const includeCandidates = pendingSafetyChecks.length === 0;
+			// Task 11 (§5.3): LLM rule suggestions ride on the session's active
+			// model. Without a registry/model handle the gate degrades to
+			// candidates-only (the provider also self-gates on
+			// `permissions.llmSuggestions`). Provider safety-check prompts never
+			// get suggestions — they are stronger than any rule.
+			const suggestionsProvider =
+				includeCandidates && context?.modelRegistry !== undefined
+					? createSuggestionProvider(engineCtx, context.modelRegistry, sessionId || undefined, context.model)
+					: undefined;
 			let resolution: PromptResolution;
 			try {
 				resolution = await promptForDecision(uiContext, this.tool.name, resolvedArgs, decision, engineCtx, {
 					title: safetyPrompt,
 					// Provider safety checks are stronger than any rule: the dialog
 					// shows without candidates and only offers Approve/Deny.
-					includeCandidates: pendingSafetyChecks.length === 0,
+					includeCandidates,
+					...(suggestionsProvider !== undefined ? { suggestionsProvider } : {}),
 				});
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");

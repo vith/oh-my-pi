@@ -12,9 +12,14 @@
  */
 import * as path from "node:path";
 import { YAML } from "bun";
-import type { ExtensionUIContext, PermissionDialogRequest } from "../../extensibility/extensions/types";
+import type {
+	ExtensionUIContext,
+	PermissionDialogOption,
+	PermissionDialogRequest,
+} from "../../extensibility/extensions/types";
 import { type EngineContext, type EngineDecision, evaluateBashCommand, type PieceEvaluation } from "./engine";
 import { type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
+import type { Suggestion } from "./suggest";
 
 /** A selectable rule candidate: the label the user sees, the YAML preview, and the rule to write. */
 export interface CandidateRule {
@@ -37,6 +42,13 @@ export interface PromptForDecisionOptions {
 	 * remember options (provider safety-check forced prompts).
 	 */
 	includeCandidates?: boolean;
+	/**
+	 * Task 11 (§5.3): optional LLM rule-suggestion provider. Per pending unit
+	 * the flow fires it while the dialog is shown; suggestions append as extra
+	 * options behind the dialog's spinner. Any provider failure degrades to
+	 * candidates-only. Never called for forced prompts (`includeCandidates: false`).
+	 */
+	suggestionsProvider?: (piece: string) => Promise<Suggestion[]>;
 }
 
 const ALLOW_ONCE = "Allow once";
@@ -235,21 +247,63 @@ function dialogLines(decision: EngineDecision, pieces: PieceEvaluation[] | undef
 	return lines;
 }
 
+/** The dialog label for a suggestion: `Allow bash: git push`. */
+function suggestionLabel(suggestion: Suggestion): string {
+	const verb = suggestion.rule.action === "allow" ? "Allow" : "Deny";
+	const matchText = Object.values(suggestion.rule.match).join(", ");
+	return `${verb} ${suggestion.rule.tool}: ${matchText}`;
+}
+
+/** The pending-call text handed to the suggestions provider for one prompt unit. */
+function unitPieceText(toolName: string, unitArgs: unknown): string {
+	if (toolName === "bash") {
+		const command = argString(unitArgs, "command");
+		if (command !== undefined) return command;
+	}
+	return `${toolName} ${JSON.stringify(unitArgs)}`;
+}
+
+/** Shape the provider result for both the dialog options and label routing. */
+function resolveSuggestions(suggestions: Suggestion[]): {
+	options: PermissionDialogOption[];
+	byLabel: Map<string, Suggestion>;
+} {
+	const seen = new Set<string>();
+	const options: PermissionDialogOption[] = [];
+	const byLabel = new Map<string, Suggestion>();
+	for (const suggestion of suggestions) {
+		const label = suggestionLabel(suggestion);
+		if (seen.has(label)) continue; // duplicate labels would be unroutable
+		seen.add(label);
+		options.push({ label, description: renderCandidateYaml(suggestion.rule) });
+		byLabel.set(label, suggestion);
+	}
+	return { options, byLabel };
+}
+
 /** Present an option list, mapping the choice back to its label. Cancel → undefined. */
 async function chooseLabel(
 	ui: ExtensionUIContext,
 	title: string,
 	options: string[],
 	lines?: readonly string[],
+	suggestions?: Promise<PermissionDialogOption[]>,
 ): Promise<string | undefined> {
 	if (ui.showPermissionDialog) {
 		const request: PermissionDialogRequest = {
 			title,
 			...((lines?.length ?? 0) > 0 ? { lines } : {}),
 			options: options.map(label => ({ label })),
+			...(suggestions !== undefined ? { suggestions } : {}),
 		};
 		const index = await ui.showPermissionDialog(request);
-		return index === undefined ? undefined : options[index];
+		if (index === undefined) return undefined;
+		const base = options[index];
+		if (base !== undefined) return base;
+		// The picked option is one the dialog appended after it opened.
+		if (suggestions === undefined) return undefined;
+		const appended = await suggestions;
+		return appended[index - options.length]?.label;
 	}
 	return ui.select(title, [...options]);
 }
@@ -302,11 +356,21 @@ async function promptUnit(
 	}
 
 	const candidates = buildCandidates(toolName, unitArgs, pieces);
+	// The forced-prompt branch above already returned, so only candidate
+	// dialogs reach here; the provider fires once per pending unit.
+	const suggestionsPromise =
+		opts.suggestionsProvider !== undefined
+			? opts
+					.suggestionsProvider(unitPieceText(toolName, unitArgs))
+					.then(resolveSuggestions)
+					.catch(() => ({ options: [], byLabel: new Map<string, Suggestion>() }))
+			: undefined;
 	const chosen = await chooseLabel(
 		ui,
 		title,
 		[ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER],
 		dialogLines(decision, pieces),
+		suggestionsPromise?.then(result => result.options),
 	);
 	switch (chosen) {
 		case ALLOW_ONCE:
@@ -334,9 +398,18 @@ async function promptUnit(
 			await writeRememberedRule(rule.rule, ctx);
 			return { policy: "deny", remembered: rule.rule };
 		}
-		default:
-			// Cancelled or an unrecognized label — fail closed.
+		default: {
+			// A suggestion option picked from the dialog: remember its rule and
+			// resolve with its action. Unknown labels still fail closed.
+			if (chosen !== undefined && suggestionsPromise !== undefined) {
+				const picked = (await suggestionsPromise).byLabel.get(chosen);
+				if (picked !== undefined) {
+					await writeRememberedRule(picked.rule, ctx);
+					return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
+				}
+			}
 			return { policy: "deny" };
+		}
 	}
 }
 

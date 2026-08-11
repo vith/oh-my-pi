@@ -960,7 +960,10 @@ export class ExtensionUiController {
 				request.options,
 				index => settle(index),
 				() => settle(undefined),
-				{ maxVisible },
+				{
+					maxVisible,
+					...(request.suggestions !== undefined ? { suggestions: request.suggestions, ui: this.ctx.ui } : {}),
+				},
 			);
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.permissionDialog);

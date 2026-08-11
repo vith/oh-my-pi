@@ -4,16 +4,18 @@
  * descriptions, j/k/enter/esc navigation. Returns the chosen option index or
  * undefined on cancel.
  *
- * The options list is mutable (`addOption`): the LLM-suggestion flow (Task 11)
- * appends suggested rules behind a spinner after the dialog is already shown.
+ * The options list is mutable (`addOption`): the LLM-suggestion flow (Task 11,
+ * spec §5.3) appends suggested rules behind a spinner after the dialog is
+ * already shown. Suggestions that resolve after the user chose are dropped.
  */
-import { Container, Markdown, matchesKey, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { Container, Loader, Markdown, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import type { PermissionDialogOption } from "../../extensibility/extensions";
 import { getMarkdownTheme, theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import { DynamicBorder } from "./dynamic-border";
 
 const DEFAULT_HELP_TEXT = "j/k navigate  enter select  esc cancel";
+const SUGGESTING_LABEL = "Suggesting rules…";
 
 export class PermissionDialogComponent extends Container {
 	#options: PermissionDialogOption[];
@@ -23,6 +25,9 @@ export class PermissionDialogComponent extends Container {
 	#maxVisible: number;
 	#listContainer: Container;
 	#lastRenderWidth: number | undefined;
+	/** Set once the user chose or the dialog was dismissed; late suggestions are dropped. */
+	#settled = false;
+	#suggestionRow: Loader | Text | undefined;
 
 	constructor(
 		title: string,
@@ -30,7 +35,7 @@ export class PermissionDialogComponent extends Container {
 		options: readonly PermissionDialogOption[],
 		onSelect: (index: number) => void,
 		onCancel: () => void,
-		opts?: { maxVisible?: number; helpText?: string },
+		opts?: { maxVisible?: number; helpText?: string; suggestions?: Promise<PermissionDialogOption[]>; ui?: TUI },
 	) {
 		super();
 		this.#options = [...options];
@@ -50,12 +55,52 @@ export class PermissionDialogComponent extends Container {
 		}
 		this.#listContainer = new Container();
 		this.addChild(this.#listContainer);
+		if (opts?.suggestions !== undefined) {
+			this.#attachSuggestions(opts.suggestions, opts.ui);
+		}
 		this.addChild(new Spacer(1));
 		this.addChild(new Text(theme.fg("dim", opts?.helpText ?? DEFAULT_HELP_TEXT), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 
 		this.#renderList();
+	}
+
+	/** Watch the suggestion promise: spinner row while pending, append on settle, drop after choice. */
+	#attachSuggestions(suggestions: Promise<PermissionDialogOption[]>, ui: TUI | undefined): void {
+		this.#suggestionRow =
+			ui !== undefined
+				? new Loader(
+						ui,
+						spinner => theme.fg("accent", spinner),
+						text => theme.fg("muted", text),
+						SUGGESTING_LABEL,
+					)
+				: new Text(theme.fg("muted", `  ${SUGGESTING_LABEL}`), 1, 0);
+		this.addChild(this.#suggestionRow);
+		void suggestions
+			.then(appended => {
+				this.#removeSuggestionRow();
+				// Suggestions that resolve after the user chose are dropped.
+				if (this.#settled) return;
+				for (const option of appended) {
+					this.addOption(option);
+				}
+			})
+			.catch(() => {
+				// Provider failure degrades silently to candidates-only.
+				this.#removeSuggestionRow();
+			});
+	}
+
+	#removeSuggestionRow(): void {
+		if (this.#suggestionRow === undefined) return;
+		const row = this.#suggestionRow;
+		this.#suggestionRow = undefined;
+		if (row instanceof Loader) {
+			row.dispose();
+		}
+		this.removeChild(row);
 	}
 
 	/** Append an option and re-render (Task 11: LLM suggestions arrive late). */
@@ -66,6 +111,7 @@ export class PermissionDialogComponent extends Container {
 
 	handleInput(keyData: string): void {
 		if (matchesSelectCancel(keyData)) {
+			this.#settled = true;
 			this.#onCancel();
 			return;
 		}
@@ -79,9 +125,19 @@ export class PermissionDialogComponent extends Container {
 		}
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			if (this.#options.length > 0) {
+				this.#settled = true;
 				this.#onSelect(Math.min(this.#selectedIndex, this.#options.length - 1));
 			}
 		}
+	}
+
+	override dispose(): void {
+		this.#settled = true;
+		if (this.#suggestionRow instanceof Loader) {
+			this.#suggestionRow.dispose();
+		}
+		this.#suggestionRow = undefined;
+		super.dispose();
 	}
 
 	#moveSelection(delta: number): void {

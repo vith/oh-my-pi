@@ -133,6 +133,12 @@ export interface PermissionDialogRequest {
 	/** Context lines shown under the title (decision context, per-piece status list). */
 	lines?: readonly string[];
 	options: readonly PermissionDialogOption[];
+	/**
+	 * Task 11 (§5.3): asynchronously appended LLM-suggested rules. The dialog
+	 * shows a spinner while the promise is pending and appends the options when
+	 * it settles; suggestions that resolve after the user chose are dropped.
+	 */
+	suggestions?: Promise<PermissionDialogOption[]>;
 }
 
 export interface ExtensionAskDialogOption {
