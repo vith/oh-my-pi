@@ -3476,16 +3476,11 @@ export const SETTINGS_SCHEMA = {
 			description: "Automatically background long-running bash commands and deliver the result later",
 		},
 	},
+	// Legacy bash approval patterns — migrated to permissions rules by /permissions migrate.
+	// Config-file-only (no `ui`): superseded by the permission engine's legacy layer.
 	"bash.patterns": {
 		type: "array",
 		default: [],
-		ui: {
-			tab: "shell",
-			group: "Bash",
-			label: "Bash Approval Patterns",
-			description:
-				"Ordered bash command approval rules. Each item has match and approval fields; only '*' wildcards are supported.",
-		},
 	},
 
 	// Bash interceptor
@@ -3656,53 +3651,23 @@ export const SETTINGS_SCHEMA = {
 	// Tools
 	// ────────────────────────────────────────────────────────────────────────
 
-	// Tool approval policies
+	// Legacy tool approval policies — migrated to permissions rules by /permissions migrate.
+	// Config-file-only (no `ui`): honored via the permission engine's legacy layer.
 	"tools.approval": {
 		type: "record",
 		default: {},
-		ui: {
-			tab: "interaction",
-			group: "Approvals",
-			label: "Tool Approval Policies",
-			description:
-				"Per-tool approval policies. Set to 'allow' to auto-approve, 'prompt' to require confirmation, or 'deny' to block. Overrides are honored in every approval mode.",
-		},
 	},
 
 	// Default tool approval mode (interaction tab, but governs the tool wrapper).
 	//   "always-ask" — auto-approves read-tier tools only; prompts for write/exec.
 	//   "write"      — auto-approves read and write-tier tools; prompts for exec.
 	//   "yolo"       — auto-approves every tier.
+	// Legacy; mapped onto the permission engine's posture (yolo→allow, write/always-ask→prompt).
+	// Config-file-only (no `ui`): superseded by `permissions.default`; migrate with /permissions migrate.
 	"tools.approvalMode": {
 		type: "enum",
 		values: ["always-ask", "write", "yolo"] as const,
 		default: "yolo",
-		ui: {
-			tab: "interaction",
-			group: "Approvals",
-			label: "Tool Approval",
-			description:
-				"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
-			options: [
-				{
-					value: "always-ask",
-					label: "Always ask",
-					description: "Auto-approve read-only tools; require confirmation for write and exec tools.",
-				},
-				{
-					value: "write",
-					label: "Write",
-					description:
-						"Auto-approve read-only and write tools; require confirmation for exec tools such as bash, eval, browser, and task.",
-				},
-				{
-					value: "yolo",
-					label: "Yolo",
-					description:
-						"Auto-approve read, write, and exec tools. User policy can still require confirmation or block calls.",
-				},
-			],
-		},
 	},
 
 	// Default posture for the permission engine (interaction tab, governs every tool gate).
