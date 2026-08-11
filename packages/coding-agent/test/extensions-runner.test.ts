@@ -1792,8 +1792,10 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_resolved", approved: true },
 			]);
 			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
+				"Allow once",
+				"Allow & remember…",
 				"Deny",
+				"Deny & remember…",
 			]);
 			delete globalState.__approvalEvents;
 		});

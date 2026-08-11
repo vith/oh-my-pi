@@ -120,6 +120,21 @@ export interface ExtensionUISelectOption {
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
 
+/** One numbered option in the permission approval dialog. */
+export interface PermissionDialogOption {
+	label: string;
+	/** Secondary lines shown under the label (e.g. the YAML preview the option writes). */
+	description?: string;
+}
+
+/** Content of the permission approval dialog. */
+export interface PermissionDialogRequest {
+	title: string;
+	/** Context lines shown under the title (decision context, per-piece status list). */
+	lines?: readonly string[];
+	options: readonly PermissionDialogOption[];
+}
+
 export interface ExtensionAskDialogOption {
 	label: string;
 	description?: string;
@@ -241,6 +256,17 @@ export interface ExtensionUIContext {
 
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined>;
+
+	/**
+	 * Show the permission approval dialog (rule candidates, YAML previews, piece
+	 * status) and return the chosen option index, or `undefined` on cancel.
+	 * Optional: callers without the dialog fall back to `select` with the option
+	 * labels.
+	 */
+	showPermissionDialog?(
+		request: PermissionDialogRequest,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<number | undefined>;
 
 	/** Show the rich ask dialog when the interactive TUI surface is available. */
 	askDialog?(

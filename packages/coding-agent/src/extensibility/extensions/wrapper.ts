@@ -15,6 +15,7 @@ import type { Theme } from "../../modes/theme/theme";
 import { type ApprovalMode, formatApprovalPrompt, truncateForPrompt } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { type EngineContext, type EngineDecision, evaluatePermission } from "../../tools/permissions/engine";
+import { type PromptResolution, promptForDecision, renderAllowSuggestion } from "../../tools/permissions/prompt";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -157,15 +158,21 @@ function autoApproveSettings(base: Settings): Pick<Settings, "get" | "isConfigur
  * Deny error for the approval gate. True user-policy denies keep the
  * remediation hint naming the legacy settings key; every other deny (tool
  * declarations, curated critical patterns, file rules) names the engine's
- * reason so the blocker is actionable (plan ruling, round 2).
+ * reason so the blocker is actionable (plan ruling, round 2). Rule/curated/
+ * posture denies also carry the exact allow-rule YAML (spec §5.2) so the
+ * model can negotiate in chat; tool-declared and legacy user-policy denies
+ * skip it because a dynamic rule cannot override those layers.
  */
-function blockedByPolicyError(toolName: string, decision: EngineDecision): Error {
-	return new Error(
+function blockedByPolicyError(toolName: string, decision: EngineDecision, args?: unknown): Error {
+	const base =
 		decision.source === "user"
 			? `Tool "${toolName}" is blocked by user policy.\n` +
-					`To allow: remove "tools.approval.${toolName}: deny" from config.`
-			: `Tool "${toolName}" is blocked: ${decision.reason ?? "denied by permission policy"}`,
-	);
+				`To allow: remove "tools.approval.${toolName}: deny" from config.`
+			: `Tool "${toolName}" is blocked: ${decision.reason ?? "denied by permission policy"}`;
+	if (args !== undefined && decision.source !== "tool" && decision.source !== "user") {
+		return new Error(`${base}\n${renderAllowSuggestion(toolName, args)}`);
+	}
+	return new Error(base);
 }
 
 /**
@@ -239,7 +246,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const engineCtx = this.#engineContext(context, settings);
 		const shortCircuit = evaluatePermission(this.tool, approvalArgs(params, context), engineCtx);
 		if (shortCircuit.policy === "deny") {
-			throw blockedByPolicyError(this.tool.name, shortCircuit);
+			throw blockedByPolicyError(this.tool.name, shortCircuit, approvalArgs(params, context));
 		}
 
 		// 1. Emit tool_call event first - extensions can block execution or revise the input the tool
@@ -286,7 +293,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const decision = evaluatePermission(this.tool, resolvedArgs, engineCtx);
 		context?.xdevTierResolved?.(decision.tier);
 		if (decision.policy === "deny") {
-			throw blockedByPolicyError(this.tool.name, decision);
+			throw blockedByPolicyError(this.tool.name, decision, resolvedArgs);
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// An xd:// device dispatch already cleared the write tool's outer gate at
@@ -358,16 +365,23 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				pendingSafetyChecks.length > 0
 					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
 					: basePrompt;
-			let choice: string | undefined;
+			let resolution: PromptResolution;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				resolution = await promptForDecision(uiContext, this.tool.name, resolvedArgs, decision, engineCtx, {
+					title: safetyPrompt,
+					// Provider safety checks are stronger than any rule: the dialog
+					// shows without candidates and only offers Approve/Deny.
+					includeCandidates: pendingSafetyChecks.length === 0,
+				});
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				throw err;
 			}
-			const approved = choice === "Approve";
-			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
-			if (!approved) {
+			await emitApprovalResolved(
+				resolution.policy === "allow",
+				resolution.policy === "deny" ? "denied by user" : undefined,
+			);
+			if (resolution.policy === "deny") {
 				throw new Error(`Tool call denied by user: ${this.tool.name}`);
 			}
 			if (pendingSafetyChecks.length > 0) {
