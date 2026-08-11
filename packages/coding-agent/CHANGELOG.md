@@ -14,6 +14,7 @@
 ### Changed
 
 - Legacy `tools.approvalMode`, `tools.approval.<tool>`, and `bash.patterns` settings now map onto the permission engine (posture, legacy user policy, and legacy rule layer) instead of driving the old approval path; `/permissions migrate` rewrites them into rule files.
+- Bash permission evaluation now resolves pipelines and `$(…)`/backtick substitutions recursively through the rule pipeline (grammar-level, via the brush parser): an allow rule on the outer command stands only when every sub-command also passes the filter. Redirects and interpreter-reinterpreting options (`-c`/`-e`, PowerShell `-Command`, cmd.exe `/c` `/k`) still degrade an allow to a prompt.
 
 ### Fixed
 

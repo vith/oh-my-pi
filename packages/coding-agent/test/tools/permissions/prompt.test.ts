@@ -86,12 +86,15 @@ describe("buildCandidates", () => {
 		expect(labels).toContain("Tool: bash always");
 	});
 
-	it("offers no remember candidates for shell-control bash commands", () => {
-		// Allow rules on shell-control commands degrade to a prompt (engine
-		// ruling R1) and whole-command matches never see per-piece evaluation,
-		// so exact/pattern/tool remember rules can never suppress the prompt.
+	it("offers no remember candidates for unanalyzable shell-control bash commands", () => {
+		// Allow rules on redirect/-c-reinterpreting commands degrade to a
+		// prompt (engine ruling R1) and whole-command matches never see
+		// per-piece evaluation, so exact/pattern/tool remember rules can never
+		// suppress the prompt. Analyzable pipelines/substitutions keep their
+		// candidates — a remembered rule can suppress them once every
+		// sub-command passes the filter.
 		for (const command of [
-			"git log | head -5",
+			"git log > out",
 			"python3 -c'x'", // concatenated -c form (guard-true on its own)
 			"python3 -c 'print(1)'", // space-separated -c with shell chars in the quoted arg
 		]) {
@@ -103,6 +106,10 @@ describe("buildCandidates", () => {
 		expect(control.some(candidate => candidate.rule.match.command === "git status -s")).toBe(true);
 		expect(control.some(candidate => candidate.rule.match.command === "git *")).toBe(true);
 		expect(control.some(candidate => candidate.rule.match.arg === "*")).toBe(true);
+		// A pipeline is analyzable: its candidates come back too.
+		const piped = buildCandidates("bash", { command: "git log | head -5" });
+		expect(piped.some(candidate => candidate.rule.match.command === "git log | head -5")).toBe(true);
+		expect(piped.some(candidate => candidate.rule.match.command === "git *")).toBe(true);
 	});
 
 	it("file tools: exact path and parent glob", () => {
@@ -298,7 +305,7 @@ describe("promptForDecision", () => {
 		expect(calls[0]).toEqual(["Approve", "Deny"]);
 	});
 
-	it("drops the remember options with a note for shell-control bash commands", async () => {
+	it("drops the remember options with a note for unanalyzable shell-control bash commands", async () => {
 		const captured: { request?: PermissionDialogRequest } = {};
 		const ui = {
 			...noopUi(),
@@ -307,8 +314,16 @@ describe("promptForDecision", () => {
 				return 0; // "Allow once"
 			},
 		} as unknown as ExtensionUIContext;
-		const decision = fakeDecision({ pieces: [pendingPiece("git status | sh")] });
-		const res = await promptForDecision(ui, "bash", { command: "git status | sh" }, decision, fakeCtx(tempHome()));
+		// A redirect cannot be suppressed by a remembered rule (R1); an
+		// analyzable pipeline keeps its remember options.
+		const decision = fakeDecision({ pieces: [pendingPiece("git status < seed")] });
+		const res = await promptForDecision(
+			ui,
+			"bash",
+			{ command: "git status < seed" },
+			decision,
+			fakeCtx(tempHome()),
+		);
 		expect(res.policy).toBe("allow");
 		expect(captured.request?.options.map(option => option.label)).toEqual(["Allow once", "Deny"]);
 		expect(captured.request?.lines?.some(line => line.includes("Remembered rules cannot suppress"))).toBe(true);

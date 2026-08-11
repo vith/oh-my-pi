@@ -25,6 +25,7 @@ import {
 	type PieceEvaluation,
 } from "./engine";
 import { type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
+import { extractSubCommands } from "./split";
 import type { Suggestion } from "./suggest";
 
 /** A selectable rule candidate: the label the user sees, the YAML preview, and the rule to write. */
@@ -69,12 +70,16 @@ const APPROVE = "Approve";
  * (ruling R1), so a remembered rule would never suppress this prompt.
  */
 const BASH_SHELL_CONTROL_NOTE =
-	"Remembered rules cannot suppress this prompt: the command uses shell control (pipeline, redirect, substitution, or -c/-e reinterpretation).";
+	"Remembered rules cannot suppress this prompt: the command uses shell control that rules cannot analyze (redirect, -c/-e/-Command//c reinterpretation, or an unanalyzable construct).";
 
-/** Whether the prompt unit's bash command carries shell control (remember rules cannot suppress it). */
+/** Whether the prompt unit's bash command carries unanalyzable shell control (remember rules cannot suppress it). */
 function bashRememberDisabled(args: unknown): boolean {
 	const command = argString(args, "command");
-	return command !== undefined && command.length > 0 && hasBashApprovalShellControl(command);
+	if (command === undefined || command.length === 0) return false;
+	// Residue control (redirects, interpreter reinterpreting options) plus
+	// constructs extraction cannot analyze degrade remember options; analyzable
+	// pipelines/substitutions keep them (the engine evaluates their sub-commands).
+	return hasBashApprovalShellControl(command) || extractSubCommands(command) === null;
 }
 
 /** Legacy fake-UI label from the pre-dialog binary prompt, tolerated for compatibility. */
