@@ -45,6 +45,11 @@ function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): T
 	};
 }
 
+/** Yolo-mode context for bridge tests that exercise tool mechanics, not the approval gate. */
+const bridgeGateContext = {
+	settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
+} as AgentToolContext;
+
 /**
  * An `ExtensionRunner` that intercepts nothing but records that it ran.
  *
@@ -346,6 +351,9 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 			cwd,
 			tools: new Map<string, Tool>(),
 			getEditReplaceTool: () => editTool,
+			// The engine's default posture for settings-less contexts is prompt;
+			// this test exercises bridge resolution, not the approval gate.
+			getToolContext: () => bridgeGateContext,
 		});
 		const result = await withheld.piEdit({
 			toolCallId: "e1",
@@ -382,7 +390,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		const granted = new Map<string, Tool>([["edit", advisorEdit]]);
 
 		const bridged = bridgeToolMap(granted, () => createBridgeEditTool(session, passthroughRunner()));
-		const handlers = new CursorExecHandlers({ cwd, tools: bridged });
+		const handlers = new CursorExecHandlers({ cwd, tools: bridged, getToolContext: () => bridgeGateContext });
 		const result = await handlers.piEdit({
 			toolCallId: "e3",
 			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
@@ -412,6 +420,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 			cwd,
 			tools: new Map<string, Tool>([["edit", configuredEdit]]),
 			getEditReplaceTool: () => createBridgeEditTool(session, passthroughRunner()),
+			getToolContext: () => bridgeGateContext,
 		});
 		const result = await handlers.piEdit({
 			toolCallId: "e5",

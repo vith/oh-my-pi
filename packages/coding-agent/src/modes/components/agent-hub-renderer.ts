@@ -5,6 +5,7 @@ import { getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { type AgentRef, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { parseThinkingLevel } from "../../thinking";
+import { pendingApprovalsForSession } from "../../tools/permissions/subagent";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import type { ObservableSession } from "../session-observer-registry";
 import { theme } from "../theme/theme";
@@ -39,8 +40,13 @@ export function clampHubLine(line: string, width: number): string {
 	return truncateToWidth(line.replace(/[\r\n]+/g, " "), Math.max(1, width), Ellipsis.Omit);
 }
 
-/** Status glyph, colored per theme status conventions. The title-line counts spell out the words. */
-export function statusGlyph(status: AgentRef["status"]): string {
+/**
+ * Status glyph, colored per theme status conventions. The title-line counts
+ * spell out the words. A row with parked approvals awaiting an answer always
+ * shows the pending glyph, overriding the status glyph for display only.
+ */
+export function statusGlyph(status: AgentRef["status"], pendingApprovals = 0): string {
+	if (pendingApprovals > 0) return theme.fg("accent", theme.status.pending);
 	switch (status) {
 		case "running":
 			return theme.fg("accent", theme.status.running);
@@ -53,7 +59,8 @@ export function statusGlyph(status: AgentRef["status"]): string {
 	}
 }
 
-export function statusText(status: AgentRef["status"], text: string): string {
+export function statusText(status: AgentRef["status"], text: string, pendingApprovals = 0): string {
+	if (pendingApprovals > 0) return theme.fg("accent", "awaiting approval");
 	switch (status) {
 		case "running":
 			return theme.fg("accent", text);
@@ -64,6 +71,19 @@ export function statusText(status: AgentRef["status"], text: string): string {
 		case "aborted":
 			return theme.fg("error", text);
 	}
+}
+
+/**
+ * Parked approvals awaiting an answer for the ref's live session (0 when
+ * detached). Read at render time, so the roster marker tracks the pending
+ * registry on every paint: the hub re-renders on registry/observer events
+ * and on its 5s age cadence, so a park/resolve that emits no data event
+ * still refreshes within one cadence. Display-only — the ref's status is
+ * untouched, and the header counts keep including the row under its real
+ * status.
+ */
+export function pendingApprovalCount(ref: AgentRef): number {
+	return pendingApprovalsForSession(ref.session?.sessionManager?.getSessionId?.() ?? "").length;
 }
 
 /** Model id + thinking level (`sonnet-4-6 ◒ high`), level colored per theme. */

@@ -8,7 +8,7 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	ToolTier,
+	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -903,9 +903,11 @@ export interface GrepToolOptions {
 
 export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
 	readonly name = "grep";
-	readonly approval = (args: unknown): ToolTier => {
+	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const a = args as { path?: string | string[]; paths?: string | string[] };
-		return toPathList(a.path ?? a.paths).some(pathTargetsSsh) ? "exec" : "read";
+		return toPathList(a.path ?? a.paths).some(pathTargetsSsh)
+			? { tier: "exec", override: true, policy: "prompt", reason: "ssh:// remote target" }
+			: "read";
 	};
 	readonly label = "Grep";
 	readonly loadMode = "discoverable";

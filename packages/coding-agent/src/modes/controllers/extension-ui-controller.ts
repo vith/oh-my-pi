@@ -17,6 +17,7 @@ import type {
 	ExtensionUiComponent,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
+	PermissionDialogRequest,
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
@@ -25,6 +26,7 @@ import { AskDialogComponent, boundPromptTitle } from "../../modes/components/ask
 import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
+import { PermissionDialogComponent } from "../../modes/components/permission-dialog";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -89,6 +91,7 @@ export class ExtensionUiController {
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
+			showPermissionDialog: (request, dialogOptions) => this.showPermissionDialog(request, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setHookStatus(key, text),
@@ -935,6 +938,49 @@ export class ExtensionUiController {
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookSelector = undefined;
+		this.ctx.ui.setFocus(this.ctx.editor);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Show the permission approval dialog (rule candidates, YAML previews, piece
+	 * status list). Queued through the same single-surface dialog queue as
+	 * `showHookSelector`; resolves with the chosen option index, or `undefined`
+	 * when the user cancels.
+	 */
+	showPermissionDialog(
+		request: PermissionDialogRequest,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<number | undefined> {
+		return this.#presentDialog<number>(dialogOptions?.signal, settle => {
+			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
+			this.ctx.permissionDialog = new PermissionDialogComponent(
+				request.title,
+				request.lines ?? [],
+				request.options,
+				index => settle(index),
+				() => settle(undefined),
+				{
+					maxVisible,
+					...(request.suggestions !== undefined ? { suggestions: request.suggestions, ui: this.ctx.ui } : {}),
+				},
+			);
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(this.ctx.permissionDialog);
+			this.ctx.ui.setFocus(this.ctx.permissionDialog);
+			this.ctx.ui.requestRender();
+			return () => this.hidePermissionDialog();
+		});
+	}
+
+	/**
+	 * Hide the permission dialog.
+	 */
+	hidePermissionDialog(): void {
+		this.ctx.permissionDialog?.dispose();
+		this.ctx.editorContainer.clear();
+		this.ctx.editorContainer.addChild(this.ctx.editor);
+		this.ctx.permissionDialog = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
 		this.ctx.ui.requestRender();
 	}

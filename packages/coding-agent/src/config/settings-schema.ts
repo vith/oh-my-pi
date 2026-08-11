@@ -130,6 +130,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	interaction: [
 		"Input",
 		"Approvals",
+		"Permissions",
 		"Notifications",
 		"Speech",
 		"Collab",
@@ -3703,6 +3704,56 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+
+	// Default posture for the permission engine (interaction tab, governs every tool gate).
+	//   "allow"  — auto-approve any call the engine does not deny.
+	//   "prompt" — prompt for any call not allowed by a rule (deny-by-default).
+	//   "deny"   — block any call not explicitly allowed by a rule.
+	"permissions.default": {
+		type: "enum",
+		values: ["allow", "prompt", "deny"] as const,
+		default: "prompt",
+		ui: {
+			tab: "interaction",
+			group: "Permissions",
+			label: "Default Permission Posture",
+			description:
+				"Default posture for tool calls with no matching permission rule. 'Prompt' asks before executing; 'allow' auto-approves; 'deny' blocks.",
+			options: [
+				{
+					value: "allow",
+					label: "Allow",
+					description: "Auto-approve every tool call the engine does not deny.",
+				},
+				{
+					value: "prompt",
+					label: "Prompt",
+					description: "Ask before executing calls that no permission rule allows.",
+				},
+				{
+					value: "deny",
+					label: "Deny",
+					description: "Block calls that no permission rule allows.",
+				},
+			],
+		},
+	},
+
+	// LLM-generated permission rule suggestions (interaction tab).
+	"permissions.llmSuggestions": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Permissions",
+			label: "LLM Rule Suggestions",
+		},
+	},
+
+	// Permission audit log (persisted history of engine decisions).
+	"permissions.audit.enabled": { type: "boolean", default: true },
+
+	"permissions.audit.maxEntries": { type: "number", default: 10000 },
 
 	// Todo tool
 	"todo.enabled": {

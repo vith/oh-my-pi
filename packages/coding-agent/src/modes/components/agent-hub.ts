@@ -56,6 +56,7 @@ import {
 	formatMetrics,
 	formatRoleBadge,
 	modelBadge,
+	pendingApprovalCount,
 	type RosterRender,
 	sanitizeDisplayText,
 	sanitizeLine,
@@ -781,14 +782,16 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			add(theme.bold(theme.fg("accent", label)));
 		};
 
-		add(`${statusGlyph(ref.status)} ${theme.bold(sanitizeDisplayText(ref.displayName || ref.id))}`);
+		add(
+			`${statusGlyph(ref.status, pendingApprovalCount(ref))} ${theme.bold(sanitizeDisplayText(ref.displayName || ref.id))}`,
+		);
 		if (ref.displayName && ref.displayName !== ref.id) add(theme.fg("dim", sanitizeDisplayText(ref.id)));
 		const lifecycleDetails = [
 			metrics ? formatMetricDuration(metrics) : undefined,
 			`active ${formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)))}`,
 		].filter(Boolean);
 		add(
-			`${statusText(ref.status, ref.status)}${theme.fg("dim", `${theme.sep.dot}${lifecycleDetails.join(theme.sep.dot)}`)}`,
+			`${statusText(ref.status, ref.status, pendingApprovalCount(ref))}${theme.fg("dim", `${theme.sep.dot}${lifecycleDetails.join(theme.sep.dot)}`)}`,
 		);
 		const modelDetails: string[] = [];
 		const modelRole = progress?.modelRole ?? ref.history?.modelRole;
@@ -873,7 +876,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				: "";
 		const id = sanitizeDisplayText(ref.id);
 		const styledId = selected ? theme.bold(theme.fg("accent", id)) : theme.bold(id);
-		const fields: string[] = [`${cursor} ${statusGlyph(ref.status)} ${branch}${styledId}`];
+		const fields: string[] = [`${cursor} ${statusGlyph(ref.status, pendingApprovalCount(ref))} ${branch}${styledId}`];
 		if (ref.displayName && ref.displayName !== ref.id) {
 			fields.push(theme.fg("dim", sanitizeDisplayText(ref.displayName)));
 		}

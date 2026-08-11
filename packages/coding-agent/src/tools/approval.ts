@@ -7,6 +7,7 @@
  * - format the generic approval prompt body.
  */
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import type { EngineDecision } from "./permissions/engine";
 
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 
@@ -21,6 +22,12 @@ export interface ResolvedApproval {
 	reason?: string;
 	override: boolean;
 	source?: "tool" | "user" | "mode";
+	/**
+	 * Full engine decision attached by tool approvals that run the engine
+	 * themselves (the bash tool's per-piece analysis, spec §7). Carried
+	 * through so the audit-visible decision keeps piece-level attribution.
+	 */
+	engineDecision?: EngineDecision;
 }
 
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
@@ -41,7 +48,7 @@ const APPROVAL_MODE_MAX_TIER: Record<ApprovalMode, ToolTier> = {
 const DEFAULT_PROMPT_TRUNCATE_CHARS = 2000;
 
 /** Best-effort conversion of an arbitrary user-supplied value to a policy. */
-function normalizePolicy(value: unknown): ApprovalPolicy | undefined {
+export function normalizePolicy(value: unknown): ApprovalPolicy | undefined {
 	if (typeof value !== "string") return undefined;
 	const lowered = value.trim().toLowerCase();
 	return POLICY_VALUES.has(lowered as ApprovalPolicy) ? (lowered as ApprovalPolicy) : undefined;
@@ -61,18 +68,24 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 		const tier = isToolTier(record.tier) ? record.tier : "exec";
 		const reason = typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined;
 		const policy = normalizePolicy(record.policy);
+		const rawEngine = record.engineDecision;
+		const engineDecision =
+			rawEngine !== null && typeof rawEngine === "object" && !Array.isArray(rawEngine)
+				? (rawEngine as EngineDecision)
+				: undefined;
 		return {
 			tier,
 			override: record.override === true,
 			...(policy ? { policy } : {}),
 			...(reason ? { reason } : {}),
+			...(engineDecision !== undefined ? { engineDecision } : {}),
 		};
 	}
 
 	return { tier: "exec", override: false };
 }
 
-function getToolDecision(
+export function getToolDecision(
 	tool: ApprovalSubject,
 	args: unknown,
 ): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {

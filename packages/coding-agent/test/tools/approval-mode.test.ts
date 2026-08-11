@@ -87,8 +87,11 @@ describe("tools.approvalMode setting", () => {
 		return bash;
 	}
 
-	it("yolo mode (default) bypasses approval for non-overriding tool calls", async () => {
-		const settings = approvalSettings();
+	it("yolo mode bypasses approval for non-overriding tool calls", async () => {
+		// The engine's default posture is deny-by-default `prompt` for
+		// unconfigured settings; yolo must be explicitly configured to map onto
+		// the allow posture (permissions.default / tools.approvalMode).
+		const settings = approvalSettings({ "tools.approvalMode": "yolo" });
 		const result = await bashTool().execute("yolo", { command: "echo ok" }, undefined, undefined, {
 			settings,
 		} as AgentToolContext);
@@ -139,21 +142,19 @@ describe("tools.approvalMode setting", () => {
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
 
-	it("critical bash patterns do not prompt in yolo mode with bash allowed", async () => {
+	it("critical bash patterns deny even with yolo mode and per-tool allow", async () => {
+		// The engine's curated critical deny outranks the yolo-derived allow
+		// posture and the legacy per-tool allow policy. The gate surfaces the
+		// engine's reason (plan ruling round 2), naming the denied piece.
 		const settings = approvalSettings({
 			"tools.approvalMode": "yolo",
 			"tools.approval": { bash: "allow" },
 		});
-		const result = await bashTool().execute(
-			"critical",
-			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
-			undefined,
-			undefined,
-			{
+		await expect(
+			bashTool().execute("critical", { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" }, undefined, undefined, {
 				settings,
-			} as AgentToolContext,
-		);
-		expect(textOf(result)).toContain("(no output)");
+			} as AgentToolContext),
+		).rejects.toThrow(/is blocked: Denied: piece/);
 	});
 
 	it("CLI --auto-approve forces yolo mode for non-overriding tool calls", async () => {
@@ -165,19 +166,23 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("override");
 	});
 
-	it("CLI --auto-approve also bypasses safety-override patterns", async () => {
+	it("CLI --auto-approve does not bypass curated critical denies", async () => {
+		// --auto-approve maps onto the allow posture, but the engine's curated
+		// critical deny outranks the posture, so dangerous commands still deny
+		// with the engine's reason surfaced (plan ruling round 2).
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
-		const result = await bashTool().execute(
-			"cli-critical",
-			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
-			undefined,
-			undefined,
-			{
-				settings,
-				autoApprove: true,
-			} as AgentToolContext,
-		);
-		expect(textOf(result)).toContain("(no output)");
+		await expect(
+			bashTool().execute(
+				"cli-critical",
+				{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+				undefined,
+				undefined,
+				{
+					settings,
+					autoApprove: true,
+				} as AgentToolContext,
+			),
+		).rejects.toThrow(/is blocked: Denied: piece/);
 	});
 
 	it("xd:// dispatch approval (xdevApproved) suppresses the tier-only re-prompt", async () => {

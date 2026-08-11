@@ -885,10 +885,9 @@ export function createSubagentSettings(
 			// owner job outlives the run, so worktree capture/cleanup stays
 			// race-free (previously both were force-disabled here).
 
-			// Subagents run headless — there is no UI to confirm prompts against, so
-			// the parent task approval is the authorization boundary. Use yolo mode
-			// to preserve unattended subagent execution. User `tools.approval` policies still apply.
-			"tools.approvalMode": "yolo",
+			// Subagents inherit the parent's approval posture: prompt decisions park
+			// on a promise and bubble to the root session's permission handler
+			// (spec §6); without a handler anywhere up the chain they fail closed.
 			...overrides,
 		},
 		{ storage: baseSettings.getStorage() },

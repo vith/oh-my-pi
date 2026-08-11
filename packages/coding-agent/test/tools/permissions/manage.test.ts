@@ -1,0 +1,220 @@
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { appendAudit, auditFilePath } from "@oh-my-pi/pi-coding-agent/tools/permissions/audit";
+import { permissionsSchema, runPermissionCommand } from "@oh-my-pi/pi-coding-agent/tools/permissions/manage";
+import { loadRuleLayers } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
+import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../../helpers/settings-test-state";
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `perm-manage-${Snowflake.next()}-`));
+const agentDir = path.join(tmp, "agent");
+const home = path.join(tmp, "home");
+const cwd = path.join(tmp, "project");
+const userRulesFile = path.join(home, ".omp", "agent", "permissions.yml");
+
+let settingsState: SettingsTestState | undefined;
+
+beforeEach(() => {
+	settingsState = beginSettingsTest();
+	// The discovery fs cache negative-caches missing files by path; the reused
+	// tmp dirs are wiped below, so stale "not found" entries must go too.
+	clearFsCache();
+	fs.rmSync(tmp, { recursive: true, force: true });
+	fs.mkdirSync(agentDir, { recursive: true });
+	fs.mkdirSync(cwd, { recursive: true });
+	// runPermissionCommand resolves the user/project/dynamic layers against
+	// the OS home; point it at the temp home so no test touches the real one.
+	vi.spyOn(os, "homedir").mockReturnValue(home);
+});
+
+afterEach(() => {
+	clearFsCache();
+	restoreSettingsTestState(settingsState);
+});
+
+afterAll(() => {
+	removeSyncWithRetries(tmp);
+});
+
+/** Settings initialized against the temp agent dir, plus the command context. */
+async function ctx() {
+	const settings = await Settings.init({ agentDir, cwd });
+	return { cwd, settings, sessionId: undefined };
+}
+
+function write(file: string, content: string): void {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, content);
+}
+
+describe("runPermissionCommand list", () => {
+	it("lists merged rules by layer in precedence order with audit match counts", async () => {
+		write(
+			userRulesFile,
+			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+		);
+		write(
+			path.join(cwd, ".omp", "permissions.yml"),
+			"rules:\n  - id: proj1\n    tool: write\n    match: { path: 'src/**' }\n    action: allow\n",
+		);
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+		);
+		await appendAudit(auditFilePath(cwd), {
+			ts: Date.now(),
+			tool: "bash",
+			command: "git status",
+			decision: "allow",
+			ruleId: "user1",
+			layer: "user",
+		});
+
+		const output = await runPermissionCommand("list", await ctx());
+
+		// Layers appear highest-precedence first (dynamic before project before user).
+		expect(output.indexOf("dynamic:")).toBeGreaterThanOrEqual(0);
+		expect(output.indexOf("dynamic:")).toBeLessThan(output.indexOf("project:"));
+		expect(output.indexOf("project:")).toBeLessThan(output.indexOf("user:"));
+		// Each rule is listed; the user rule carries its audit hit count.
+		expect(output).toContain("dyn1");
+		expect(output).toContain("proj1");
+		expect(output).toContain("user1");
+		expect(output).toContain("[1 audit hit]");
+	});
+});
+
+describe("runPermissionCommand add/remove/edit", () => {
+	it("add validates the yaml and persists the rule to the user file", async () => {
+		const output = await runPermissionCommand(
+			"add tool: bash\nmatch: { command: 'npm test' }\naction: allow",
+			await ctx(),
+		);
+		expect(output).toContain("Added rule");
+
+		const { rules } = loadRuleLayers(cwd, home);
+		expect(rules.filter(rule => rule.layer === "user")).toHaveLength(1);
+		expect(rules[0].tool).toBe("bash");
+		expect(rules[0].action).toBe("allow");
+	});
+
+	it("rejects invalid yaml without persisting anything", async () => {
+		const output = await runPermissionCommand("add tool: bash", await ctx());
+		expect(output).toMatch(/Invalid rule/);
+
+		expect(loadRuleLayers(cwd, home).rules.filter(rule => rule.layer === "user")).toHaveLength(0);
+		expect(fs.existsSync(userRulesFile)).toBe(false);
+	});
+
+	it("remove deletes the rule from the user file", async () => {
+		await runPermissionCommand("add tool: bash\nmatch: { command: 'git *' }\naction: allow\nid: git1", await ctx());
+		expect(loadRuleLayers(cwd, home).rules.some(rule => rule.id === "git1")).toBe(true);
+
+		const output = await runPermissionCommand("remove git1", await ctx());
+		expect(output).toContain('Removed rule "git1"');
+
+		expect(loadRuleLayers(cwd, home).rules.some(rule => rule.id === "git1")).toBe(false);
+	});
+
+	it("remove of an unknown id reports it without creating the user file", async () => {
+		const output = await runPermissionCommand("remove missing-rule", await ctx());
+		expect(output).toContain('No rule with id "missing-rule"');
+		expect(fs.existsSync(userRulesFile)).toBe(false);
+	});
+
+	it("edit replaces a user-layer rule by id", async () => {
+		await runPermissionCommand("add tool: bash\nmatch: { command: 'git *' }\naction: allow\nid: git1", await ctx());
+
+		const output = await runPermissionCommand(
+			"edit git1 tool: bash\nmatch: { command: 'git push' }\naction: deny",
+			await ctx(),
+		);
+		expect(output).toContain('Updated rule "git1"');
+
+		const { rules } = loadRuleLayers(cwd, home);
+		const rule = rules.find(candidate => candidate.id === "git1");
+		expect(rule?.action).toBe("deny");
+		expect(rule?.match).toEqual({ command: "git push" });
+	});
+});
+
+describe("runPermissionCommand test", () => {
+	it("dry-runs a bash command and reports the deciding rule and layer without writing anything", async () => {
+		write(
+			userRulesFile,
+			"rules:\n  - id: git1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand('test "git status"', await ctx());
+
+		expect(output).toContain("decision: allow");
+		expect(output).toContain("rule: git1");
+		expect(output).toContain("layer: user");
+		// Dry-run purity: the audit log and rule files are untouched.
+		expect(fs.existsSync(auditFilePath(cwd))).toBe(false);
+	});
+
+	it("reports posture prompts when no rule matches", async () => {
+		const output = await runPermissionCommand('test "git status"', await ctx());
+		expect(output).toContain("decision: prompt");
+	});
+});
+
+describe("runPermissionCommand status/log/migrate", () => {
+	it("status shows the configured posture and rule file paths", async () => {
+		write(path.join(agentDir, "config.yml"), YAML.stringify({ permissions: { default: "allow" } }, null, 2));
+		write(
+			userRulesFile,
+			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand("status", await ctx());
+
+		expect(output).toContain("Posture: allow");
+		expect(output).toContain("dynamic: 0");
+		expect(output).toContain("user: 1");
+		expect(output).toContain(userRulesFile);
+	});
+
+	it("log prints recent audit entries newest-first", async () => {
+		const file = auditFilePath(cwd);
+		await appendAudit(file, { ts: 1000, tool: "bash", command: "old", decision: "prompt" });
+		await appendAudit(file, { ts: 2000, tool: "bash", command: "new", decision: "allow" });
+
+		const output = await runPermissionCommand("log", await ctx());
+
+		expect(output.indexOf("new")).toBeLessThan(output.indexOf("old"));
+		expect(output).toContain("allow");
+	});
+
+	it("migrate dry-runs the plan without applying it", async () => {
+		write(path.join(agentDir, "config.yml"), YAML.stringify({ tools: { approval: { bash: "allow" } } }, null, 2));
+
+		const output = await runPermissionCommand("migrate", await ctx());
+
+		expect(output).toContain("Migration plan");
+		expect(output).toContain("tools.approval.bash: allow becomes a permission rule");
+		// Dry-run: nothing written to the user rules file.
+		expect(fs.existsSync(userRulesFile)).toBe(false);
+	});
+});
+
+describe("permissions model tool surface", () => {
+	it("rejects mutation actions at the schema level (read-only)", () => {
+		expect(permissionsSchema.allows({ action: "list" })).toBe(true);
+		expect(permissionsSchema.allows({ action: "test", command: "git status" })).toBe(true);
+		expect(permissionsSchema.allows({ action: "add" })).toBe(false);
+		expect(permissionsSchema.allows({ action: "remove" })).toBe(false);
+	});
+
+	it("rejects unknown subcommands with a usage error", async () => {
+		const output = await runPermissionCommand("frobnicate", await ctx());
+		expect(output).toContain('Unknown subcommand "frobnicate"');
+		expect(output).toContain("Usage: permissions");
+	});
+});

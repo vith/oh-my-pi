@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -79,6 +80,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import type { Api } from "@oh-my-pi/pi-catalog/types";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
 	$env,
@@ -191,6 +193,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { abortPendingForSession } from "../tools/permissions/subagent";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -5928,6 +5931,187 @@ export class AgentSession {
 	}
 
 	/**
+	 * Build tool-call messages from content. Parses XML, executes tools,
+	 * returns [assistantMessage, ...toolResultMessages] for delivery.
+	 * Returns empty array if no valid tool calls found.
+	 */
+	async #buildToolCallMessages<T = unknown>(message: CustomMessagePayload<T>): Promise<Message[]> {
+		const normalizedPayload = normalizeCustomMessagePayload(message);
+		const content = normalizedPayload.content;
+		if (typeof content !== "string") {
+			logger.warn("recursive-decomp: evaluateToolCalls requires string content");
+			return [];
+		}
+
+		const parsed = this.#parseToolCallXml(content);
+		if (parsed.length === 0) {
+			logger.warn("recursive-decomp: no tool calls found in evaluateToolCalls message");
+			return [];
+		}
+
+		const now = Date.now();
+		const toolCallBlocks: ToolCall[] = [];
+		const toolResultMessages: ToolResultMessage[] = [];
+		// Mirrors `buildAskReanswerContext`: a standalone `AgentToolContext` for
+		// running a tool outside a normal agent turn. No `ui` — this dispatch
+		// path is headless, so approval falls back to yolo (see
+		// `ExtensionToolWrapper.execute`), which is correct here since the
+		// caller is our own trusted extension code, not an interactive user.
+		const toolContext: AgentToolContext = {
+			sessionManager: this.sessionManager,
+			modelRegistry: this.#modelRegistry,
+			model: this.model,
+			isIdle: () => !this.isStreaming,
+			hasQueuedMessages: () => this.queuedMessageCount > 0,
+			abort: () => {
+				this.agent.abort();
+			},
+			settings: this.settings,
+			hasUI: false,
+		};
+		const executionSignal = this.#postPromptTasksAbortController.signal;
+
+		for (const tc of parsed) {
+			const tool = this.#tools.registry.get(tc.name);
+			if (!tool) {
+				logger.warn(`recursive-decomp: tool "${tc.name}" not in registry, skipping`);
+				continue;
+			}
+
+			toolCallBlocks.push({
+				type: "toolCall",
+				id: tc.id,
+				name: tc.name,
+				arguments: tc.args,
+			});
+
+			try {
+				const result = await tool.execute(tc.id, tc.args, executionSignal, undefined, toolContext);
+				toolResultMessages.push({
+					role: "toolResult",
+					toolCallId: tc.id,
+					toolName: tc.name,
+					content: result.content,
+					details: result.details,
+					isError: false,
+					timestamp: now,
+				});
+			} catch (err) {
+				const errMsg = err instanceof Error ? err.message : String(err);
+				logger.warn(`recursive-decomp: tool "${tc.name}" execution failed: ${errMsg}`);
+				toolResultMessages.push({
+					role: "toolResult",
+					toolCallId: tc.id,
+					toolName: tc.name,
+					content: [{ type: "text", text: `Tool execution failed: ${errMsg}` }],
+					isError: true,
+					timestamp: now,
+				});
+			}
+		}
+
+		if (toolCallBlocks.length === 0) return [];
+
+		const modelInfo = this.agent.state.model;
+		const assistantMsg: AssistantMessage = {
+			role: "assistant",
+			content: toolCallBlocks,
+			api: (modelInfo?.api ?? "openai-completions") as Api,
+			provider: modelInfo?.provider ?? "system",
+			model: modelInfo?.id ?? "unknown",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: now,
+		};
+
+		return [assistantMsg, ...toolResultMessages];
+	}
+
+	/**
+	 * Deliver messages produced by tool-call evaluation according to the
+	 * deliverAs option. Returns true if a turn was started.
+	 */
+	async #deliverMessages(
+		messages: Message[],
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	): Promise<boolean> {
+		if (messages.length === 0) return false;
+
+		if (this.isStreaming) {
+			for (const msg of messages) {
+				if (options?.deliverAs === "followUp") {
+					this.agent.followUp(msg);
+				} else {
+					this.agent.steer(msg);
+				}
+			}
+			this.#scheduleIdleQueueDrain();
+			return false;
+		}
+
+		// Not streaming: append to agent state and persist.
+		// deliverAs "nextTurn" vs default only affects the pending-message
+		// UI — tool-call messages are functional, not user-facing.
+		for (const msg of messages) {
+			this.agent.appendMessage(msg);
+			this.sessionManager.appendMessage(msg);
+		}
+
+		if (options?.triggerTurn && !this.#clientBridge?.deferAgentInitiatedTurns) {
+			this.#scheduleAgentContinue({ generation: this.#promptGeneration });
+			return true;
+		}
+
+		return false;
+	}
+
+	/**
+	 * Parse tool-call XML from a string.
+	 * Format: <invoke name="toolName"><parameter name="param1">value1</parameter>...</invoke>
+	 * String parameter values are passed verbatim; others are JSON-parsed.
+	 */
+	#parseToolCallXml(content: string): Array<{ id: string; name: string; args: Record<string, unknown> }> {
+		const results: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
+		// Match <invoke name="...">...</invoke> blocks (cross-line, with parameters)
+		const invokeRegex = /<invoke\s+name="([^"]*)">(.*?)<\/invoke>/gs;
+		const paramRegex = /<parameter\s+name="([^"]*)">(.*?)<\/parameter>/gs;
+
+		for (const invokeMatch of content.matchAll(invokeRegex)) {
+			const name = invokeMatch[1];
+			if (!name) continue;
+			const body = invokeMatch[2] ?? "";
+
+			const args: Record<string, unknown> = {};
+			for (const paramMatch of body.matchAll(paramRegex)) {
+				const paramName = paramMatch[1];
+				const rawValue = paramMatch[2];
+				if (!paramName) continue;
+				if (rawValue === undefined) continue;
+				// Try JSON parse for structured values; fall back to raw string
+				try {
+					args[paramName] = JSON.parse(rawValue);
+				} catch {
+					args[paramName] = rawValue;
+				}
+			}
+
+			results.push({
+				id: randomUUID(),
+				name,
+				args,
+			});
+		}
+
+		return results;
+	}
+	/**
 	 * Send a custom message to the session. Creates a CustomMessageEntry.
 	 *
 	 * Handles three cases:
@@ -5948,8 +6132,19 @@ export class AgentSession {
 			deliverAs?: "steer" | "followUp" | "nextTurn";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			evaluateToolCalls?: boolean;
 		},
 	): Promise<boolean> {
+		// evaluateToolCalls: parse tool-call XML, execute tools, inject
+		// assistant message + results so the LLM sees the full exchange.
+		// Works with any deliverAs mode.
+		if (options?.evaluateToolCalls) {
+			const toolMessages = await this.#buildToolCallMessages(message);
+			if (toolMessages.length > 0) {
+				return this.#deliverMessages(toolMessages, options);
+			}
+			return false;
+		}
 		const normalizedPayload = normalizeCustomMessagePayload<T>(message);
 		const details =
 			options?.queueChipText && options.deliverAs !== "nextTurn"
@@ -6319,6 +6514,11 @@ export class AgentSession {
 		this.#abortInProgress = true;
 		try {
 			this.#abortAutolearnCapture();
+			// Parked approvals of this session's calls (spec §6) must not outlive
+			// the session: reject them so a killed agent's parked tool calls
+			// settle instead of blocking forever and the pending registry (and
+			// its roster marker) clears.
+			abortPendingForSession(this.sessionManager.getSessionId());
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 			this.abortRetry();
 			this.#promptGeneration++;

@@ -1561,6 +1561,13 @@ export declare function parseKey(data: string, kittyProtocolActive: boolean): st
  */
 export declare function parseKittySequence(data: string): ParsedKittyResult | null
 
+/**
+ * Parse a bash command string with the vendored brush parser and return a
+ * compact JSON node list (`[{kind, text, children}, ...]`).
+ * Throws on syntax errors.
+ */
+export declare function parseShellCommand(command: string): string
+
 /** One hunk of a unified diff, matching jsdiff `structuredPatch` hunks. */
 export interface PatchHunk {
   /** 1-based first line of the hunk in the old text. */

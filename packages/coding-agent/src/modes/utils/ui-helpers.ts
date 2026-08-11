@@ -25,6 +25,7 @@ import {
 	type LateDiagnosticsFile,
 	LateDiagnosticsMessageComponent,
 } from "../../modes/components/late-diagnostics-message";
+import { PermissionPendingComponent, type PermissionPendingDetails } from "../../modes/components/permission-pending";
 import {
 	groupedReadUsageCallIds,
 	ReadToolGroupComponent,
@@ -48,6 +49,7 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
+import { PERMISSION_PENDING_TYPE } from "../../tools/permissions/subagent";
 import { replaceTabs } from "../../tools/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import { createAssistantMessageComponent } from "./interactive-context-helpers";
@@ -203,6 +205,11 @@ export class UiHelpers {
 					}
 					if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
 						this.ctx.chatContainer.addChild(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
+						break;
+					}
+					if (message.customType === PERMISSION_PENDING_TYPE) {
+						const component = new PermissionPendingComponent(message as CustomMessage<PermissionPendingDetails>);
+						this.ctx.chatContainer.addChild(component);
 						break;
 					}
 					const handoffComponent = createHandoffSummaryMessageComponent(

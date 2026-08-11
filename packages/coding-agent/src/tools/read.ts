@@ -6,7 +6,7 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	ToolTier,
+	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { type ImageMetadata, isProbablyBinary, logger, prompt, readImageMetadata } from "@oh-my-pi/pi-utils";
@@ -388,8 +388,10 @@ type ReadParams = ReadToolInput;
  */
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
-	readonly approval = (args: unknown): ToolTier =>
-		pathTargetsSsh(String((args as { path?: unknown }).path ?? "")) ? "exec" : "read";
+	readonly approval = (args: unknown): ToolApprovalDecision =>
+		pathTargetsSsh(String((args as { path?: unknown }).path ?? ""))
+			? { tier: "exec", override: true, policy: "prompt", reason: "ssh:// remote target" }
+			: "read";
 	readonly label = "Read";
 	readonly loadMode = "essential";
 	description: string;

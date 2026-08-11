@@ -6,10 +6,11 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, expectTyp
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
-import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { discoverAndLoadExtensions, ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
@@ -25,6 +26,11 @@ import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+
+/** Context with legacy yolo approval for extension-mechanics tests that don't exercise the approval gate. */
+const GATE_YOLO_CONTEXT = {
+	settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
+} as AgentToolContext;
 
 describe("ExtensionRunner", () => {
 	let tempDir: TempDir;
@@ -1152,7 +1158,7 @@ describe("ExtensionRunner", () => {
 				}
 			`);
 			const wrapper = new ExtensionToolWrapper(throwingTool, runner);
-			const res = await wrapper.execute("call-rewrite", {} as never, undefined, undefined, undefined);
+			const res = await wrapper.execute("call-rewrite", {} as never, undefined, undefined, GATE_YOLO_CONTEXT);
 			expect(firstText(res)).toBe("Enriched recovery guidance");
 			expect(res.isError).toBe(true);
 			expect(res.details).toEqual({ enriched: true });
@@ -1165,9 +1171,9 @@ describe("ExtensionRunner", () => {
 				}
 			`);
 			const wrapper = new ExtensionToolWrapper(throwingTool, runner);
-			await expect(wrapper.execute("call-untouched", {} as never, undefined, undefined, undefined)).rejects.toThrow(
-				"original explosion",
-			);
+			await expect(
+				wrapper.execute("call-untouched", {} as never, undefined, undefined, GATE_YOLO_CONTEXT),
+			).rejects.toThrow("original explosion");
 		});
 
 		it("converts a failure to success when a handler clears isError", async () => {
@@ -1180,7 +1186,7 @@ describe("ExtensionRunner", () => {
 				}
 			`);
 			const wrapper = new ExtensionToolWrapper(throwingTool, runner);
-			const res = await wrapper.execute("call-cleared", {} as never, undefined, undefined, undefined);
+			const res = await wrapper.execute("call-cleared", {} as never, undefined, undefined, GATE_YOLO_CONTEXT);
 			expect(firstText(res)).toBe("recovered");
 			expect(res.isError).toBeUndefined();
 		});
@@ -1195,7 +1201,7 @@ describe("ExtensionRunner", () => {
 				}
 			`);
 			const wrapper = new ExtensionToolWrapper(okTool, runner);
-			const res = await wrapper.execute("call-flagged", {} as never, undefined, undefined, undefined);
+			const res = await wrapper.execute("call-flagged", {} as never, undefined, undefined, GATE_YOLO_CONTEXT);
 			expect(firstText(res)).toBe("now failing");
 			expect(res.isError).toBe(true);
 		});
@@ -1774,7 +1780,10 @@ describe("ExtensionRunner", () => {
 				isIdle: () => true,
 				hasQueuedMessages: () => false,
 				abort: () => {},
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+				settings: {
+					get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+					isConfigured: (key: string) => key === "tools.approvalMode",
+				} as never,
 			});
 
 			expect(events).toEqual([
@@ -1783,8 +1792,10 @@ describe("ExtensionRunner", () => {
 				{ type: "tool_approval_resolved", approved: true },
 			]);
 			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
-				"Approve",
+				"Allow once",
+				"Allow & remember…",
 				"Deny",
+				"Deny & remember…",
 			]);
 			delete globalState.__approvalEvents;
 		});
@@ -1828,7 +1839,10 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					settings: {
+						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+						isConfigured: (key: string) => key === "tools.approvalMode",
+					} as never,
 				}),
 			).rejects.toThrow("Tool call denied by user: dangerous_tool");
 
@@ -1879,7 +1893,10 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) } as never,
+					settings: {
+						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+						isConfigured: (key: string) => key === "tools.approvalMode",
+					} as never,
 				}),
 			).rejects.toThrow("dialog aborted");
 
@@ -1926,7 +1943,10 @@ describe("ExtensionRunner", () => {
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
 				(wrapper as ExtensionToolWrapper<any>).execute("call-partial-context", {}, undefined, undefined, {
-					settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+					settings: {
+						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+						isConfigured: (key: string) => key === "tools.approvalMode",
+					},
 				} as never),
 			).rejects.toThrow('Tool "dangerous_tool" requires approval but no interactive UI available.');
 
@@ -1985,9 +2005,15 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
 
-			const resultMessage = await wrapped.execute("tool-call-id", {
-				input: "¶plans/switch-case-array-syntax.md#ABC1\n27 27\n+new content",
-			});
+			const resultMessage = await wrapped.execute(
+				"tool-call-id",
+				{
+					input: "¶plans/switch-case-array-syntax.md#ABC1\n27 27\n+new content",
+				},
+				undefined,
+				undefined,
+				GATE_YOLO_CONTEXT,
+			);
 
 			expect(resultMessage.content).toEqual([{ type: "text", text: "ok" }]);
 			const events = fs
@@ -2026,9 +2052,15 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
 
-			await wrapped.execute("tool-call-id", {
-				input: "¶plans/foo.md#notatag\n27 27\n+new content",
-			});
+			await wrapped.execute(
+				"tool-call-id",
+				{
+					input: "¶plans/foo.md#notatag\n27 27\n+new content",
+				},
+				undefined,
+				undefined,
+				GATE_YOLO_CONTEXT,
+			);
 
 			const events = fs
 				.readFileSync(eventsPath, "utf8")
@@ -2065,10 +2097,16 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
 
-			await wrapped.execute("tool-call-id", {
-				_path: "plans/allowed.md",
-				input: "¶src/secret.ts#ABC1\n27 27\n+evil content",
-			});
+			await wrapped.execute(
+				"tool-call-id",
+				{
+					_path: "plans/allowed.md",
+					input: "¶src/secret.ts#ABC1\n27 27\n+evil content",
+				},
+				undefined,
+				undefined,
+				GATE_YOLO_CONTEXT,
+			);
 
 			const events = fs
 				.readFileSync(eventsPath, "utf8")
@@ -2164,7 +2202,13 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
-			const resultMessage = await wrapped.execute("tool-call-id", { command: "echo original" });
+			const resultMessage = await wrapped.execute(
+				"tool-call-id",
+				{ command: "echo original" },
+				undefined,
+				undefined,
+				GATE_YOLO_CONTEXT,
+			);
 
 			expect(resultMessage.content).toEqual([{ type: "text", text: "ran" }]);
 			const executed = fs
@@ -2223,7 +2267,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
-			await wrapped.execute("tool-call-id", { command: "echo original" });
+			await wrapped.execute("tool-call-id", { command: "echo original" }, undefined, undefined, GATE_YOLO_CONTEXT);
 
 			const executed = fs
 				.readFileSync(recordPath, "utf8")
@@ -2254,7 +2298,10 @@ describe("ExtensionRunner", () => {
 		}
 
 		const yoloContext = {
-			settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+			settings: {
+				get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}),
+				isConfigured: (key: string) => key === "tools.approvalMode",
+			},
 		} as never;
 
 		// Minimal runtime init so the approval gate's interactive `select` is wired for prompt-path tests.
@@ -2299,7 +2346,10 @@ describe("ExtensionRunner", () => {
 			isIdle: () => true,
 			hasQueuedMessages: () => false,
 			abort: () => {},
-			settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+			settings: {
+				get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+				isConfigured: (key: string) => key === "tools.approvalMode",
+			},
 		} as never;
 
 		it("blocks a revised input that resolves to a deny policy (approval gates the revised args)", async () => {
@@ -2326,10 +2376,11 @@ describe("ExtensionRunner", () => {
 
 			// Original "echo original" resolves to exec; the handler rewrites it to "rm -rf", which the
 			// tool's approval declares deny. Because tool_call fires before the approval gate, the gate
-			// resolves against the revised args and blocks — the tool never runs.
+			// resolves against the revised args and blocks — the tool never runs. The gate surfaces the
+			// tool-declared deny's reason (plan ruling round 2).
 			await expect(
 				wrapped.execute("tool-call-id", { command: "echo original" }, undefined, undefined, yoloContext),
-			).rejects.toThrow(/blocked by user policy/);
+			).rejects.toThrow(/is blocked: dangerous/);
 			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
 		});
 
@@ -2397,7 +2448,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
-			await wrapped.execute("tool-call-id", { command: "echo original" });
+			await wrapped.execute("tool-call-id", { command: "echo original" }, undefined, undefined, GATE_YOLO_CONTEXT);
 
 			const executed = fs
 				.readFileSync(recordPath, "utf8")
@@ -2494,9 +2545,9 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 
 			runner.markToolCallEmitted("loop-call-id", "bash");
-			await wrapped.execute("loop-call-id", { command: "echo original" });
+			await wrapped.execute("loop-call-id", { command: "echo original" }, undefined, undefined, GATE_YOLO_CONTEXT);
 			// Marker consumed above: an unmarked dispatch under the same id emits normally.
-			await wrapped.execute("loop-call-id", { command: "echo original" });
+			await wrapped.execute("loop-call-id", { command: "echo original" }, undefined, undefined, GATE_YOLO_CONTEXT);
 
 			const executed = fs
 				.readFileSync(recordPath, "utf8")
@@ -2532,7 +2583,10 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 			const xdevContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+				settings: {
+					get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
+					isConfigured: (key: string) => key === "tools.approvalMode",
+				},
 				xdevApproved: true,
 			} as never;
 
@@ -2574,7 +2628,10 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(tool, runner);
 			let effectiveTier: string | undefined;
 			const xdevContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}) },
+				settings: {
+					get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}),
+					isConfigured: (key: string) => key === "tools.approvalMode",
+				},
 				xdevApproved: true,
 				xdevTierResolved: (tier: string) => {
 					effectiveTier = tier;

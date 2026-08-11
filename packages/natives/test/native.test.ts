@@ -23,6 +23,7 @@ import {
 	matchesKey,
 	PtySession,
 	parseKey,
+	parseShellCommand,
 	summarizeCode,
 	supportsLanguage,
 	truncateToWidth,
@@ -971,5 +972,21 @@ console.log("ok");
 		it("rejects an empty language", async () => {
 			await expect(astMatch({ source: "const a = 1;", lang: "  ", patterns: ["const $A = $B"] })).rejects.toThrow();
 		});
+	});
+});
+
+describe("parseShellCommand", () => {
+	it("returns a compact node list for a simple command", () => {
+		const nodes = JSON.parse(parseShellCommand("echo hi")) as Array<{ kind: string; words: string[] }>;
+		expect(nodes[0].kind).toBe("simpleCommand");
+		expect(nodes[0].words).toEqual(["echo", "hi"]);
+	});
+	it("keeps pipelines whole with two children", () => {
+		const nodes = JSON.parse(parseShellCommand("ls -la | grep foo")) as Array<{ kind: string; children: unknown[] }>;
+		expect(nodes[0].kind).toBe("pipeline");
+		expect(nodes[0].children).toHaveLength(2);
+	});
+	it("throws on syntax errors", () => {
+		expect(() => parseShellCommand("echo 'unterminated")).toThrow(/Shell parse error/);
 	});
 });

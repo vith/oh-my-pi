@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added parseShellCommand native binding (brush-parser AST as a compact JSON node list).
 ## [17.2.12] - 2026-08-08
 
 ### Changed

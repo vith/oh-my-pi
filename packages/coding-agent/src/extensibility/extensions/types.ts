@@ -120,6 +120,27 @@ export interface ExtensionUISelectOption {
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
 
+/** One numbered option in the permission approval dialog. */
+export interface PermissionDialogOption {
+	label: string;
+	/** Secondary lines shown under the label (e.g. the YAML preview the option writes). */
+	description?: string;
+}
+
+/** Content of the permission approval dialog. */
+export interface PermissionDialogRequest {
+	title: string;
+	/** Context lines shown under the title (decision context, per-piece status list). */
+	lines?: readonly string[];
+	options: readonly PermissionDialogOption[];
+	/**
+	 * Task 11 (§5.3): asynchronously appended LLM-suggested rules. The dialog
+	 * shows a spinner while the promise is pending and appends the options when
+	 * it settles; suggestions that resolve after the user chose are dropped.
+	 */
+	suggestions?: Promise<PermissionDialogOption[]>;
+}
+
 export interface ExtensionAskDialogOption {
 	label: string;
 	description?: string;
@@ -241,6 +262,17 @@ export interface ExtensionUIContext {
 
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined>;
+
+	/**
+	 * Show the permission approval dialog (rule candidates, YAML previews, piece
+	 * status) and return the chosen option index, or `undefined` on cancel.
+	 * Optional: callers without the dialog fall back to `select` with the option
+	 * labels.
+	 */
+	showPermissionDialog?(
+		request: PermissionDialogRequest,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<number | undefined>;
 
 	/** Show the rich ask dialog when the interactive TUI surface is available. */
 	askDialog?(
@@ -1277,10 +1309,14 @@ export interface ExtensionAPI {
 	 * `deliverAs: "nextTurn"` keeps the message hidden from the editable pending-message UI.
 	 * If `triggerTurn` is also true while the current turn is still unwinding, the session schedules
 	 * an internal continuation that consumes the message on the next turn.
+	 *
+	 * `evaluateToolCalls: true` parses tool-call XML (`<invoke name="..."><parameter …>`) from
+	 * the message content, executes each tool, and injects an assistant message + tool results.
+	 * Works alongside any `deliverAs` mode.
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; evaluateToolCalls?: boolean },
 	): void;
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set. */
@@ -1486,12 +1522,7 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 
 export type SendMessageHandler = <T = unknown>(
 	message: CustomMessagePayload<T>,
-	/**
-	 * `deliverAs: "nextTurn"` queues hidden custom context for the next turn.
-	 * When paired with `triggerTurn: true` during prompt teardown, the session schedules
-	 * an internal continuation without surfacing the message in the editable pending queue.
-	 */
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn"; evaluateToolCalls?: boolean },
 ) => void;
 
 export type SendUserMessageHandler = (

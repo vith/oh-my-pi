@@ -9,7 +9,7 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	ToolTier,
+	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
@@ -500,7 +500,7 @@ function parseSqliteWriteTarget(subPath: string, queryString: string): { table: 
  */
 export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails> {
 	readonly name = "write";
-	readonly approval = (args: unknown): ToolTier => {
+	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawPath = (args as Partial<WriteParams>).path;
 		if (typeof rawPath !== "string") return "write";
 		// Unwrap a hashline `[path#TAG]` wrapper first (parity with execute) so a
@@ -540,7 +540,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// Remote SSH writes open an outbound connection and run a remote shell —
 		// gate them like the exec-tier `ssh` tool, ahead of the handler-write
 		// logic. Substring match also covers selector-suffixed targets.
-		if (pathTargetsSsh(path)) return "exec";
+		if (pathTargetsSsh(path)) {
+			return { tier: "exec", override: true, policy: "prompt", reason: "ssh:// remote target" };
+		}
 		if (!isInternalUrlPath(path)) return "write";
 		// Internal URLs are usually session-local artifacts (read tier), but a
 		// scheme whose handler exposes a `write` hook mutates handler-owned user
