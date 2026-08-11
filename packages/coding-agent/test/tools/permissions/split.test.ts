@@ -54,6 +54,31 @@ describe("parseCommand", () => {
 		expect(pieces[0].text).toContain("foo");
 	});
 
+	it("splits [[ ]] test commands like any other command", () => {
+		const pieces = piecesOf("[[ -d foo ]] && echo yes");
+		expect(pieces).toHaveLength(2);
+		expect(pieces[0].text).toContain("[[ -d foo");
+		expect(pieces[1].text).toContain("echo yes");
+		expect(pieces[1].operator).toBe("&&");
+	});
+
+	it("keeps arithmetic expressions whole", () => {
+		const pieces = piecesOf("(( x = 1 ))");
+		expect(pieces).toHaveLength(1);
+		expect(pieces[0].operator).toBeNull();
+		expect(pieces[0].text).toBe("((x = 1))"); // brush-rendered node text, not the raw input
+	});
+
+	it("keeps arithmetic and until loops whole", () => {
+		const arithmeticFor = piecesOf("for ((i=0; i<3; i++)); do echo $i; done");
+		expect(arithmeticFor).toHaveLength(1);
+		expect(arithmeticFor[0].text).toContain("for ((");
+		expect(arithmeticFor[0].text).toContain("\ndo\n"); // brush renders compound bodies multi-line
+		const until = piecesOf("until false; do echo x; done");
+		expect(until).toHaveLength(1);
+		expect(until[0].text).toBe("until false; do\n    echo x\ndone"); // brush rendering keeps `do` on the condition line
+	});
+
 	it("collapses to one whole-command piece when node kinds are not understood", () => {
 		const spy = vi.spyOn(natives, "parseShellCommand");
 		spy.mockReturnValue(JSON.stringify([{ kind: "mysteryKind", text: "nope" }]));
@@ -93,6 +118,13 @@ describe("nestedCommandTexts", () => {
 		const texts = nestedCommandTexts(nodes);
 		expect(texts).toHaveLength(1);
 		expect(texts[0]).toContain("if true");
+	});
+
+	it("surfaces until loops as nested compounds", () => {
+		const nodes: unknown[] = JSON.parse(natives.parseShellCommand("cd x && until false; do echo y; done"));
+		const texts = nestedCommandTexts(nodes);
+		expect(texts).toHaveLength(1);
+		expect(texts[0]).toContain("until");
 	});
 
 	it("reports nothing when the command has no compound nodes", () => {

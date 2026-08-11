@@ -26,15 +26,27 @@ const SINGLE_PIECE_KINDS = new Set([
 	"pipeline",
 	"ifClause",
 	"whileClause",
+	"untilClause",
 	"forClause",
+	"arithmeticForClause",
 	"caseClause",
 	"braceGroup",
 	"subshell",
 	"functionDefinition",
+	"extendedTest",
+	"arithmetic",
 ]);
 
 /** Compound commands whose bodies are analyzed separately by permission checks. */
-const NESTED_COMPOUND_KINDS = new Set(["ifClause", "whileClause", "forClause", "caseClause", "braceGroup", "subshell"]);
+const NESTED_COMPOUND_KINDS = new Set([
+	"ifClause",
+	"whileClause",
+	"untilClause",
+	"forClause",
+	"caseClause",
+	"braceGroup",
+	"subshell",
+]);
 
 export function parseCommand(command: string): ParseOutcome {
 	if (command.trim().length === 0) return { ok: true, pieces: [] };
