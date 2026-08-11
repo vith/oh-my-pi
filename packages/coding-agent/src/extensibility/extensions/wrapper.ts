@@ -259,9 +259,16 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	 * layers resolve against the session's project.
 	 */
 	#engineContext(context: AgentToolContext | undefined, settings: Settings | undefined): EngineContext {
+		// A context-less execute carries no settings at all. The gate's own mode
+		// default for that path is legacy yolo (`settings?.get(...) ?? "yolo"`),
+		// so surface the mode as explicitly configured exactly like the
+		// auto-approve view — an empty isolated fallback would resolve the new
+		// unconfigured "prompt" posture and gate headless dispatches the old
+		// wrapper auto-approved. Sessions (settings present) keep the new
+		// default posture.
 		const base = settings ?? Settings.isolated({});
 		return {
-			settings: context?.autoApprove === true ? autoApproveSettings(base) : base,
+			settings: context?.autoApprove === true || settings === undefined ? autoApproveSettings(base) : base,
 			cwd: context?.sessionManager?.getCwd() ?? process.cwd(),
 			home: undefined,
 		};
