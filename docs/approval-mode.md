@@ -167,10 +167,12 @@ Legacy keys continue to work without rewriting user files; they are mapped into 
 | `tools.approvalMode: yolo` | `permissions.default: allow` |
 | `tools.approvalMode: write` | `permissions.default: prompt` (write-tier tools now prompt instead of auto-approving — slightly stricter by design; add allow rules to restore) |
 | `tools.approvalMode: always-ask` | `permissions.default: prompt` |
-| `tools.approval.<tool>: allow\|deny\|prompt` | legacy-layer rules for that tool (deny still absolute; `prompt` forces the dialog; `allow` for bash still respects the shell-control guard) |
+| `tools.approval.<tool>: allow\|deny\|prompt` | legacy-layer rules for that tool (deny still absolute; `prompt` forces the dialog; `allow` auto-approves without the shell-control guard — matching legacy behavior — until migrated to a user-layer rule, which is subject to the guard) |
 | `bash.patterns` (`match`/`approval`) | legacy-layer bash rules (`deny`/`prompt` match any piece text; `allow` applies to single-piece commands only) |
 
 While any legacy key is configured, a one-time notice lists the mapping that applies to the current config (shown once per interactive session start, until the config is clean).
+
+A pre-migration `tools.approval.<tool>: allow` resolves at pipeline step 8 as an **unconditional allow**, bypassing the shell-control guard that applies to rule-based allows at step 9 — this matches the old behavior. Migrating the key turns it into a user-layer `{ arg: "*" }` rule that goes through the step-9 guard, so a bash command carrying shell-control syntax then degrades to a prompt instead of auto-approving.
 
 `/permissions migrate` rewrites the legacy keys into rule files:
 
