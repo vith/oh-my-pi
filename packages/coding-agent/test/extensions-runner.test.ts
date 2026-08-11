@@ -2374,10 +2374,11 @@ describe("ExtensionRunner", () => {
 
 			// Original "echo original" resolves to exec; the handler rewrites it to "rm -rf", which the
 			// tool's approval declares deny. Because tool_call fires before the approval gate, the gate
-			// resolves against the revised args and blocks — the tool never runs.
+			// resolves against the revised args and blocks — the tool never runs. The gate surfaces the
+			// tool-declared deny's reason (plan ruling round 2).
 			await expect(
 				wrapped.execute("tool-call-id", { command: "echo original" }, undefined, undefined, yoloContext),
-			).rejects.toThrow(/blocked by user policy/);
+			).rejects.toThrow(/is blocked: dangerous/);
 			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
 		});
 

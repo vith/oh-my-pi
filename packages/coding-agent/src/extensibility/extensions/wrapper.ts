@@ -14,7 +14,7 @@ import { type SettingPath, Settings, type SettingValue } from "../../config/sett
 import type { Theme } from "../../modes/theme/theme";
 import { type ApprovalMode, formatApprovalPrompt, truncateForPrompt } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
-import { type EngineContext, evaluatePermission } from "../../tools/permissions/engine";
+import { type EngineContext, type EngineDecision, evaluatePermission } from "../../tools/permissions/engine";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -154,6 +154,21 @@ function autoApproveSettings(base: Settings): Pick<Settings, "get" | "isConfigur
 }
 
 /**
+ * Deny error for the approval gate. True user-policy denies keep the
+ * remediation hint naming the legacy settings key; every other deny (tool
+ * declarations, curated critical patterns, file rules) names the engine's
+ * reason so the blocker is actionable (plan ruling, round 2).
+ */
+function blockedByPolicyError(toolName: string, decision: EngineDecision): Error {
+	return new Error(
+		decision.source === "user"
+			? `Tool "${toolName}" is blocked by user policy.\n` +
+					`To allow: remove "tools.approval.${toolName}: deny" from config.`
+			: `Tool "${toolName}" is blocked: ${decision.reason ?? "denied by permission policy"}`,
+	);
+}
+
+/**
  * Wraps a tool with extension callbacks for interception.
  * - Emits tool_call event before execution (can block)
  * - Emits tool_result event after execution (can modify result)
@@ -222,11 +237,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
 		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
 		const engineCtx = this.#engineContext(context, settings);
-		if (evaluatePermission(this.tool, approvalArgs(params, context), engineCtx).policy === "deny") {
-			throw new Error(
-				`Tool "${this.tool.name}" is blocked by user policy.\n` +
-					`To allow: remove "tools.approval.${this.tool.name}: deny" from config.`,
-			);
+		const shortCircuit = evaluatePermission(this.tool, approvalArgs(params, context), engineCtx);
+		if (shortCircuit.policy === "deny") {
+			throw blockedByPolicyError(this.tool.name, shortCircuit);
 		}
 
 		// 1. Emit tool_call event first - extensions can block execution or revise the input the tool
@@ -273,10 +286,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const decision = evaluatePermission(this.tool, resolvedArgs, engineCtx);
 		context?.xdevTierResolved?.(decision.tier);
 		if (decision.policy === "deny") {
-			throw new Error(
-				`Tool "${this.tool.name}" is blocked by user policy.\n` +
-					`To allow: remove "tools.approval.${this.tool.name}: deny" from config.`,
-			);
+			throw blockedByPolicyError(this.tool.name, decision);
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// An xd:// device dispatch already cleared the write tool's outer gate at

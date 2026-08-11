@@ -153,7 +153,14 @@ const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
 	"(": true,
 	")": true,
 };
-const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
+const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$|['"])/u;
+/**
+ * Concatenated option forms (`python3 -c'…'`, `perl -e'…'`, `git -c'x=y'`,
+ * `-ccode`) reinterpret the attached argument as code even when its quoted
+ * content carries no shell control chars, so they trip the guard on their own.
+ * Broad on purpose — false positives over-prompt (safe).
+ */
+const BASH_APPROVAL_CONCATENATED_OPTION_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:['"]|[^\s'"]|$)/u;
 
 /**
  * Restored from the pre-engine bash approval fn (plan ruling R1): an `allow`
@@ -203,8 +210,12 @@ function hasBashApprovalShellControl(command: string): boolean {
 		if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, ch)) return true;
 	}
 	// Options such as `git -c alias.x='!...'` and `sh -c "..."` reinterpret
-	// otherwise literal quoted or escaped arguments as executable code.
-	return hasReinterpretableShellControl && BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE.test(command);
+	// otherwise literal quoted or escaped arguments as executable code;
+	// concatenated forms (`-c'…'`, `-e'…'`) count on their own.
+	return (
+		(hasReinterpretableShellControl && BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE.test(command)) ||
+		BASH_APPROVAL_CONCATENATED_OPTION_RE.test(command)
+	);
 }
 
 /**

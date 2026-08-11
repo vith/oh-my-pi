@@ -144,7 +144,8 @@ describe("tools.approvalMode setting", () => {
 
 	it("critical bash patterns deny even with yolo mode and per-tool allow", async () => {
 		// The engine's curated critical deny outranks the yolo-derived allow
-		// posture and the legacy per-tool allow policy.
+		// posture and the legacy per-tool allow policy. The gate surfaces the
+		// engine's reason (plan ruling round 2), naming the denied piece.
 		const settings = approvalSettings({
 			"tools.approvalMode": "yolo",
 			"tools.approval": { bash: "allow" },
@@ -153,7 +154,7 @@ describe("tools.approvalMode setting", () => {
 			bashTool().execute("critical", { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" }, undefined, undefined, {
 				settings,
 			} as AgentToolContext),
-		).rejects.toThrow(/blocked by user policy/);
+		).rejects.toThrow(/is blocked: Denied: piece/);
 	});
 
 	it("CLI --auto-approve forces yolo mode for non-overriding tool calls", async () => {
@@ -167,7 +168,8 @@ describe("tools.approvalMode setting", () => {
 
 	it("CLI --auto-approve does not bypass curated critical denies", async () => {
 		// --auto-approve maps onto the allow posture, but the engine's curated
-		// critical deny outranks the posture, so dangerous commands still deny.
+		// critical deny outranks the posture, so dangerous commands still deny
+		// with the engine's reason surfaced (plan ruling round 2).
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
 		await expect(
 			bashTool().execute(
@@ -180,7 +182,7 @@ describe("tools.approvalMode setting", () => {
 					autoApprove: true,
 				} as AgentToolContext,
 			),
-		).rejects.toThrow(/blocked by user policy/);
+		).rejects.toThrow(/is blocked: Denied: piece/);
 	});
 
 	it("xd:// dispatch approval (xdevApproved) suppresses the tier-only re-prompt", async () => {

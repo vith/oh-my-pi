@@ -108,6 +108,25 @@ describe("evaluatePermission", () => {
 			removeSyncWithRetries(dir);
 		}
 	});
+	it("allow rules never ride concatenated -c/-e option forms", () => {
+		// Ruling R1 (round 2): `python3 -c'…'` / `perl -e'…'` attach the code
+		// argument directly to the option, which the old tail alternative
+		// (`[= \t]|$`) missed; the widened tail (`['"]`) degrades the allow to
+		// a prompt. Over-prompting on benign `git -c'k=v'` is accepted.
+		for (const [command, ruleMatch] of [
+			["python3 -c'print(1)'", "python3 *"],
+			["perl -e'print 1'", "perl *"],
+		] as const) {
+			const d = evaluateBashCommand(command, ctx({ "bash.patterns": [{ match: ruleMatch, approval: "allow" }] }));
+			expect(d.policy).toBe("prompt");
+		}
+		// Control: a plain invocation without -c/-e still rides the allow rule.
+		const plain = evaluateBashCommand(
+			"python3 -V",
+			ctx({ "bash.patterns": [{ match: "python3 *", approval: "allow" }] }),
+		);
+		expect(plain.policy).toBe("allow");
+	});
 	it("allow rules never ride single-piece shell control (legacy patterns)", () => {
 		// Ruling R1: `git status | sh` parses as ONE piece, so the single-piece
 		// allow gate alone would vouch for it; the shell-control guard degrades
