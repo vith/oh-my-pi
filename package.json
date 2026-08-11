@@ -163,6 +163,7 @@
     "publish": "bun run prepublishOnly && npm publish -ws --access public",
     "publish:dry": "bun run prepublishOnly && npm publish -ws --access public --dry-run",
     "release": "bun scripts/release.ts",
+    "release:fork": "bun scripts/fork-bump-version.ts",
     "gen:models": "bun --cwd=packages/catalog run gen:models",
     "gen:stats": "bun --cwd=packages/stats run gen:stats",
     "gen:stats:reset": "bun --cwd=packages/stats run gen:stats:reset",
