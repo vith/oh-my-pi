@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test"
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { matchRule } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
 import {
@@ -25,12 +26,16 @@ let settingsState: SettingsTestState | undefined;
 
 beforeEach(() => {
 	settingsState = beginSettingsTest();
+	// The discovery fs cache negative-caches missing files by path; the reused
+	// tmp dirs are wiped below, so stale "not found" entries must go too.
+	clearFsCache();
 	fs.rmSync(tmp, { recursive: true, force: true });
 	fs.mkdirSync(agentDir, { recursive: true });
 	fs.mkdirSync(cwd, { recursive: true });
 });
 
 afterEach(() => {
+	clearFsCache();
 	restoreSettingsTestState(settingsState);
 });
 
@@ -75,28 +80,28 @@ describe("planMigration", () => {
 		expect(plan.removeSettings).toEqual(["tools.approvalMode", "tools.approval", "bash.patterns"]);
 
 		expect(plannedRules(plan)).toContainEqual({
-			id: "legacy-bash",
+			id: "legacy-bash-0",
 			tool: "bash",
 			match: { arg: "*" },
 			action: "deny",
 			layer: "user",
 		});
 		expect(plannedRules(plan)).toContainEqual({
-			id: "legacy-read",
+			id: "legacy-read-1",
 			tool: "read",
 			match: { arg: "*" },
 			action: "allow",
 			layer: "user",
 		});
 		expect(plannedRules(plan)).toContainEqual({
-			id: "legacy-bash-git-push",
+			id: "legacy-bash-2",
 			tool: "bash",
 			match: { command: "git push" },
 			action: "allow",
 			layer: "user",
 		});
 		expect(plannedRules(plan)).toContainEqual({
-			id: "legacy-bash-rm-rf",
+			id: "legacy-bash-3",
 			tool: "bash",
 			match: { command: "rm -rf" },
 			action: "deny",
@@ -125,6 +130,39 @@ describe("planMigration", () => {
 		expect(firstRunNotice(settings)).toBeNull();
 	});
 
+	it("excludes legacy keys that live in a project layer from removal, with a notice", async () => {
+		// Legacy key arrives via the project settings capability (.claude/settings.json),
+		// not the global agentDir config.yml.
+		fs.mkdirSync(path.join(cwd, ".claude"), { recursive: true });
+		fs.writeFileSync(
+			path.join(cwd, ".claude", "settings.json"),
+			JSON.stringify({ tools: { approval: { bash: "deny" } } }),
+		);
+
+		const settings = await Settings.init({ agentDir, cwd });
+		expect(settings.isConfigured("tools.approval")).toBe(true);
+
+		const plan = planMigration(settings, cwd, home);
+		// The rule is still planned from the merged value, but the key is not
+		// claimed as removable: Settings.set writes only the global layer.
+		expect(plannedRules(plan)).toEqual([
+			{ id: "legacy-bash-0", tool: "bash", match: { arg: "*" }, action: "deny", layer: "user" },
+		]);
+		expect(plan.removeSettings).toEqual([]);
+		expect(plan.notices.some(notice => notice.includes("outside config.yml"))).toBe(true);
+
+		await applyMigration(plan, cwd, home);
+		// the project source survives, and the plan keeps flagging it
+		const projectConfig = JSON.parse(fs.readFileSync(path.join(cwd, ".claude", "settings.json"), "utf8")) as Record<
+			string,
+			unknown
+		>;
+		expect((projectConfig.tools as Record<string, unknown>).approval).toBeDefined();
+		expect(planMigration(settings, cwd, home).notices.some(notice => notice.includes("outside config.yml"))).toBe(
+			true,
+		);
+	});
+
 	it("skips approval entries whose policy cannot be mapped", async () => {
 		fs.writeFileSync(
 			path.join(agentDir, "config.yml"),
@@ -133,7 +171,7 @@ describe("planMigration", () => {
 		const settings = await Settings.init({ agentDir, cwd });
 		const plan = planMigration(settings, cwd, home);
 		expect(plannedRules(plan)).toEqual([
-			{ id: "legacy-read", tool: "read", match: { arg: "*" }, action: "allow", layer: "user" },
+			{ id: "legacy-read-0", tool: "read", match: { arg: "*" }, action: "allow", layer: "user" },
 		]);
 		expect(plan.removeSettings).toEqual(["tools.approval"]);
 	});
@@ -164,11 +202,11 @@ describe("applyMigration", () => {
 		expect(existing?.action).toBe("allow");
 
 		// every migrated rule is present exactly once in the user layer
-		const migratedIds = ["legacy-bash", "legacy-read", "legacy-bash-git-push", "legacy-bash-rm-rf"];
+		const migratedIds = ["legacy-bash-0", "legacy-read-1", "legacy-bash-2", "legacy-bash-3"];
 		expect(rules.filter(rule => migratedIds.includes(rule.id))).toHaveLength(4);
 
 		// catch-all rules match any arguments through the engine matcher
-		const bashDeny = rules.find(rule => rule.id === "legacy-bash")!;
+		const bashDeny = rules.find(rule => rule.id === "legacy-bash-0")!;
 		expect(matchRule(bashDeny, "bash", { command: "anything at all" })).toBe(true);
 		expect(matchRule(bashDeny, "read", {})).toBe(false);
 
@@ -186,6 +224,64 @@ describe("applyMigration", () => {
 		expect(settings.isConfigured("bash.patterns")).toBe(false);
 	});
 
+	it("keeps distinct rules when legacy entries slug identically", async () => {
+		// A per-tool policy and a bash.patterns entry both matching "*" must
+		// produce two distinct rules (id scheme is injective by plan index) —
+		// likewise case variants of one pattern, which the legacy matcher
+		// treated as separate ordered rules.
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify(
+				{
+					tools: { approval: { bash: "deny" } },
+					bash: {
+						patterns: [
+							{ match: "*", approval: "deny" },
+							{ match: "GIT PUSH", approval: "allow" },
+							{ match: "git push", approval: "deny" },
+						],
+					},
+				},
+				null,
+				2,
+			),
+		);
+		const settings = await Settings.init({ agentDir, cwd });
+		const plan = planMigration(settings, cwd, home);
+
+		expect(plannedRules(plan).map(rule => rule.id)).toEqual([
+			"legacy-bash-0", // tools.approval.bash (arg "*")
+			"legacy-bash-1", // pattern "*"
+			"legacy-bash-2", // pattern "GIT PUSH"
+			"legacy-bash-3", // pattern "git push"
+		]);
+
+		await applyMigration(plan, cwd, home);
+		const { rules } = loadRuleLayers(cwd, home);
+		const byId = new Map(rules.map(rule => [rule.id, rule]));
+		expect(byId.get("legacy-bash-0")?.action).toBe("deny");
+		expect(byId.get("legacy-bash-1")?.match).toEqual({ command: "*" });
+		expect(byId.get("legacy-bash-2")?.action).toBe("allow");
+		expect(byId.get("legacy-bash-3")?.action).toBe("deny");
+		expect(byId.size).toBe(4);
+	});
+
+	it("refuses to apply before settings are initialized, without writing rules", async () => {
+		// beforeEach already reset the singleton; never init here.
+		const plan: MigrationPlan = {
+			rules: [
+				{
+					yaml: YAML.stringify({ id: "x", tool: "bash", match: { command: "x" }, action: "allow" }),
+					layer: "user",
+				},
+			],
+			removeSettings: ["tools.approval"],
+			notices: [],
+		};
+		await expect(applyMigration(plan, cwd, home)).rejects.toThrow(/not initialized/);
+		expect(fs.existsSync(userRulesFile)).toBe(false);
+	});
+
 	it("is idempotent: a second plan is empty and re-applying does not duplicate rules", async () => {
 		writeLegacyConfig();
 		const settings = await Settings.init({ agentDir, cwd });
@@ -200,7 +296,7 @@ describe("applyMigration", () => {
 		await applyMigration(plan, cwd, home);
 		const doc = YAML.parse(fs.readFileSync(userRulesFile, "utf8")) as { rules: Array<{ id: string }> };
 		const ids = doc.rules.map(rule => rule.id);
-		for (const id of ["legacy-bash", "legacy-read", "legacy-bash-git-push", "legacy-bash-rm-rf"]) {
+		for (const id of ["legacy-bash-0", "legacy-read-1", "legacy-bash-2", "legacy-bash-3"]) {
 			expect(ids.filter(candidate => candidate === id)).toHaveLength(1);
 		}
 	});
