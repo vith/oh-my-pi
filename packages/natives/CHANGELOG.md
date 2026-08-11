@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.2.13+vith-fork] - 2026-08-11
+
 ### Added
 
 - Added parseShellCommand native binding (brush-parser AST as a compact JSON node list).
