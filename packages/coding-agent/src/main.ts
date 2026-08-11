@@ -11,6 +11,7 @@ import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	$env,
+	compareVersions,
 	directoryExists,
 	getLogPath,
 	getProjectDir,
@@ -122,7 +123,15 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		const data = (await response.json()) as { version?: string };
 		const latestVersion = data.version;
 
-		if (latestVersion && Bun.semver.order(latestVersion, currentVersion) > 0) {
+		// Fork note: uses the canonical compareVersions (build metadata `+…`
+		// ignored for precedence) instead of Bun.semver.order, which ranks a
+		// `+`-suffixed version below the plain release. The fork's builds are
+		// `17.2.13+vith-fork`; with Bun's rule the startup banner would nag
+		// "Update Available" the moment upstream publishes the same core
+		// (17.2.13), and `omp update` would then replace the fork build with
+		// the upstream one. This also keeps the banner consistent with
+		// `omp update --check` (update-cli.ts), which compares the same way.
+		if (latestVersion && compareVersions(latestVersion, currentVersion) > 0) {
 			return latestVersion;
 		}
 
