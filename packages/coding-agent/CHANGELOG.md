@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.2.13+vith-fork.2] - 2026-08-11
+
 ### Fixed
 
 - The startup update banner no longer flags a newer release when the only difference is semver build metadata: `17.2.13+vith-fork` is not "behind" `17.2.13`, and `omp update` would have replaced the fork build with the upstream one. The banner now uses the same comparator as `omp update --check`.
