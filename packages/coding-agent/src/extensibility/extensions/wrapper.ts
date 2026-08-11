@@ -10,10 +10,11 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { Settings } from "../../config/settings";
+import { type SettingPath, Settings, type SettingValue } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
-import { type ApprovalMode, formatApprovalPrompt, resolveApproval, truncateForPrompt } from "../../tools/approval";
+import { type ApprovalMode, formatApprovalPrompt, truncateForPrompt } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
+import { type EngineContext, evaluatePermission } from "../../tools/permissions/engine";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -138,6 +139,21 @@ function safetyCheckLines(checks: readonly ComputerSafetyCheck[]): string[] {
 }
 
 /**
+ * Settings view used when the gate's `--auto-approve` flag forces legacy yolo
+ * semantics: the mode is surfaced as explicitly configured so the engine's
+ * posture resolves to allow, mirroring the old gate folding `autoApprove` into
+ * the approval mode. Everything else delegates to the base settings, so
+ * per-tool policies, bash patterns, and rules resolve exactly as configured.
+ */
+function autoApproveSettings(base: Settings): Pick<Settings, "get" | "isConfigured"> {
+	return {
+		get: <P extends SettingPath>(path: P) =>
+			(path === "tools.approvalMode" ? "yolo" : base.get(path)) as SettingValue<P>,
+		isConfigured: key => key === "tools.approvalMode" || base.isConfigured(key),
+	};
+}
+
+/**
  * Wraps a tool with extension callbacks for interception.
  * - Emits tool_call event before execution (can block)
  * - Emits tool_result event after execution (can modify result)
@@ -156,6 +172,22 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		private runner: ExtensionRunner,
 	) {
 		applyToolProxy(tool, this);
+	}
+
+	/**
+	 * Build the engine context for the approval gate. The settings view is the
+	 * execute-time settings, with an isolated fallback when the context carries
+	 * none; `--auto-approve` surfaces legacy yolo through `autoApproveSettings`.
+	 * The cwd comes from the session manager when available so file-backed rule
+	 * layers resolve against the session's project.
+	 */
+	#engineContext(context: AgentToolContext | undefined, settings: Settings | undefined): EngineContext {
+		const base = settings ?? Settings.isolated({});
+		return {
+			settings: context?.autoApprove === true ? autoApproveSettings(base) : base,
+			cwd: context?.sessionManager?.getCwd() ?? process.cwd(),
+			home: undefined,
+		};
 	}
 
 	/**
@@ -189,8 +221,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const settings: Settings | undefined = context?.settings;
 		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
 		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
-		const userPolicies = (settings?.get("tools.approval") ?? {}) as Record<string, unknown>;
-		if (resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies).policy === "deny") {
+		const engineCtx = this.#engineContext(context, settings);
+		if (evaluatePermission(this.tool, approvalArgs(params, context), engineCtx).policy === "deny") {
 			throw new Error(
 				`Tool "${this.tool.name}" is blocked by user policy.\n` +
 					`To allow: remove "tools.approval.${this.tool.name}: deny" from config.`,
@@ -238,9 +270,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// input that newly resolves to `deny` is caught here even though the original passed the
 		// short-circuit above.
 		const resolvedArgs = approvalArgs(effectiveParams, context);
-		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
-		context?.xdevTierResolved?.(resolved.tier);
-		if (resolved.policy === "deny") {
+		const decision = evaluatePermission(this.tool, resolvedArgs, engineCtx);
+		context?.xdevTierResolved?.(decision.tier);
+		if (decision.policy === "deny") {
 			throw new Error(
 				`Tool "${this.tool.name}" is blocked by user policy.\n` +
 					`To allow: remove "tools.approval.${this.tool.name}: deny" from config.`,
@@ -251,15 +283,17 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// this tool's tier — re-prompting would double-ask for one action. The
 		// bypass only holds while the input is exactly what that outer gate
 		// approved: a handler revision here may have raised the tier, so revised
-		// input always faces the full gate. Explicit per-tool "prompt" policies
-		// and tool-demanded overrides still prompt. Provider safety checks are
-		// stronger: yolo, per-tool allow, and xdev approval never acknowledge
-		// them on the user's behalf.
-		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, this.tool.name);
+		// input always faces the full gate. Tool-declared and per-tool user
+		// "prompt" decisions and tool-demanded overrides still prompt. Provider
+		// safety checks are stronger: yolo, per-tool allow, and xdev approval
+		// never acknowledge them on the user's behalf.
 		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
 		const approvalCheck = {
-			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
-			reason: resolved.reason,
+			required:
+				pendingSafetyChecks.length > 0 ||
+				(decision.policy === "prompt" &&
+					(decision.source === "tool" || decision.source === "user" || decision.override || !xdevBypass)),
+			reason: decision.reason,
 		};
 
 		if (approvalCheck.required) {
