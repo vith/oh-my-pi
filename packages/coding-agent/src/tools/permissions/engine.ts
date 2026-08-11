@@ -158,9 +158,12 @@ const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:c
  * Concatenated option forms (`python3 -c'…'`, `perl -e'…'`, `git -c'x=y'`,
  * `-ccode`) reinterpret the attached argument as code even when its quoted
  * content carries no shell control chars, so they trip the guard on their own.
- * Broad on purpose — false positives over-prompt (safe).
+ * The option class is narrowed to non-whitespace and the tail has no `$`
+ * alternative so benign flag forms stay allowable: `curl -c cookies.txt`
+ * (space-separated cookie-jar arg) and a bare trailing `grep -c` must not
+ * match. Broad beyond that on purpose — false positives over-prompt (safe).
  */
-const BASH_APPROVAL_CONCATENATED_OPTION_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:['"]|[^\s'"]|$)/u;
+const BASH_APPROVAL_CONCATENATED_OPTION_RE = /(?:^|[ \t])(?:-[^- \t]*[ce]|--(?:command|eval))(?:['"]|[^\s'"])/u;
 
 /**
  * Restored from the pre-engine bash approval fn (plan ruling R1): an `allow`

@@ -108,6 +108,28 @@ describe("evaluatePermission", () => {
 			removeSyncWithRetries(dir);
 		}
 	});
+	it("concatenated-option guard does not over-match benign flags", () => {
+		// Ruling R3: `curl -c cookies.txt` (space-separated cookie-jar arg) and
+		// a bare trailing `grep -c` must stay allowable under a matching allow
+		// rule — the option class must not span whitespace and there is no `$`
+		// tail alternative — while `curl -c'x'` (attached quoted arg) still
+		// degrades to a prompt.
+		const curl = evaluateBashCommand(
+			"curl -c cookies.txt",
+			ctx({ "bash.patterns": [{ match: "curl *", approval: "allow" }] }),
+		);
+		expect(curl.policy).toBe("allow");
+		const grepCount = evaluateBashCommand(
+			"grep -c",
+			ctx({ "bash.patterns": [{ match: "grep *", approval: "allow" }] }),
+		);
+		expect(grepCount.policy).toBe("allow");
+		const attached = evaluateBashCommand(
+			"curl -c'x'",
+			ctx({ "bash.patterns": [{ match: "curl *", approval: "allow" }] }),
+		);
+		expect(attached.policy).toBe("prompt");
+	});
 	it("allow rules never ride concatenated -c/-e option forms", () => {
 		// Ruling R1 (round 2): `python3 -c'…'` / `perl -e'…'` attach the code
 		// argument directly to the option, which the old tail alternative
