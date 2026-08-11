@@ -4,12 +4,14 @@
  * cannot run in this fork: it requires the `main` branch and pushes tags to
  * origin, i.e. the upstream repo).
  *
- * Version shape: `<nearest vX.Y.Z tag, patch+1>+<identifier>`, default
- * identifier `vith-fork` (override via OMP_FORK_IDENTIFIER). Re-running on
- * the same upstream tag iterates the build metadata (`17.2.13+vith-fork` →
- * `17.2.13+vith-fork.2`) so another fork build can be produced without
- * syncing upstream; a newer tag or a different identifier starts a fresh
- * sequence. Commits the bump but creates no tag and pushes nothing.
+ * Version shape: `<nearest vX.Y.Z tag, patch+1>+<identifier>.<commits since
+ * the tag>.<HEAD short hash>`, default identifier `vith-fork` (override via
+ * OMP_FORK_IDENTIFIER). The commit count and short hash make the version
+ * deterministic per commit: every new commit since the tag bumps the count,
+ * so re-running after committing more changes always produces a distinct
+ * version, and the hash disambiguates diverged checkouts. Syncing upstream to
+ * a newer tag moves the base patch and resets the count. Commits the bump but
+ * creates no tag and pushes nothing.
  */
 import { $, Glob } from "bun";
 import { compareVersions } from "../packages/utils/src/version.ts";
@@ -35,25 +37,29 @@ function bumpPatch(version: string): string {
 }
 
 /**
- * Derive the next fork version.
- *
- * The base is the nearest upstream tag's patch+1 (or the current core version
- * when no tag is reachable) plus the fork identifier. When `currentVersion`
- * is already a fork build of that base, the build metadata is iterated
- * (`17.2.13+vith-fork` → `17.2.13+vith-fork.2`) so the script can be re-run
- * for another fork build on the same upstream version. A newer `base` (after
- * syncing upstream) or a different identifier starts a fresh sequence.
+ * Git state the fork version is derived from.
  */
-export function deriveForkVersion(base: string | undefined, currentVersion: string, identifier: string): string {
-	const patchBase = base ?? currentVersion.split("+")[0];
-	const baseFork = `${bumpPatch(patchBase)}+${identifier}`;
-	const iterationPrefix = `${baseFork}.`;
-	if (currentVersion === baseFork || currentVersion.startsWith(iterationPrefix)) {
-		const suffix = currentVersion.slice(iterationPrefix.length);
-		const iteration = /^\d+$/.test(suffix) ? Number(suffix) : 1;
-		return `${baseFork}.${iteration + 1}`;
-	}
-	return baseFork;
+export interface ForkGitInfo {
+	/** Nearest upstream-style tag (`vX.Y.Z` without the `v`), if one is reachable. */
+	tagVersion: string | undefined;
+	/** Commits between the tag (or the repo root when no tag) and HEAD. */
+	commitsSince: number;
+	/** Short hash of HEAD. */
+	shortHash: string;
+}
+
+/**
+ * Derive the fork version for the current commit.
+ *
+ * The core is the nearest upstream tag's patch+1 (or the current core version
+ * when no tag is reachable). The build metadata is
+ * `<identifier>.<commits since the tag>.<HEAD short hash>`, so the version is
+ * deterministic per commit: new commits since the tag bump the count, and the
+ * hash disambiguates two checkouts that share a count (e.g. after a sync).
+ */
+export function deriveForkVersion(git: ForkGitInfo, currentVersion: string, identifier: string): string {
+	const base = git.tagVersion ?? currentVersion.split("+")[0];
+	return `${bumpPatch(base)}+${identifier}.${git.commitsSince}.${git.shortHash}`;
 }
 
 /** Nearest reachable tag matching upstream release style `vX.Y.Z` (e.g. `v17.2.12`). */
@@ -108,14 +114,22 @@ async function main(): Promise<void> {
 	}
 
 	// 2. Derive the fork version: nearest upstream tag (or the current core
-	// version when no tag is reachable), patch+1, `+` suffix. If the current
-	// version is already a fork build of the same base, the build metadata is
-	// iterated so a second fork build on the same upstream version is possible.
+	// version when no tag is reachable), patch+1, then `+identifier.commitCount.shortHash`
+	// so the version is deterministic per commit.
 	const tag = await nearestTagVersion();
+	const revList = tag
+		? await $`git rev-list --count ${`v${tag}`}..HEAD`.quiet()
+		: await $`git rev-list --count HEAD`.quiet();
+	const shortHash = (await $`git rev-parse --short HEAD`.quiet()).stdout.toString().trim();
+	const commitsSince = Number(revList.stdout.toString().trim());
+	if (!Number.isInteger(commitsSince) || commitsSince < 0) {
+		console.error(`Error: could not count commits since ${tag ? `v${tag}` : "the repo root"}`);
+		process.exit(1);
+	}
 	const current = (await Bun.file("packages/utils/package.json").json()) as { version: string };
-	const version = deriveForkVersion(tag, current.version, FORK_IDENTIFIER);
+	const version = deriveForkVersion({ tagVersion: tag, commitsSince, shortHash }, current.version, FORK_IDENTIFIER);
 	console.log(
-		`  base: ${tag ?? current.version.split("+")[0]} (${tag ? "git tag" : "package.json fallback"}), target: ${version}`,
+		`  base: ${tag ?? current.version.split("+")[0]} (${tag ? "git tag" : "package.json fallback"}), commits: ${commitsSince}, head: ${shortHash}, target: ${version}`,
 	);
 
 	if (tag && compareVersions(version, tag) <= 0) {
@@ -188,7 +202,8 @@ async function main(): Promise<void> {
 	console.log("Committing...");
 	await git(["add", "-u"]);
 	await git(["commit", "-m", `chore: bump version to ${version}`]);
-	console.log("\nDone. Run `bun --cwd=packages/coding-agent run build` to produce a binary.");
+	console.log("\nDone. Run `bun run build:fork` to rebuild the native addon, clear the natives cache,");
+	console.log("rebuild the binary, and smoke-test it in one step.");
 }
 
 if (import.meta.main) await main();
