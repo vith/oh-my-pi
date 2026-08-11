@@ -50,24 +50,33 @@ export function unregisterPermissionHandler(sessionId: string): void {
 }
 
 /**
- * Walk the AgentRegistry parentId chain from `sessionId` to the root session
- * (createAgentSession registers every agent with `parentId`; the registry is
- * the process-global singleton the Agent Hub uses). Sessions without a parent
- * — or unknown ids — fall back to the id itself. Returns null only for an
- * empty id (no session manager in the context).
+ * Walk the AgentRegistry parentId chain from `sessionId` to the root session.
+ * The pending call carries the session-manager id (the wrapper reads
+ * `context.sessionManager.getSessionId()`), while the registry is keyed by
+ * agent id — so the starting ref is resolved by exact id first, then by the
+ * live attached session's manager id (`createAgentSession` pre-registers every
+ * agent with `parentId`). The returned root is the root session's
+ * session-manager id when its session is live (the namespace permission
+ * handlers are registered in), else its ref id. Sessions without a parent —
+ * or unknown ids — fall back to the id itself. Returns null only for an empty
+ * id (no session manager in the context).
  */
 export function findRootSessionId(sessionId: string): string | null {
 	if (!sessionId) return null;
 	const registry = AgentRegistry.global();
-	let current = sessionId;
+	const start =
+		registry.get(sessionId) ?? registry.list().find(ref => ref.session?.sessionManager.getSessionId() === sessionId);
 	const visited = new Set<string>();
+	let current = start?.id ?? sessionId;
 	while (!visited.has(current)) {
 		visited.add(current);
 		const ref = registry.get(current);
-		if (!ref?.parentId) return current;
+		if (!ref?.parentId) {
+			return ref?.session?.sessionManager.getSessionId() ?? ref?.id ?? sessionId;
+		}
 		current = ref.parentId;
 	}
-	return current;
+	return registry.get(current)?.session?.sessionManager.getSessionId() ?? current;
 }
 
 /**

@@ -408,7 +408,55 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 			// Provider safety checks fail closed without an interactive prompt. Unlike
 			// ordinary tier approval, no setting or yolo mode may bypass this gate.
-			if (!this.runner.hasUI()) {
+			if (this.runner.hasUI()) {
+				const uiContext = this.runner.getUIContext();
+				const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
+				const safetyPrompt =
+					pendingSafetyChecks.length > 0
+						? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
+						: basePrompt;
+				const includeCandidates = pendingSafetyChecks.length === 0;
+				// Task 11 (§5.3): LLM rule suggestions ride on the session's active
+				// model. Without a registry/model handle the gate degrades to
+				// candidates-only (the provider also self-gates on
+				// `permissions.llmSuggestions`). Provider safety-check prompts never
+				// get suggestions — they are stronger than any rule.
+				const suggestionsProvider =
+					includeCandidates && context?.modelRegistry !== undefined
+						? createSuggestionProvider(engineCtx, context.modelRegistry, sessionId || undefined, context.model)
+						: undefined;
+				let resolution: PromptResolution;
+				try {
+					resolution = await promptForDecision(uiContext, this.tool.name, resolvedArgs, decision, engineCtx, {
+						title: safetyPrompt,
+						// Provider safety checks are stronger than any rule: the dialog
+						// shows without candidates and only offers Approve/Deny.
+						includeCandidates,
+						...(suggestionsProvider !== undefined ? { suggestionsProvider } : {}),
+					});
+				} catch (err) {
+					await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
+					throw err;
+				}
+				await emitApprovalResolved(
+					resolution.policy === "allow",
+					resolution.policy === "deny" ? "denied by user" : undefined,
+				);
+				if (resolution.policy === "deny") {
+					await this.#recordAudit(
+						{ ...decision, policy: "deny" as const, reason: "denied by user" },
+						resolvedArgs,
+						"blocked",
+						context,
+						engineCtx,
+					);
+					throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				}
+				if (pendingSafetyChecks.length > 0) {
+					if (!context) throw new Error("Provider safety approval context is unavailable");
+					context.providerSafetyApproved = true;
+				}
+			} else {
 				if (pendingSafetyChecks.length > 0) {
 					await this.#recordAudit(decision, resolvedArgs, "blocked", context, engineCtx);
 					await emitApprovalResolved(false, "no interactive UI available");
@@ -420,7 +468,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				// promise until the root session's permission handler answers or
 				// the agent is aborted. Without a handler anywhere up the session
 				// tree parkApproval throws the legacy no-UI error — fail-closed,
-				// preserving print/RPC/ACP behavior.
+				// preserving print/RPC/ACP behavior. The branch is terminal:
+				// allow continues to execution, deny throws the standard error —
+				// the no-op UI context must never see the call again.
 				const pending: PendingApproval = {
 					key: `${this.tool.name}:${toolCallId}`,
 					sessionId,
@@ -454,54 +504,6 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					);
 					throw new Error(`Tool call denied by user: ${this.tool.name}`);
 				}
-			}
-
-			const uiContext = this.runner.getUIContext();
-			const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
-			const safetyPrompt =
-				pendingSafetyChecks.length > 0
-					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
-					: basePrompt;
-			const includeCandidates = pendingSafetyChecks.length === 0;
-			// Task 11 (§5.3): LLM rule suggestions ride on the session's active
-			// model. Without a registry/model handle the gate degrades to
-			// candidates-only (the provider also self-gates on
-			// `permissions.llmSuggestions`). Provider safety-check prompts never
-			// get suggestions — they are stronger than any rule.
-			const suggestionsProvider =
-				includeCandidates && context?.modelRegistry !== undefined
-					? createSuggestionProvider(engineCtx, context.modelRegistry, sessionId || undefined, context.model)
-					: undefined;
-			let resolution: PromptResolution;
-			try {
-				resolution = await promptForDecision(uiContext, this.tool.name, resolvedArgs, decision, engineCtx, {
-					title: safetyPrompt,
-					// Provider safety checks are stronger than any rule: the dialog
-					// shows without candidates and only offers Approve/Deny.
-					includeCandidates,
-					...(suggestionsProvider !== undefined ? { suggestionsProvider } : {}),
-				});
-			} catch (err) {
-				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
-				throw err;
-			}
-			await emitApprovalResolved(
-				resolution.policy === "allow",
-				resolution.policy === "deny" ? "denied by user" : undefined,
-			);
-			if (resolution.policy === "deny") {
-				await this.#recordAudit(
-					{ ...decision, policy: "deny" as const, reason: "denied by user" },
-					resolvedArgs,
-					"blocked",
-					context,
-					engineCtx,
-				);
-				throw new Error(`Tool call denied by user: ${this.tool.name}`);
-			}
-			if (pendingSafetyChecks.length > 0) {
-				if (!context) throw new Error("Provider safety approval context is unavailable");
-				context.providerSafetyApproved = true;
 			}
 		}
 
