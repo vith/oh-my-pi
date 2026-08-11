@@ -119,6 +119,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
+import { createSuggestionProvider } from "../tools/permissions/suggest";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
@@ -825,17 +826,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#permissionController = new PermissionController({
 			rootSessionId: this.sessionManager.getSessionId(),
 			ui: () => this.getToolUIContext(),
-			sessionByManagerId: sessionId => {
-				const ref = AgentRegistry.global()
+			agentRefByManagerId: sessionId =>
+				AgentRegistry.global()
 					.list()
-					.find(ref => ref.session?.sessionManager.getSessionId() === sessionId);
-				return ref?.session ?? undefined;
-			},
+					.find(ref => ref.session?.sessionManager.getSessionId() === sessionId),
 			engineContext: session => ({
 				settings: this.settings,
 				cwd: session?.sessionManager.getCwd() ?? this.sessionManager.getCwd(),
 				home: undefined,
 			}),
+			// Spec §6.1: async LLM rule suggestions ride on the parked session's
+			// active model, mirroring the main dialog's Task 11 wiring; when the
+			// session has no live model handle the dialog degrades to
+			// candidates-only.
+			suggestionsProvider: (session, engineCtx) => {
+				if (!session) return undefined;
+				return createSuggestionProvider(
+					engineCtx,
+					session.modelRegistry,
+					session.sessionManager.getSessionId(),
+					session.model,
+				);
+			},
 			attachedManagerId: () => this.viewSession?.sessionManager.getSessionId(),
 		});
 		this.#inputController = new InputController(this);

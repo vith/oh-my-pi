@@ -4,14 +4,18 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { YAML } from "bun";
-import type { ExtensionUIContext } from "../../../src/extensibility/extensions/types";
+import type { ExtensionUIContext, PermissionDialogRequest } from "../../../src/extensibility/extensions/types";
 import {
 	PermissionPendingComponent,
 	type PermissionPendingDetails,
 } from "../../../src/modes/components/permission-pending";
-import { PermissionController, showFirstRunNotices } from "../../../src/modes/controllers/permission-controller";
+import {
+	PermissionController,
+	type PermissionControllerDeps,
+	showFirstRunNotices,
+} from "../../../src/modes/controllers/permission-controller";
 import { initTheme } from "../../../src/modes/theme/theme";
-import { AgentRegistry } from "../../../src/registry/agent-registry";
+import { type AgentRef, AgentRegistry } from "../../../src/registry/agent-registry";
 import type { AgentSession } from "../../../src/session/agent-session";
 import type { CustomMessage } from "../../../src/session/messages";
 import type { EngineDecision } from "../../../src/tools/permissions/engine";
@@ -39,11 +43,12 @@ function fakeDecision(): EngineDecision {
 	return { policy: "prompt", tier: "exec", source: "posture", override: false, reason: "no matching rule" };
 }
 
-function makePending(sessionId: string, toolName = "bash", agentId?: string): PendingApproval {
+// The wrapper never sets `PendingApproval.agentId` — identity comes from the
+// registry ref's display name — so pendings here carry none either.
+function makePending(sessionId: string, toolName = "bash"): PendingApproval {
 	return {
 		key: `${toolName}:${sessionId}:call-1`,
 		sessionId,
-		agentId,
 		toolName,
 		args: { command: "echo hi" },
 		decision: fakeDecision(),
@@ -84,6 +89,7 @@ afterEach(() => {
 	unregisterPermissionHandler(ROOT_SESSION_ID);
 	unregisterPermissionHandler(SUB_SESSION_ID);
 	abortPendingForSession(SUB_SESSION_ID);
+	abortPendingForSession(ROOT_SESSION_ID);
 });
 
 describe("PermissionPendingComponent", () => {
@@ -116,12 +122,19 @@ interface BubbleHarness {
 	notify: ReturnType<typeof vi.fn>;
 	showPermissionDialog: ReturnType<typeof vi.fn>;
 	entries: Array<{ customType: string; data: unknown }>;
+	capturedRequest: () => PermissionDialogRequest | undefined;
 	setAttached: (sessionId: string | undefined) => void;
 }
 
-function makeController(): BubbleHarness {
+function makeController(
+	options: { suggestionsProvider?: PermissionControllerDeps["suggestionsProvider"] } = {},
+): BubbleHarness {
 	const notify = vi.fn();
-	const showPermissionDialog = vi.fn(async () => 0); // index 0 = "Allow once"
+	let capturedRequest: PermissionDialogRequest | undefined;
+	const showPermissionDialog = vi.fn(async (request: PermissionDialogRequest) => {
+		capturedRequest = request;
+		return 0; // index 0 = "Allow once"
+	});
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	const ui = { notify, showPermissionDialog } as unknown as ExtensionUIContext;
 	const subSession = {
@@ -133,12 +146,25 @@ function makeController(): BubbleHarness {
 			},
 		},
 	} as unknown as AgentSession;
+	// The registry ref carries the display identity the root notice resolves.
+	const subRef = {
+		id: SUB_ID,
+		displayName: "Worker",
+		kind: "sub",
+		parentId: ROOT_ID,
+		status: "running",
+		session: subSession,
+		sessionFile: null,
+		createdAt: 0,
+		lastActivity: 0,
+	} as unknown as AgentRef;
 	let attached: string | undefined;
 	const controller = new PermissionController({
 		rootSessionId: ROOT_SESSION_ID,
 		ui: () => ui,
-		sessionByManagerId: id => (id === SUB_SESSION_ID ? subSession : undefined),
+		agentRefByManagerId: id => (id === SUB_SESSION_ID ? subRef : undefined),
 		engineContext: () => ({ settings: Settings.isolated({}), cwd: process.cwd(), home: undefined }),
+		...(options.suggestionsProvider !== undefined ? { suggestionsProvider: options.suggestionsProvider } : {}),
 		attachedManagerId: () => attached,
 	});
 	return {
@@ -146,6 +172,7 @@ function makeController(): BubbleHarness {
 		notify,
 		showPermissionDialog,
 		entries,
+		capturedRequest: () => capturedRequest,
 		setAttached: sessionId => {
 			attached = sessionId;
 		},
@@ -157,13 +184,14 @@ describe("PermissionController", () => {
 		registerTree();
 		const h = makeController();
 		h.controller.install();
-		const pending = makePending(SUB_SESSION_ID, "bash", "Worker");
+		const pending = makePending(SUB_SESSION_ID);
 		const parked = parkApproval(pending);
 
 		// Parked and visible, not yet answered.
 		expect(pendingApprovalsForSession(SUB_SESSION_ID)).toEqual([pending]);
 
-		// (a) root notification names the agent and the pending command.
+		// (a) root notification names the subagent (registry display name — the
+		// wrapper never sets agentId) and the pending command.
 		expect(h.notify).toHaveBeenCalledWith("Subagent Worker is waiting for approval: echo hi");
 
 		// (b) a pending entry was appended to the SUBAGENT's session.
@@ -218,18 +246,51 @@ describe("PermissionController", () => {
 		h.controller.dispose();
 	});
 
-	it("falls back to the session id in the notice when the pending has no agentId", async () => {
+	it("preloads the focused dialog with async LLM suggestions when a provider is supplied", async () => {
+		registerTree();
+		const provider = vi.fn(async () => []);
+		const h = makeController({ suggestionsProvider: () => provider });
+		h.controller.install();
+		h.setAttached(SUB_SESSION_ID);
+
+		const parked = parkApproval(makePending(SUB_SESSION_ID));
+		await expect(parked).resolves.toEqual({ policy: "allow" });
+
+		const request = h.capturedRequest();
+		expect(request?.suggestions).toBeDefined();
+		expect(provider).toHaveBeenCalledTimes(1);
+
+		h.controller.dispose();
+	});
+
+	it("omits suggestions from the focused dialog when no provider is supplied", async () => {
+		registerTree();
+		const h = makeController();
+		h.controller.install();
+		h.setAttached(SUB_SESSION_ID);
+
+		const parked = parkApproval(makePending(SUB_SESSION_ID));
+		await expect(parked).resolves.toEqual({ policy: "allow" });
+		expect(h.capturedRequest()?.suggestions).toBeUndefined();
+
+		h.controller.dispose();
+	});
+
+	it("falls back to the session id in the notice when no registry ref resolves the parked session", async () => {
 		registerTree();
 		const h = makeController();
 		h.controller.install();
 
-		const parked = parkApproval(makePending(SUB_SESSION_ID, "bash", undefined));
+		// Park under the root's own manager id: the root handler serves it, but
+		// the fake ref lookup (which only knows the sub session) resolves
+		// nothing, so the label falls back to the session id.
+		const parked = parkApproval(makePending(ROOT_SESSION_ID));
 		// Observe the parked promise so a late settle cannot surface as unhandled.
 		const outcome = parked.then(
 			() => null,
 			() => null,
 		);
-		expect(h.notify).toHaveBeenCalledWith(`Subagent ${SUB_SESSION_ID} is waiting for approval: echo hi`);
+		expect(h.notify).toHaveBeenCalledWith(`Subagent ${ROOT_SESSION_ID} is waiting for approval: echo hi`);
 
 		h.controller.dispose();
 		await outcome;

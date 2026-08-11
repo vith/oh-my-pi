@@ -21,10 +21,11 @@ import { truncateToWidth } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { ExtensionUIContext } from "../../extensibility/extensions/types";
+import type { AgentRef } from "../../registry/agent-registry";
 import type { AgentSession } from "../../session/agent-session";
 import type { EngineContext } from "../../tools/permissions/engine";
 import { firstRunNotice } from "../../tools/permissions/migrate";
-import { promptForDecision } from "../../tools/permissions/prompt";
+import { type PromptForDecisionOptions, promptForDecision } from "../../tools/permissions/prompt";
 import {
 	PERMISSION_PENDING_TYPE,
 	type PendingApproval,
@@ -32,16 +33,34 @@ import {
 	registerPermissionHandler,
 	unregisterPermissionHandler,
 } from "../../tools/permissions/subagent";
+import type { Suggestion } from "../../tools/permissions/suggest";
 
 export interface PermissionControllerDeps {
 	/** Root session-manager id — the namespace the answering handler is registered in. */
 	rootSessionId: string;
 	/** Root UI surface (notify + approval dialog); undefined before hook init. */
 	ui: () => ExtensionUIContext | undefined;
-	/** Resolve a live session by its session-manager id (registry bridge). */
-	sessionByManagerId: (sessionId: string) => AgentSession | undefined;
+	/**
+	 * Resolve a live registry ref by its attached session-manager id (the
+	 * bridge the pending carries). Supplies both the parked session (for the
+	 * entry append) and the display identity for the root notice — the wrapper
+	 * never sets `PendingApproval.agentId`, so the ref's display name is the
+	 * only user-facing subagent identity available.
+	 */
+	agentRefByManagerId: (sessionId: string) => AgentRef | undefined;
 	/** Engine context (cwd/home) used for remembered-rule writes, scoped to the parked session. */
 	engineContext: (session: AgentSession | undefined) => EngineContext;
+	/**
+	 * Optional async LLM rule-suggestion provider for the focused dialog (spec
+	 * §6.1, Task 11 wiring pattern). Undefined/absent → candidates-only, the
+	 * same degradation the main dialog uses.
+	 */
+	suggestionsProvider?:
+		| ((
+				session: AgentSession | undefined,
+				engineCtx: EngineContext,
+		  ) => ((piece: string) => Promise<Suggestion[]>) | undefined)
+		| undefined;
 	/** Session-manager id of the session the TUI is attached to, or undefined when detached. */
 	attachedManagerId: () => string | undefined;
 }
@@ -97,10 +116,14 @@ export class PermissionController {
 
 	#handleParked(pending: PendingApproval): Promise<{ policy: "allow" | "deny" }> {
 		const command = pendingCommandSummary(pending);
-		const session = this.#deps.sessionByManagerId(pending.sessionId);
-		this.#deps.ui()?.notify(`Subagent ${pending.agentId ?? pending.sessionId} is waiting for approval: ${command}`);
+		const ref = this.#deps.agentRefByManagerId(pending.sessionId);
+		const session = ref?.session ?? undefined;
+		// The wrapper never sets `agentId`, so the registry ref's display name
+		// is the user-facing identity for the notice and the entry.
+		const agentLabel = ref?.displayName || ref?.id || pending.sessionId;
+		this.#deps.ui()?.notify(`Subagent ${agentLabel} is waiting for approval: ${command}`);
 		session?.sessionManager.appendCustomMessageEntry(PERMISSION_PENDING_TYPE, "", true, {
-			agentId: pending.agentId,
+			agentId: agentLabel,
 			toolName: pending.toolName,
 			command,
 			key: pending.key,
@@ -131,21 +154,29 @@ export class PermissionController {
 		if (!pendingApprovalsForSession(pending.sessionId).some(p => p.key === pending.key)) return;
 		if (this.#dialogKeys.has(pending.key)) return;
 		this.#dialogKeys.add(pending.key);
-		const session = this.#deps.sessionByManagerId(pending.sessionId);
+		const ref = this.#deps.agentRefByManagerId(pending.sessionId);
+		const session = ref?.session ?? undefined;
+		const agentLabel = ref?.displayName || ref?.id || pending.sessionId;
+		const engineCtx = this.#deps.engineContext(session);
 		let answered = false;
 		try {
 			const ui = this.#deps.ui();
 			const answer = this.#answerers.get(pending.key);
 			if (!ui || !answer) return;
+			const options: PromptForDecisionOptions = {
+				title: `Subagent ${agentLabel} requests approval: ${pendingCommandSummary(pending)}`,
+			};
+			// Spec §6.1: async LLM rule suggestions ride on the parked session's
+			// active model, mirroring the main dialog; unresolvable → candidates-only.
+			const provider = this.#deps.suggestionsProvider?.(session, engineCtx);
+			if (provider) options.suggestionsProvider = provider;
 			const resolution = await promptForDecision(
 				ui,
 				pending.toolName,
 				pending.args,
 				pending.decision,
-				this.#deps.engineContext(session),
-				{
-					title: `Subagent ${pending.agentId ?? pending.sessionId} requests approval: ${pendingCommandSummary(pending)}`,
-				},
+				engineCtx,
+				options,
 			);
 			// The pending may have been aborted while its dialog sat in the
 			// queue — drop the answerer instead of resolving a dead promise.
