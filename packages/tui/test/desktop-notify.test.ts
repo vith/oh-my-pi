@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	buildDesktopNotifyCloseCommand,
 	buildDesktopNotifyCommand,
+	closeDesktopNotification,
 	type DesktopNotifier,
 	hasLinuxDesktopSession,
+	resetDesktopNotificationTracking,
 	resetDesktopNotifierCache,
 	resolveDesktopNotifier,
 	sendDesktopNotification,
@@ -114,6 +117,7 @@ describe("buildDesktopNotifyCommand", () => {
 			"Oh My Pi",
 			"--urgency=normal",
 			"--expire-time=5000",
+			"--print-id",
 			"Oh My Pi",
 			"ping",
 		]);
@@ -132,6 +136,7 @@ describe("buildDesktopNotifyCommand", () => {
 			"Oh My Pi",
 			"--urgency=critical",
 			"--expire-time=5000",
+			"--print-id",
 			"Session 12",
 			"Complete",
 		]);
@@ -144,8 +149,45 @@ describe("buildDesktopNotifyCommand", () => {
 			"Oh My Pi",
 			"--urgency=normal",
 			"--expire-time=5000",
+			"--print-id",
 			"Oh My Pi",
 			"Waiting for input",
+		]);
+	});
+
+	it("replaces the live notification when a tracked id exists", () => {
+		expect(buildDesktopNotifyCommand(notifySend, "ping", 42)).toEqual([
+			"/usr/bin/notify-send",
+			"--app-name",
+			"Oh My Pi",
+			"--urgency=normal",
+			"--expire-time=5000",
+			"--replace-id=42",
+			"--print-id",
+			"Oh My Pi",
+			"ping",
+		]);
+	});
+
+	it("threads the tracked id through gdbus replaces_id", () => {
+		expect(buildDesktopNotifyCommand(gdbus, { title: "Oh My Pi", body: "ping" }, 7)).toEqual([
+			"/usr/bin/gdbus",
+			"call",
+			"--session",
+			"--dest",
+			"org.freedesktop.Notifications",
+			"--object-path",
+			"/org/freedesktop/Notifications",
+			"--method",
+			"org.freedesktop.Notifications.Notify",
+			"Oh My Pi",
+			"7",
+			"",
+			"Oh My Pi",
+			"ping",
+			"[]",
+			'{"urgency": <byte 1>}',
+			"5000",
 		]);
 	});
 
@@ -175,11 +217,13 @@ describe("buildDesktopNotifyCommand", () => {
 describe("sendDesktopNotification", () => {
 	beforeEach(() => {
 		resetDesktopNotifierCache();
+		resetDesktopNotificationTracking();
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
 		resetDesktopNotifierCache();
+		resetDesktopNotificationTracking();
 	});
 
 	it("fires Bun.spawn with the resolved notify-send argv and unref's the child so it never blocks process exit", () => {
@@ -202,11 +246,14 @@ describe("sendDesktopNotification", () => {
 			"Oh My Pi",
 			"--urgency=normal",
 			"--expire-time=5000",
+			"--print-id",
 			"Session",
 			"Complete",
 		]);
 		expect(opts.stdin).toBe("ignore");
-		expect(opts.stdout).toBe("ignore");
+		// stdout is piped so the daemon-assigned id can be captured for
+		// replace/close; a child without a readable stdout simply yields no id.
+		expect(opts.stdout).toBe("pipe");
 		expect(opts.stderr).toBe("ignore");
 		// `.unref()` is what actually decouples a slow notifier from process exit;
 		// without it Bun keeps the event loop pinned to the child even with
@@ -230,5 +277,168 @@ describe("sendDesktopNotification", () => {
 		});
 
 		expect(() => sendDesktopNotification("ping")).not.toThrow();
+	});
+
+	it("tracks the notify-send id so the next toast replaces it", async () => {
+		const which = vi.spyOn(utils, "$which");
+		which.mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
+		const spawn = vi
+			.spyOn(Bun, "spawn")
+			.mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
+
+		sendDesktopNotification("first");
+		await Bun.sleep(0);
+
+		sendDesktopNotification("second");
+		await Bun.sleep(0);
+
+		const cmds = spawn.mock.calls.map(call => (call[0] as unknown as { cmd: string[] }).cmd);
+		expect(cmds[0]).not.toContain("--replace-id=42");
+		// The second toast replaces the first instead of stacking a new entry.
+		expect(cmds[1]).toContain("--replace-id=42");
+	});
+
+	it("tracks the gdbus reply id from its GLib variant tuple", async () => {
+		const which = vi.spyOn(utils, "$which");
+		which.mockImplementation(name => (name === "gdbus" ? "/usr/bin/gdbus" : null));
+		const spawn = vi
+			.spyOn(Bun, "spawn")
+			.mockImplementation((..._args: unknown[]) => childWithStdout("(uint32 7,)", vi.fn()) as never);
+
+		sendDesktopNotification("first");
+		await Bun.sleep(0);
+
+		sendDesktopNotification("second");
+
+		const cmds = spawn.mock.calls.map(call => (call[0] as unknown as { cmd: string[] }).cmd);
+		// replaces_id is the positional argument after the app name in
+		// `Notify(s u s s s as a{sv} i)`.
+		expect(cmds[1]![10]).toBe("7");
+	});
+});
+
+/** Fake spawn child whose stdout yields `text` once and then EOF. */
+function childWithStdout(text: string, unref: ReturnType<typeof vi.fn>): unknown {
+	const encoder = new TextEncoder();
+	let yielded = false;
+	return {
+		unref,
+		stdout: {
+			getReader: () => ({
+				read: async () => {
+					if (!yielded) {
+						yielded = true;
+						return { done: false as const, value: encoder.encode(text) };
+					}
+					return { done: true as const, value: undefined };
+				},
+			}),
+		},
+	};
+}
+
+describe("buildDesktopNotifyCloseCommand", () => {
+	const gdbus: DesktopNotifier = { kind: "gdbus", path: "/usr/bin/gdbus" };
+	const notifySend: DesktopNotifier = { kind: "notify-send", path: "/usr/bin/notify-send" };
+
+	it("produces a CloseNotification call for gdbus", () => {
+		expect(buildDesktopNotifyCloseCommand(gdbus, 42)).toEqual([
+			"/usr/bin/gdbus",
+			"call",
+			"--session",
+			"--dest",
+			"org.freedesktop.Notifications",
+			"--object-path",
+			"/org/freedesktop/Notifications",
+			"--method",
+			"org.freedesktop.Notifications.CloseNotification",
+			"42",
+		]);
+	});
+
+	it("returns null for notify-send, which has no close option", () => {
+		expect(buildDesktopNotifyCloseCommand(notifySend, 42)).toBeNull();
+	});
+});
+
+describe("closeDesktopNotification", () => {
+	beforeEach(() => {
+		resetDesktopNotifierCache();
+		resetDesktopNotificationTracking();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		resetDesktopNotifierCache();
+		resetDesktopNotificationTracking();
+	});
+
+	it("closes the tracked notification via gdbus and clears the id", async () => {
+		const which = vi.spyOn(utils, "$which");
+		// The send prefers notify-send; the close must still reach gdbus.
+		which.mockImplementation(name =>
+			name === "notify-send" ? "/usr/bin/notify-send" : name === "gdbus" ? "/usr/bin/gdbus" : null,
+		);
+		const spawn = vi
+			.spyOn(Bun, "spawn")
+			.mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
+
+		sendDesktopNotification("first");
+		await Bun.sleep(0);
+
+		spawn.mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		closeDesktopNotification();
+
+		expect(spawn).toHaveBeenLastCalledWith({
+			cmd: [
+				"/usr/bin/gdbus",
+				"call",
+				"--session",
+				"--dest",
+				"org.freedesktop.Notifications",
+				"--object-path",
+				"/org/freedesktop/Notifications",
+				"--method",
+				"org.freedesktop.Notifications.CloseNotification",
+				"42",
+			],
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+
+		// The tracked id is cleared, so a repeated close is a no-op: only the
+		// send and the first close spawned.
+		closeDesktopNotification();
+		expect(spawn).toHaveBeenCalledTimes(2);
+	});
+
+	it("is a silent no-op when no notification is tracked", () => {
+		vi.spyOn(utils, "$which").mockReturnValue("/usr/bin/gdbus");
+		const spawn = vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		closeDesktopNotification();
+
+		expect(spawn).not.toHaveBeenCalled();
+	});
+
+	it("swallows spawn failures so a missing daemon never throws into the renderer", async () => {
+		const which = vi.spyOn(utils, "$which");
+		which.mockImplementation(name =>
+			name === "notify-send" ? "/usr/bin/notify-send" : name === "gdbus" ? "/usr/bin/gdbus" : null,
+		);
+		const spawn = vi
+			.spyOn(Bun, "spawn")
+			.mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
+
+		sendDesktopNotification("first");
+		await Bun.sleep(0);
+
+		spawn.mockImplementation(() => {
+			throw new Error("ENOENT");
+		});
+
+		expect(() => closeDesktopNotification()).not.toThrow();
 	});
 });

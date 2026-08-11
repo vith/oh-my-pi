@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
@@ -12,6 +12,7 @@ import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -1690,5 +1691,92 @@ describe("AskTool rich ask dialog", () => {
 			questions: [{ id: "q1", question: "Q?", options: [{ label: "Next →" }] }],
 		});
 		expect(reservedNext instanceof type.errors).toBe(true);
+	});
+});
+
+describe("AskTool desktop notification lifecycle", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("closes the waiting-for-input notification once the ask resolves", async () => {
+		const tool = new AskTool(createSession());
+		const context = createContext({
+			select: async () => "Option A",
+		});
+		const send = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+
+		const result = await tool.execute(
+			"call-1",
+			{ questions: [{ id: "q1", question: "Pick one", options: [{ label: "Option A" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(send).toHaveBeenCalledWith({
+			title: "Oh My Pi",
+			body: "Waiting for input",
+			type: "ask",
+			urgency: "normal",
+			actions: "focus",
+		});
+		// The toast must not linger unread in the desktop notification list.
+		expect(close).toHaveBeenCalledTimes(1);
+		expect(result.details?.selectedOptions).toEqual(["Option A"]);
+	});
+
+	it("closes the notification on timeout auto-selection, which no keypress accompanies", async () => {
+		const tool = new AskTool(
+			createSession({
+				settings: Settings.isolated({ "ask.timeout": 0.001 }),
+			}),
+		);
+		const select = vi.fn(
+			async (
+				_prompt: string,
+				options: ExtensionUISelectItem[],
+				dialogOptions?: { initialIndex?: number; timeout?: number; onTimeout?: () => void },
+			) => {
+				const timeout = dialogOptions?.timeout ?? 1;
+				await Bun.sleep(timeout + 5);
+				dialogOptions?.onTimeout?.();
+				const selected = options[dialogOptions?.initialIndex ?? 0];
+				return typeof selected === "string" ? selected : selected?.label;
+			},
+		);
+		const context = createContext({ select });
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+
+		await tool.execute(
+			"call-2",
+			{ questions: [{ id: "confirm", question: "Proceed?", options: [{ label: "yes" }] }] },
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(close).toHaveBeenCalledTimes(1);
+	}, 30_000);
+
+	it("closes the notification when the ask is cancelled", async () => {
+		const tool = new AskTool(createSession());
+		const context = createContext({
+			select: async () => undefined,
+		});
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+
+		await expect(
+			tool.execute(
+				"call-3",
+				{ questions: [{ id: "q1", question: "Pick one", options: [{ label: "Option A" }] }] },
+				undefined,
+				undefined,
+				context,
+			),
+		).rejects.toBeInstanceOf(ToolAbortError);
+
+		expect(close).toHaveBeenCalledTimes(1);
 	});
 });
