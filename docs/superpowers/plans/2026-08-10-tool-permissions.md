@@ -604,12 +604,12 @@ Contract note: piece `text` is the reconstructed node text (brush `Display`). Wh
   - `export type PermissionPolicy = "allow" | "deny" | "prompt";`
   - `export type Posture = "allow" | "prompt" | "deny";`
   - `export interface PieceEvaluation { text: string; policy: PermissionPolicy; ruleId?: string; layer?: RuleLayer; reason?: string; }`
-  - `export interface EngineDecision { policy: PermissionPolicy; tier: ToolTier; reason?: string; ruleId?: string; layer?: RuleLayer; source: "tool" | "user" | "curated" | "rule" | "posture"; pieces?: PieceEvaluation[]; }`
+  - `export interface EngineDecision { policy: PermissionPolicy; tier: ToolTier; reason?: string; ruleId?: string; layer?: RuleLayer; source: "tool" | "user" | "curated" | "rule" | "posture"; override: boolean; pieces?: PieceEvaluation[]; }` — `override` is `true` only for tool-declared `override: true`/`prompt` decisions (Task 7's `explicitPrompt` computation depends on it).
   - `export interface EngineContext { settings: Pick<Settings, "get">; cwd: string; home?: string; }`
   - `export function evaluatePermission(tool: { name: string; approval?: unknown; formatApprovalDetails?: unknown }, args: unknown, ctx: EngineContext): EngineDecision` — full precedence pipeline (Global Constraints table).
   - `export function evaluateBashCommand(command: string, ctx: EngineContext): EngineDecision` — splits first (fail-closed whole-command on parse error), evaluates each piece with a bash-shaped tool subject (tier `exec`, no override), composes: any deny → deny (reason names piece + rule/layer); pending pieces listed; all allowed → allow. Legacy `bash.patterns` from `ctx.settings.get("bash.patterns")` become a `legacy` layer rule list evaluated with old semantics: `allow` matches only when `isSinglePiece(command)` and the glob matches the single piece; `deny`/`prompt` match when the glob matches any piece text.
   - `export function resolvePosture(settings: Pick<Settings, "get">): Posture` — per Global Constraints step 10.
-  - `export function matchRule(rule: PermissionRule, toolName: string, args: unknown): boolean` — per Global Constraints rule-matching semantics (glob with `*` only; `/…/` regex; whitespace-normalized command matching identical to `bashApprovalPatternToRegExp`+`normalizeBashApprovalPattern` from `../bash` — reuse those two by exporting them from `bash.ts`).
+  - `export function matchRule(rule: PermissionRule, toolName: string, args: unknown): boolean` — per Global Constraints rule-matching semantics (glob with `*` only; `/…/` regex; whitespace-normalized command matching identical to `bashApprovalPatternToRegExp`+`normalizeBashApprovalPattern` from `../bash` — reuse those two by exporting them from `bash.ts`). A rule whose `match` is exactly `{ arg: "*" }` always matches (catch-all used by Task 9's per-tool legacy policy rules).
 
 - [ ] **Step 1: Export the two helpers from `approval.ts`**
 
