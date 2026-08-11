@@ -90,6 +90,12 @@ export class PermissionDialogComponent extends Container {
 			.catch(() => {
 				// Provider failure degrades silently to candidates-only.
 				this.#removeSuggestionRow();
+			})
+			.finally(() => {
+				// The TUI is event-driven with no heartbeat: the tree mutations
+				// above (spinner removal, appended options) stay unpainted until
+				// the next input/resize unless we schedule a repaint here.
+				ui?.requestRender();
 			});
 	}
 

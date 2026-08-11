@@ -1,10 +1,10 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import type { PermissionDialogOption } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { PermissionDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/permission-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
+import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -166,5 +166,27 @@ describe("PermissionDialogComponent", () => {
 		const out = render(component);
 		expect(out).not.toContain("Suggesting rules…");
 		expect(out).toContain("1. Allow once");
+	});
+
+	it("requests a TUI repaint when suggestions settle so appended options get painted", async () => {
+		const deferred = Promise.withResolvers<PermissionDialogOption[]>();
+		const requestRender = vi.fn();
+		const ui = { requestRender, requestDirectWrite: vi.fn() } as unknown as TUI;
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }],
+			() => {},
+			() => {},
+			{ suggestions: deferred.promise, ui },
+		);
+		deferred.resolve([{ label: "Allow bash: git push" }]);
+		await deferred.promise;
+		await Bun.sleep(0);
+		const out = render(component);
+		expect(out).toContain("2. Allow bash: git push");
+		expect(out).not.toContain("Suggesting rules…");
+		expect(requestRender).toHaveBeenCalled();
+		component.dispose();
 	});
 });
