@@ -1,6 +1,6 @@
 import { encodeSixel } from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless } from "@oh-my-pi/pi-utils";
-import { sendDesktopNotification, shouldDeliverDesktopNotification } from "./desktop-notify";
+import { closeDesktopNotification, sendDesktopNotification, shouldDeliverDesktopNotification } from "./desktop-notify";
 import {
 	detectKittyUnicodePlaceholdersSupport,
 	getKittyGraphics,
@@ -182,6 +182,45 @@ export class TerminalInfo {
 		if (this.notifyProtocol === NotifyProtocol.Bell && shouldDeliverDesktopNotification(this.id, true)) {
 			sendDesktopNotification(message);
 		}
+	}
+
+	/**
+	 * Close the notification this process most recently sent, if any.
+	 * Complements {@link sendNotification}'s replace semantics: sends collapse
+	 * into one live toast (no unread pile-up), and this clears it once it is
+	 * stale (ask answered, user back at the terminal). Mirrors the send path's
+	 * gates and multiplexer handling:
+	 * - OSC 99 closes by the id of the last notification (kitty's
+	 *   `OSC 99 ; <id> ; ST`); no trailing BEL — closing must not ring a bell.
+	 * - Bell-protocol hosts fan the close out to D-Bus
+	 *   (`CloseNotification`) when the same gate as {@link sendNotification}
+	 *   is open.
+	 * - OSC 9 and cmux surfaces have no close surface; the call is a no-op.
+	 */
+	closeNotification(): void {
+		if (isNotificationSuppressed() || isTerminalHeadless()) return;
+		if (this.notifyProtocol === NotifyProtocol.Bell) {
+			if (shouldDeliverDesktopNotification(this.id, true)) {
+				closeDesktopNotification();
+			}
+			return;
+		}
+		// Only rich OSC 99 notifications carry an id; without one there is
+		// nothing addressable to close (plain OSC 99 / OSC 9 collapse forms
+		// expire on their own). Also skip under Zellij, which drops the OSC
+		// anyway and must not be flagged with a BEL.
+		if (this.notifyProtocol !== NotifyProtocol.Osc99 || !osc99CapabilitiesConfirmed) return;
+		const id = lastOsc99NotificationId;
+		if (!id) return;
+		const formatted = `\x1b]99;${id};\x1b\\`;
+		if (isInsideTmux()) {
+			// Passthrough so the close reaches the outer terminal; deliberately
+			// no trailing BEL (see doc comment).
+			process.stdout.write(wrapTmuxPassthrough(formatted));
+			return;
+		}
+		if (isInsideZellij()) return;
+		process.stdout.write(formatted);
 	}
 }
 
@@ -1092,6 +1131,21 @@ const OSC99_MAX_PAYLOAD_BYTES = 2048;
 const OSC99_APP_NAME = "Oh My Pi";
 let nextOsc99NotificationId = 1;
 
+/**
+ * Id of the last OSC 99 notification this process sent. Kitty replaces
+ * notifications that share an id, so id-less sends reuse this id: consecutive
+ * toasts collapse into one entry instead of stacking, and
+ * {@link TerminalInfo.closeNotification} can address the live one. Explicit
+ * caller-supplied ids are honored and become the live id.
+ */
+let lastOsc99NotificationId: string | null = null;
+
+/** Reset OSC 99 notification state. Tests only. */
+export function resetOsc99NotificationState(): void {
+	lastOsc99NotificationId = null;
+	nextOsc99NotificationId = 1;
+}
+
 function base64Utf8(value: string): string {
 	return Buffer.from(value, "utf8").toString("base64");
 }
@@ -1103,7 +1157,15 @@ function sanitizeOsc99Id(id: string | undefined): string {
 }
 
 function osc99Id(id: string | undefined): string {
-	return sanitizeOsc99Id(id) || `omp-${nextOsc99NotificationId++}`;
+	const safe = sanitizeOsc99Id(id);
+	if (safe) {
+		lastOsc99NotificationId = safe;
+		return safe;
+	}
+	if (!lastOsc99NotificationId) {
+		lastOsc99NotificationId = `omp-${nextOsc99NotificationId++}`;
+	}
+	return lastOsc99NotificationId;
 }
 
 function utf8CodePointBytes(char: string): number {

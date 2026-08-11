@@ -2404,6 +2404,13 @@ export class TUI extends Container {
 	}
 
 	#handleInput(data: string): void {
+		// Any input means the user is back at the terminal: clear the live
+		// desktop notification (a completion/error/ask toast sent while they
+		// were away). Combined with sendNotification's replace semantics, the
+		// shell's notification list never accumulates unread omp entries. No-op
+		// when nothing is live.
+		TERMINAL.closeNotification();
+
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every
 		// key would make idle navigation pay a full frame of latency.

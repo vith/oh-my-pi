@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { TUI } from "@oh-my-pi/pi-tui";
 import * as desktopNotify from "@oh-my-pi/pi-tui/desktop-notify";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import {
@@ -7,11 +8,13 @@ import {
 	isInsideZellij,
 	isOsc99Supported,
 	NotifyProtocol,
+	resetOsc99NotificationState,
 	setOsc99Supported,
 	TERMINAL,
 	wrapTmuxPassthrough,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { VirtualTerminal } from "./virtual-terminal";
 
 const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
@@ -90,6 +93,7 @@ describe("terminal notifications", () => {
 		vi.restoreAllMocks();
 		setTerminalHeadless(previousHeadless);
 		setOsc99Supported(false);
+		resetOsc99NotificationState();
 		mutableTerminal.notifyProtocol = originalNotifyProtocol;
 		restoreEnv("PI_TUI_OSC99_PROBE", originalOsc99Probe);
 		restoreEnv("TMUX", originalTmux);
@@ -404,6 +408,147 @@ describe("terminal notifications", () => {
 			expect(isOsc99Supported()).toBe(false);
 		} finally {
 			terminal.stop();
+		}
+	});
+
+	it("reuses the OSC 99 id so id-less notifications replace each other", () => {
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+
+		expect(writes).toHaveLength(2);
+		const ids = writes.map(w => /i=([^:;]+)/u.exec(w)?.[1]);
+		expect(ids[0]).toBeDefined();
+		expect(ids[1]).toBe(ids[0]);
+	});
+
+	it("closeNotification emits the OSC 99 close-by-id sequence after a rich send", () => {
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+		TERMINAL.closeNotification();
+
+		expect(writes).toHaveLength(2);
+		expect(writes[1]).toBe("\x1b]99;omp-1;\x1b\\");
+	});
+
+	it("closeNotification is a no-op without a rich OSC 99 id to address", () => {
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.closeNotification();
+
+		expect(writes).toEqual([]);
+
+		// OSC 9 has no close surface either.
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc9;
+		TERMINAL.closeNotification();
+		expect(writes).toEqual([]);
+	});
+
+	it("under tmux, closeNotification wraps the close for passthrough without a BEL", () => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+		TERMINAL.closeNotification();
+
+		expect(writes).toHaveLength(2);
+		// Passthrough envelope, no trailing BEL — closing a toast must not ring a bell.
+		expect(writes[1]).toBe(wrapTmuxPassthrough("\x1b]99;omp-1;\x1b\\"));
+	});
+
+	it("under Zellij, closeNotification writes nothing (OSC dropped, no BEL to ring)", () => {
+		Bun.env.ZELLIJ = "0";
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+		TERMINAL.closeNotification();
+
+		// Only the send wrote (OSC + BEL); the close is dropped.
+		expect(writes).toHaveLength(1);
+	});
+
+	it("Bell-protocol closeNotification fans out to the D-Bus close when the gate is open", () => {
+		mutableTerminal.notifyProtocol = NotifyProtocol.Bell;
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		vi.spyOn(desktopNotify, "shouldDeliverDesktopNotification").mockReturnValue(true);
+		const close = vi.spyOn(desktopNotify, "closeDesktopNotification").mockImplementation(() => {});
+
+		TERMINAL.closeNotification();
+
+		expect(close).toHaveBeenCalledTimes(1);
+	});
+
+	it("skips the D-Bus close when the gate forbids it", () => {
+		mutableTerminal.notifyProtocol = NotifyProtocol.Bell;
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		vi.spyOn(desktopNotify, "shouldDeliverDesktopNotification").mockReturnValue(false);
+		const close = vi.spyOn(desktopNotify, "closeDesktopNotification").mockImplementation(() => {});
+
+		TERMINAL.closeNotification();
+
+		expect(close).not.toHaveBeenCalled();
+	});
+
+	it("closeNotification respects the PI_NOTIFICATIONS=off suppression", () => {
+		Bun.env.PI_NOTIFICATIONS = "off";
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.closeNotification();
+
+		expect(writes).toEqual([]);
+	});
+
+	it("user input clears the live desktop notification via the TUI input loop", () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+		try {
+			tui.start();
+			// Drop any calls from startup capability probes; only the keypress below
+			// may trigger a close.
+			const before = close.mock.calls.length;
+			terminal.sendInput("x");
+			expect(close.mock.calls.length).toBeGreaterThan(before);
+		} finally {
+			tui.stop();
 		}
 	});
 });
