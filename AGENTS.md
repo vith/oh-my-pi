@@ -227,6 +227,20 @@ For the bash tool specifically:
 - `ToolExecutionComponent.#buildRenderContext()` for bash must work even before a result exists — the renderer uses call args plus render context to show the command preview while streaming.
 - Verify both live streaming and rebuilt transcript paths after any bash preview change. A fix in one path does not fix the other.
 
+## Development Workflow
+
+This fork is developed exclusively in **git worktrees on feature branches**:
+
+- **NEVER commit directly on `integration`** — it is the merge target and the checkout the user runs omp from. Work happens in a separate worktree, not the main checkout.
+- Worktrees live under `.worktrees/<name>` in this checkout (e.g. `.worktrees/fork-build-version`). Create a dedicated worktree for each piece of work:
+  ```sh
+  git worktree add .worktrees/<name> -b feat/<name> integration
+  ```
+- **Reuse an existing feature's worktree and branch for follow-up work on that feature.** Fixing or extending something from `feat/permissions-engine` happens in the `feat/permissions-engine` worktree, not a fresh branch. If the worktree was removed, recreate it without a new branch: `git worktree add .worktrees/<name> <branch>`.
+- Every change lands on a `feat/*` branch (e.g. `feat/permissions-engine`) and is merged into `integration` — no squash, no deleting the feat branch afterwards.
+- **After completing feature work, merge it non-destructively into `integration`, then cut a new fork build from the `integration` checkout with `bun run release:fork`** (runs `scripts/fork-bump-version.ts`). The pipeline: derive the fork version (`<nearest upstream tag patch+1>+vith-fork.<commits since tag>.<HEAD short hash>`, deterministic per commit), bump version files, regenerate lockfiles, run `bun run check`, commit the bump, rebuild the native addon, build the compiled `omp` binary, smoke-test it, and link it into PATH (`~/.bun/bin/omp`). It creates no tag and pushes nothing. Run it from a clean-enough `integration` checkout after the merge commit is in — the version derives from HEAD, so building from unmerged or uncommitted work produces a stale/dirty version.
+- Keep the main checkout pristine: the running omp binary is built from the `integration` checkout, so stray files or in-progress edits there can leak into builds the user runs.
+
 ## Commands
 
 - NEVER commit unless asked.
