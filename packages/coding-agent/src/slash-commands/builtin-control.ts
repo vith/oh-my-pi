@@ -1,0 +1,107 @@
+import { runPauseScreen } from "../modes/components/pause-screen";
+import { runPermissionCommand } from "../tools/permissions/manage";
+import { shutdownHandlerTui } from "./builtin-lifecycle";
+import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import type { SlashCommandSpec } from "./types";
+
+export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "force",
+		description: "Force next turn to use a specific tool",
+		aliases: ["force:"],
+		inlineHint: "<tool-name> [prompt]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const count = runtime.ctx.session.getActiveToolNames().length;
+			return count === 0 ? "Force: no active tools" : `Force: ${count} active tools`;
+		},
+		handle: async (command, runtime) => {
+			const spaceIdx = command.args.indexOf(" ");
+			const toolName = spaceIdx === -1 ? command.args : command.args.slice(0, spaceIdx);
+			const prompt = spaceIdx === -1 ? "" : command.args.slice(spaceIdx + 1).trim();
+			if (!toolName) return usage("Usage: /force:<tool-name> [prompt]", runtime);
+			try {
+				runtime.session.setForcedToolChoice(toolName);
+			} catch (err) {
+				return usage(errorMessage(err), runtime);
+			}
+			await runtime.output(`Next turn forced to use ${toolName}.`);
+			return prompt ? { prompt } : commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const spaceIdx = command.args.indexOf(" ");
+			const toolName = spaceIdx === -1 ? command.args : command.args.slice(0, spaceIdx);
+			const prompt = spaceIdx === -1 ? "" : command.args.slice(spaceIdx + 1).trim();
+
+			if (!toolName) {
+				runtime.ctx.showError("Usage: /force:<tool-name> [prompt]");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+
+			try {
+				runtime.ctx.session.setForcedToolChoice(toolName);
+				runtime.ctx.showStatus(`Next turn forced to use ${toolName}.`);
+			} catch (error) {
+				runtime.ctx.showError(errorMessage(error));
+				runtime.ctx.editor.setText("");
+				return;
+			}
+
+			runtime.ctx.editor.setText("");
+
+			// If a prompt was provided, pass it through as input
+			if (prompt) return { prompt };
+		},
+	},
+	{
+		name: "live",
+		description: "Start Codex-backed realtime voice mode",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleLiveCommand();
+		},
+	},
+	{
+		name: "pause",
+		description: "Freeze all agents (main, subagents, advisor) until resumed",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runPauseScreen(runtime.ctx);
+		},
+	},
+	{
+		name: "permissions",
+		description: "Inspect and manage permission rules (list, show, add, remove, edit, test, log, status, migrate)",
+		acpDescription: "Manage permission rules",
+		acpInputHint: "<list|show|add|remove|edit|test|log|status|migrate>",
+		subcommands: [
+			{ name: "list", description: "List merged permission rules by layer with audit match counts" },
+			{ name: "show", description: "Show a rule's details and last audit hits", usage: "<id>" },
+			{ name: "add", description: "Add a rule to the user layer", usage: "<yaml>" },
+			{ name: "remove", description: "Remove a rule from the user layer", usage: "<id>" },
+			{ name: "edit", description: "Replace a user-layer rule by id", usage: "<id> <yaml>" },
+			{ name: "test", description: "Dry-run a bash command against the permission engine", usage: '"<command>"' },
+			{ name: "log", description: "Show recent permission audit entries" },
+			{ name: "status", description: "Show posture, rule counts, and rule file paths" },
+			{ name: "migrate", description: "Plan the legacy settings migration", usage: "[--apply]" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			await runtime.output(
+				await runPermissionCommand(command.args, {
+					cwd: runtime.cwd,
+					settings: runtime.settings,
+					sessionId: runtime.sessionManager.getSessionId(),
+				}),
+			);
+			return commandConsumed();
+		},
+	},
+	{
+		name: "quit",
+		aliases: ["q"],
+		description: "Quit the application",
+		handleTui: shutdownHandlerTui,
+	},
+];
