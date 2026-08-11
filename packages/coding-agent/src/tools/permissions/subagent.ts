@@ -17,6 +17,9 @@ import { AgentRegistry } from "../../registry/agent-registry";
 import type { EngineDecision } from "./engine";
 import type { PermissionRule } from "./rules";
 
+/** Custom transcript entry type for a parked subagent approval (Task 14). */
+export const PERMISSION_PENDING_TYPE = "permission-pending";
+
 export interface PendingApproval {
 	/** Unique per tool call (`toolName:toolCallId`). */
 	key: string;

@@ -96,7 +96,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
 };
-import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -173,6 +173,7 @@ import { InputController } from "./controllers/input-controller";
 import { LiveCommandController } from "./controllers/live-command-controller";
 import { MCPCommandController } from "./controllers/mcp-command-controller";
 import { OmfgController } from "./controllers/omfg-controller";
+import { PermissionController, showFirstRunNotices } from "./controllers/permission-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
@@ -607,6 +608,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#eventBus;
 	}
 	readonly #extensionUiController: ExtensionUiController;
+	readonly #permissionController: PermissionController;
 	readonly #inputController: InputController;
 	readonly #selectorController: SelectorController;
 	readonly #focusController: SessionFocusController;
@@ -620,13 +622,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.session.sessionName;
 	}
 	focusAgentSession(id: string): Promise<void> {
-		return this.#focusController.focusAgent(id);
+		return this.#focusController.focusAgent(id).then(() => this.#notifyFocusAttached());
 	}
 	focusParentSession(): Promise<void> {
-		return this.#focusController.focusParent();
+		return this.#focusController.focusParent().then(() => this.#notifyFocusAttached());
 	}
 	unfocusSession(): Promise<void> {
-		return this.#focusController.unfocus();
+		return this.#focusController.unfocus().then(() => this.#notifyFocusAttached());
+	}
+	/** After any focus change, surface parked approvals for the newly attached session. */
+	#notifyFocusAttached(): void {
+		this.#permissionController.onFocusAttached(this.viewSession);
 	}
 	clearTransientSessionUi(): void {
 		if (this.loadingAnimation) {
@@ -816,6 +822,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#liveCommandController = new LiveCommandController(this);
 		this.#selectorController = new SelectorController(this);
 		this.#focusController = new SessionFocusController(this);
+		this.#permissionController = new PermissionController({
+			rootSessionId: this.sessionManager.getSessionId(),
+			ui: () => this.getToolUIContext(),
+			sessionByManagerId: sessionId => {
+				const ref = AgentRegistry.global()
+					.list()
+					.find(ref => ref.session?.sessionManager.getSessionId() === sessionId);
+				return ref?.session ?? undefined;
+			},
+			engineContext: session => ({
+				settings: this.settings,
+				cwd: session?.sessionManager.getCwd() ?? this.sessionManager.getCwd(),
+				home: undefined,
+			}),
+			attachedManagerId: () => this.viewSession?.sessionManager.getSessionId(),
+		});
 		this.#inputController = new InputController(this);
 		this.#observerRegistry = new SessionObserverRegistry();
 	}
@@ -1055,6 +1077,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Initialize hooks with TUI-based UI context
 		await this.initHooksAndCustomTools();
+
+		// Spec §9.1: surface the permission-migration mapping notices once per
+		// session start through the root UI notify, and install the root
+		// answering handler for parked subagent approvals (spec §6).
+		showFirstRunNotices(this.settings, notice => this.#extensionUiController.showHookNotify(notice));
+		this.#permissionController.install();
 
 		// Restore mode from session (e.g. plan mode on resume)
 		this.session.setSessionBeforeSwitchReconciler?.(async () => {
@@ -4025,6 +4053,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
 		this.#focusController.dispose();
+		this.#permissionController.dispose();
 
 		// Surface an explicit "Closing session…" line so the user sees a reason
 		// for the pause while `session.dispose()` flushes memory consolidate and
