@@ -299,10 +299,10 @@ describe("sub-command evaluation", () => {
 	});
 
 	it("parameter-expansion values can smuggle substitutions and are checked", () => {
-		const d = evaluateBashCommand("echo ${x:-$(date +%s)}", allow("echo *"));
+		const d = evaluateBashCommand(`echo \${x:-$(date +%s)}`, allow("echo *"));
 		expect(d.policy).toBe("allow");
 		const denied = evaluateBashCommand(
-			"echo ${x:-$(date +%s)}",
+			`echo \${x:-$(date +%s)}`,
 			ctx({ "permissions.default": "allow", "bash.patterns": [{ match: "date *", approval: "deny" }] }),
 		);
 		expect(denied.policy).toBe("deny");

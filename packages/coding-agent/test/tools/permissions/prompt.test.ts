@@ -317,13 +317,7 @@ describe("promptForDecision", () => {
 		// A redirect cannot be suppressed by a remembered rule (R1); an
 		// analyzable pipeline keeps its remember options.
 		const decision = fakeDecision({ pieces: [pendingPiece("git status < seed")] });
-		const res = await promptForDecision(
-			ui,
-			"bash",
-			{ command: "git status < seed" },
-			decision,
-			fakeCtx(tempHome()),
-		);
+		const res = await promptForDecision(ui, "bash", { command: "git status < seed" }, decision, fakeCtx(tempHome()));
 		expect(res.policy).toBe("allow");
 		expect(captured.request?.options.map(option => option.label)).toEqual(["Allow once", "Deny"]);
 		expect(captured.request?.lines?.some(line => line.includes("Remembered rules cannot suppress"))).toBe(true);
