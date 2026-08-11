@@ -1,7 +1,7 @@
 import type { AgentTool, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
-import { getToolDecision, normalizePolicy } from "../approval";
+import { type ApprovalPolicy, getToolDecision, normalizePolicy, type ResolvedApproval } from "../approval";
 import { bashApprovalPatternToRegExp, normalizeBashApprovalPattern } from "../bash";
 import { CURATED_ALLOW_TOOLS, matchCuratedDeny } from "./curated";
 import { loadRuleLayers, type PermissionRule, type RuleLayer } from "./rules";
@@ -76,7 +76,8 @@ function legacyBashPatterns(settings: Pick<Settings, "get" | "isConfigured">): P
 	for (const item of raw) {
 		if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
 		const record = item as Record<string, unknown>;
-		const match = typeof record.match === "string" ? normalizeBashApprovalPattern(record.match) : undefined;
+		const match =
+			typeof record.match === "string" ? legacyBashPattern(normalizeBashApprovalPattern(record.match)) : undefined;
 		const approval = typeof record.approval === "string" ? record.approval.trim().toLowerCase() : undefined;
 		if (match === undefined || match.length === 0) continue;
 		if (approval !== "allow" && approval !== "deny" && approval !== "prompt") continue;
@@ -110,6 +111,22 @@ function bashCommandArg(args: unknown): string | undefined {
 /** A `/…/`-wrapped string is a regex; anything else matches literally or as a `*` glob. */
 function isRegexWrapped(pattern: string): boolean {
 	return pattern.startsWith("/") && pattern.endsWith("/") && pattern.length >= 2;
+}
+
+/**
+ * Preserve pre-engine glob-only semantics for a legacy `bash.patterns` value:
+ * the old approval path matched the whole string as a glob with literal
+ * slashes, so a `/…/`-wrapped pattern never matched a real command. The
+ * engine's match layer would reinterpret the wrapper as an unanchored regex —
+ * an over-allow for legacy allow rules — so escape the leading/trailing
+ * slashes back to literal glob text, keeping such patterns inert exactly as
+ * before. Only fully `/…/`-wrapped patterns are touched: a pattern that
+ * merely ends in a slash (`rm -rf /`) was a live glob in the old path and
+ * stays one. Modern file-backed rules keep regex interpretation.
+ */
+export function legacyBashPattern(pattern: string): string {
+	if (!(pattern.startsWith("/") && pattern.endsWith("/") && pattern.length >= 2)) return pattern;
+	return pattern.replace(/^\//u, "\\/").replace(/\/$/u, "\\/");
 }
 
 function compileRegex(pattern: string): RegExp | null {
@@ -173,7 +190,7 @@ const BASH_APPROVAL_CONCATENATED_OPTION_RE = /(?:^|[ \t])(?:-[^- \t]*[ce]|--(?:c
  * Conservative text-based scan on the piece text; false positives over-prompt
  * (safe).
  */
-function hasBashApprovalShellControl(command: string): boolean {
+export function hasBashApprovalShellControl(command: string): boolean {
 	let quote: "'" | '"' | undefined;
 	let hasReinterpretableShellControl = false;
 	for (let i = 0; i < command.length; i++) {
@@ -264,14 +281,13 @@ export function matchRule(rule: PermissionRule, toolName: string, args: unknown)
  * 10. curated read-only allowlist
  * 11. default posture
  */
-function evaluatePermissionInner(
+function evaluatePermissionCore(
 	tool: { name: string; approval?: unknown; formatApprovalDetails?: unknown },
 	args: unknown,
 	ctx: EngineContext,
 	legacyAllowEnabled: boolean,
+	decision: Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy },
 ): EngineDecision {
-	const decision = getToolDecision(tool as ApprovalSubjectLike, args);
-
 	if (decision.policy === "deny") {
 		return {
 			policy: "deny",
@@ -425,6 +441,34 @@ export function evaluatePermission(
 	ctx: EngineContext,
 ): EngineDecision {
 	return evaluatePermissionInner(tool, args, ctx, true);
+}
+
+/**
+ * Evaluate the full pipeline, carrying the tool approval's own engine analysis
+ * onto the walk result. Tool approvals that run the engine themselves (the
+ * bash tool's per-piece {@link evaluateBashCommand}) attach the full decision
+ * to their approval return; the walk's own tool-denied short-circuit would
+ * otherwise discard the piece attribution computed there. Walk-computed
+ * attribution always wins; the attached analysis only fills fields the walk
+ * did not produce (ruleId/layer of the decisive piece for tool-denied
+ * compounds) plus the per-piece breakdown (spec §7 audit data).
+ */
+function evaluatePermissionInner(
+	tool: { name: string; approval?: unknown; formatApprovalDetails?: unknown },
+	args: unknown,
+	ctx: EngineContext,
+	legacyAllowEnabled: boolean,
+): EngineDecision {
+	const decision = getToolDecision(tool as ApprovalSubjectLike, args);
+	const result = evaluatePermissionCore(tool, args, ctx, legacyAllowEnabled, decision);
+	const attached = decision.engineDecision;
+	if (attached === undefined) return result;
+	return {
+		...result,
+		ruleId: result.ruleId ?? attached.ruleId,
+		layer: result.layer ?? attached.layer,
+		pieces: attached.pieces,
+	};
 }
 
 interface BashPieceResult {

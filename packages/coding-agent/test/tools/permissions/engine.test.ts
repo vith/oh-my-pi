@@ -47,6 +47,26 @@ describe("evaluatePermission", () => {
 		expect(d.policy).toBe("deny");
 		expect(d.layer).toBe("curated");
 	});
+	it("legacy /…/-wrapped patterns keep glob-literal semantics (never regex)", () => {
+		// The pre-engine approval path matched `/npm test/` as a literal glob
+		// (leading/trailing slashes included), so it never matched a real
+		// command. Regex interpretation would turn the legacy allow into an
+		// unanchored auto-approve — the escape keeps it inert exactly as before.
+		const wrapped = ctx({ "bash.patterns": [{ match: "/npm test/", approval: "allow" }] });
+		expect(evaluatePermission(tool("bash"), { command: "npm test --force" }, wrapped).policy).toBe("prompt");
+		expect(evaluatePermission(tool("bash"), { command: "npm test" }, wrapped).policy).toBe("prompt");
+		expect(evaluateBashCommand("npm test", wrapped).policy).toBe("prompt");
+		// A wrapped deny pattern stays inert too — it must not start denying.
+		expect(
+			evaluateBashCommand("npm test", ctx({ "bash.patterns": [{ match: "/npm test/", approval: "deny" }] })).policy,
+		).toBe("prompt");
+		// Control: unwrapped legacy patterns keep their glob behavior.
+		const plain = ctx({ "bash.patterns": [{ match: "npm test", approval: "allow" }] });
+		expect(evaluatePermission(tool("bash"), { command: "npm test" }, plain).policy).toBe("allow");
+		expect(
+			evaluateBashCommand("npm test", ctx({ "bash.patterns": [{ match: "npm test", approval: "deny" }] })).policy,
+		).toBe("deny");
+	});
 	it("legacy bash.patterns deny fires per piece", () => {
 		const d = evaluateBashCommand(
 			"git status && rm -rf /",

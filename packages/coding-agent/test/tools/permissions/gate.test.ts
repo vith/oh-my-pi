@@ -2,12 +2,14 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { type ExtensionRunner, ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { auditFilePath, readAudit } from "@oh-my-pi/pi-coding-agent/tools/permissions/audit";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const BASE_SETTINGS = {
@@ -35,12 +37,14 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 	// context settings per assertion.
 	let tempDir: string;
 	let session: AgentSession;
+	let sessionManager: SessionManager;
+	let cwd: string;
 
 	beforeAll(async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-permission-gate-${Snowflake.next()}-`));
-		const cwd = path.join(tempDir, "cwd");
+		cwd = path.join(tempDir, "cwd");
 		fs.mkdirSync(cwd, { recursive: true });
-		const sessionManager = SessionManager.create(cwd, path.join(tempDir, "sessions"));
+		sessionManager = SessionManager.create(cwd, path.join(tempDir, "sessions"));
 		const created = await createAgentSession({
 			cwd,
 			agentDir: tempDir,
@@ -125,5 +129,69 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 				settings,
 			} as AgentToolContext),
 		).rejects.toThrow(/Critical pattern detected|blocked/i);
+	});
+
+	it("evaluates the gate once when no handler revised the input", async () => {
+		// The short-circuit decision is authoritative when the input is
+		// unchanged, so the wrapper must not re-evaluate (rule loads + bash
+		// piece analysis per call). A counting approval proves exactly one run.
+		let approvalCalls = 0;
+		const countedTool = {
+			name: "counted",
+			description: "counting approval tool",
+			approval: () => {
+				approvalCalls += 1;
+				return "write";
+			},
+			execute: async () => ({ content: [] }),
+		} as unknown as AgentTool;
+		const runner = {
+			consumeToolCallEmitted: () => false,
+			hasHandlers: () => false,
+			hasUI: () => false,
+		} as unknown as ExtensionRunner;
+		const wrapper = new ExtensionToolWrapper(countedTool, runner);
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		await expect(
+			wrapper.execute("single-eval", { x: "1" }, undefined, undefined, { settings } as unknown as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+		expect(approvalCalls).toBe(1);
+	});
+
+	it("records per-piece bash attribution in the audit log", async () => {
+		// A compound denial must carry the piece breakdown plus the denying
+		// piece's rule id/layer in the audit (spec §7) — the wrapper records
+		// the engine decision threaded out of the bash tool's approval.
+		fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
+		fs.writeFileSync(
+			path.join(cwd, ".omp", "permissions.yml"),
+			"rules:\n  - id: deny-npm\n    tool: bash\n    match: { command: 'npm publish' }\n    action: deny\n    reason: fixture\n",
+		);
+		const settings = approvalSettings({ "permissions.audit.enabled": true, "permissions.default": "allow" });
+		await expect(
+			bashTool().execute("audit-compound", { command: "git status && npm publish" }, undefined, undefined, {
+				settings,
+				sessionManager,
+			} as unknown as AgentToolContext),
+		).rejects.toThrow(/Denied: piece "npm publish"/);
+
+		const audit = await readAudit(auditFilePath(cwd));
+		const record = audit.find(
+			candidate => candidate.tool === "bash" && candidate.command === "git status && npm publish",
+		);
+		expect(record).toBeDefined();
+		expect(record?.outcome).toBe("blocked");
+		expect(record?.pieces).toHaveLength(2);
+		// Piece attribution: the denying piece carries its rule id/layer; the
+		// allowed piece reflects the session's own posture (prompt default).
+		expect(record?.pieces?.[0]).toMatchObject({ text: "git status", policy: "prompt" });
+		expect(record?.pieces?.[1]).toMatchObject({
+			text: "npm publish",
+			policy: "deny",
+			ruleId: "deny-npm",
+			layer: "project",
+		});
+		expect(record?.ruleId).toBe("deny-npm");
+		expect(record?.layer).toBe("project");
 	});
 });

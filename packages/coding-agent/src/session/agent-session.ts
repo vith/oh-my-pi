@@ -192,6 +192,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { abortPendingForSession } from "../tools/permissions/subagent";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -6384,6 +6385,11 @@ export class AgentSession {
 		this.#abortInProgress = true;
 		try {
 			this.#abortAutolearnCapture();
+			// Parked approvals of this session's calls (spec §6) must not outlive
+			// the session: reject them so a killed agent's parked tool calls
+			// settle instead of blocking forever and the pending registry (and
+			// its roster marker) clears.
+			abortPendingForSession(this.sessionManager.getSessionId());
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 			this.abortRetry();
 			this.#promptGeneration++;

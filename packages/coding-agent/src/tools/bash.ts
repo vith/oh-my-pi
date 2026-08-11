@@ -383,17 +383,33 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			settings: this.session.settings,
 			cwd: this.session.cwd ?? process.cwd(),
 		});
+		let result: ToolApprovalDecision;
 		switch (decision.policy) {
 			case "deny":
-				return { tier: "exec", policy: "deny", reason: decision.reason ?? "Blocked by permission policy" };
+				result = { tier: "exec", policy: "deny", reason: decision.reason ?? "Blocked by permission policy" };
+				break;
 			case "prompt":
 				// Bare tier with no override/policy (plan ruling R4): prompting is
 				// the gate's job, so wrapper-level context autoApprove and
 				// xdevApproved semantics flow through unhindered.
-				return { tier: "exec" };
+				result = { tier: "exec" };
+				break;
 			default:
-				return { tier: "write", policy: "allow" };
+				result = { tier: "write", policy: "allow" };
 		}
+		// The gate wrapper records the engine's per-piece analysis in the audit
+		// log (spec §7); this approval function is the only place
+		// evaluateBashCommand runs for the gate, so attach the full engine
+		// decision non-enumerably — it must never leak into prompt rendering
+		// or JSON serialization of the approval decision.
+		if (typeof result !== "string") {
+			Object.defineProperty(result, "engineDecision", {
+				value: decision,
+				enumerable: false,
+				configurable: true,
+			});
+		}
+		return result;
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const rawCommand = (args as Partial<BashToolInput>).command;

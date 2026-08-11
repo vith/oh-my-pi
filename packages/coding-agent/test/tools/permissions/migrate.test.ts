@@ -121,6 +121,29 @@ describe("planMigration", () => {
 		expect((config.tools as Record<string, unknown>).approval).toBeDefined();
 	});
 
+	it("flags /…/-wrapped bash.patterns entries and preserves their glob-literal semantics", async () => {
+		// Pre-engine approval treated `/npm test/` as literal glob text (it
+		// never matched); the engine would reinterpret the wrapper as a regex.
+		// The migrated rule keeps the legacy semantics and the plan flags it.
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify(
+				{
+					bash: {
+						patterns: [{ match: "/npm test/", approval: "allow" }],
+					},
+				},
+				null,
+				2,
+			),
+		);
+		const settings = await Settings.init({ agentDir, cwd });
+		const plan = planMigration(settings, cwd, home);
+		expect(plan.notices.some(notice => notice.includes("/npm test/") && notice.includes("/…/-wrapped"))).toBe(true);
+		const rule = plannedRules(plan).find(candidate => candidate.tool === "bash");
+		expect(rule?.match).toEqual({ command: "\\/npm test\\/" });
+	});
+
 	it("plans nothing for a clean config", async () => {
 		const settings = await Settings.init({ agentDir, cwd });
 		const plan = planMigration(settings, cwd, home);

@@ -17,7 +17,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { type AuditRecord, appendAudit, auditFilePath } from "../../tools/permissions/audit";
 import { type EngineContext, type EngineDecision, evaluatePermission } from "../../tools/permissions/engine";
 import { type PromptResolution, promptForDecision, renderAllowSuggestion } from "../../tools/permissions/prompt";
-import { type PendingApproval, parkApproval } from "../../tools/permissions/subagent";
+import { abortPendingForSession, type PendingApproval, parkApproval } from "../../tools/permissions/subagent";
 import { createSuggestionProvider } from "../../tools/permissions/suggest";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
@@ -190,6 +190,47 @@ function auditCommand(args: unknown): string | undefined {
 }
 
 /**
+ * Race a parked approval against the tool call's abort signal (spec §6.3): an
+ * aborted call must settle the parked promise instead of blocking forever.
+ * Aborting also drops every pending of the session — the agent that parked
+ * them is going down, so no parked call may outlive it (the session-level
+ * abort path, AgentSession.abort → abortPendingForSession, settles them too;
+ * this covers the signal firing on its own). The listener is removed on
+ * every settle path so nothing leaks.
+ */
+function raceParkedApproval(
+	parked: Promise<{ policy: "allow" | "deny" }>,
+	signal: AbortSignal | undefined,
+	sessionId: string,
+	toolName: string,
+): Promise<{ policy: "allow" | "deny" }> {
+	if (signal === undefined) return parked;
+	const abortError = () =>
+		new Error(`Approval for tool "${toolName}" aborted: the tool call was aborted before it could be answered`);
+	if (signal.aborted) {
+		abortPendingForSession(sessionId);
+		return Promise.reject(abortError());
+	}
+	const { promise, resolve, reject } = Promise.withResolvers<{ policy: "allow" | "deny" }>();
+	const onAbort = () => {
+		signal.removeEventListener("abort", onAbort);
+		abortPendingForSession(sessionId);
+		reject(abortError());
+	};
+	const settle = (resolution: { policy: "allow" | "deny" }) => {
+		signal.removeEventListener("abort", onAbort);
+		resolve(resolution);
+	};
+	const fail = (err: unknown) => {
+		signal.removeEventListener("abort", onAbort);
+		reject(err instanceof Error ? err : new Error(String(err)));
+	};
+	parked.then(settle, fail);
+	signal.addEventListener("abort", onAbort, { once: true });
+	return promise;
+}
+
+/**
  * Wraps a tool with extension callbacks for interception.
  * - Emits tool_call event before execution (can block)
  * - Emits tool_result event after execution (can modify result)
@@ -353,9 +394,12 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// 2. Full approval gate against the (possibly revised) input that will actually run — resolves
 		// policy and prompts on `effectiveParams`, so the user approves exactly what executes. A revised
 		// input that newly resolves to `deny` is caught here even though the original passed the
-		// short-circuit above.
+		// short-circuit above. When no handler revised the input the short-circuit decision is
+		// authoritative for the same args — re-evaluating would repeat every rule-layer load and bash
+		// piece analysis for an identical result, so reuse it.
 		const resolvedArgs = approvalArgs(effectiveParams, context);
-		const decision = evaluatePermission(this.tool, resolvedArgs, engineCtx);
+		const decision =
+			effectiveParams === params ? shortCircuit : evaluatePermission(this.tool, resolvedArgs, engineCtx);
 		context?.xdevTierResolved?.(decision.tier);
 		if (decision.policy === "deny") {
 			await this.#recordAudit(decision, resolvedArgs, "blocked", context, engineCtx);
@@ -484,10 +528,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				};
 				let resolution: { policy: "allow" | "deny" };
 				try {
-					resolution = await parkApproval(pending);
+					resolution = await raceParkedApproval(parkApproval(pending), signal, sessionId, this.tool.name);
 				} catch (err) {
 					await this.#recordAudit(decision, resolvedArgs, "blocked", context, engineCtx);
-					await emitApprovalResolved(false, "no interactive UI available");
+					const message = err instanceof Error ? err.message : "approval aborted";
+					await emitApprovalResolved(
+						false,
+						message.includes("no interactive UI available") ? "no interactive UI available" : message,
+					);
 					throw err;
 				}
 				await emitApprovalResolved(

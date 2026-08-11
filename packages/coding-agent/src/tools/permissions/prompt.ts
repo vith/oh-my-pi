@@ -17,7 +17,13 @@ import type {
 	PermissionDialogOption,
 	PermissionDialogRequest,
 } from "../../extensibility/extensions/types";
-import { type EngineContext, type EngineDecision, evaluateBashCommand, type PieceEvaluation } from "./engine";
+import {
+	type EngineContext,
+	type EngineDecision,
+	evaluateBashCommand,
+	hasBashApprovalShellControl,
+	type PieceEvaluation,
+} from "./engine";
 import { type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
 import type { Suggestion } from "./suggest";
 
@@ -56,6 +62,20 @@ const ALLOW_REMEMBER = "Allow & remember…";
 const DENY = "Deny";
 const DENY_REMEMBER = "Deny & remember…";
 const APPROVE = "Approve";
+
+/**
+ * Dialog note shown when a bash command's remember options are suppressed:
+ * the engine degrades rule-based allows on shell-control commands to a prompt
+ * (ruling R1), so a remembered rule would never suppress this prompt.
+ */
+const BASH_SHELL_CONTROL_NOTE =
+	"Remembered rules cannot suppress this prompt: the command uses shell control (pipeline, redirect, substitution, or -c/-e reinterpretation).";
+
+/** Whether the prompt unit's bash command carries shell control (remember rules cannot suppress it). */
+function bashRememberDisabled(args: unknown): boolean {
+	const command = argString(args, "command");
+	return command !== undefined && command.length > 0 && hasBashApprovalShellControl(command);
+}
 
 /** Legacy fake-UI label from the pre-dialog binary prompt, tolerated for compatibility. */
 const LEGACY_APPROVE = "Approve";
@@ -174,6 +194,12 @@ function genericCandidates(toolName: string, args: unknown, action: RuleAction):
 function scopedCandidates(toolName: string, args: unknown, action: RuleAction): CandidateRule[] {
 	const command = argString(args, "command");
 	if (command !== undefined && command.length > 0) {
+		// Shell-control commands degrade rule-based allows to a prompt (engine
+		// ruling R1) and whole-command matches never see per-piece evaluation,
+		// so exact/pattern/tool remember rules can never suppress them. Omit
+		// the candidates entirely — the dialog keeps Allow once + Deny with a
+		// note (spec §5.1).
+		if (hasBashApprovalShellControl(command)) return [];
 		return bashCandidates(toolName, command, action);
 	}
 	for (const key of FILE_ARG_KEYS) {
@@ -200,9 +226,14 @@ export function buildCandidates(toolName: string, args: unknown, pieces?: PieceE
 /**
  * The model-visible allow suggestion for a denied call (spec §5.2): the exact
  * YAML of the first allow candidate, so the model can negotiate in chat.
+ * Shell-control bash commands have no allow candidates — no rule can suppress
+ * their prompt — so the suggestion says so instead of emitting a broken rule.
  */
 export function renderAllowSuggestion(toolName: string, args: unknown): string {
 	const first = buildCandidates(toolName, args)[0];
+	if (first === undefined) {
+		return "No rule can allow this call: the command uses shell control, which no remembered allow rule can suppress.";
+	}
 	return `To allow this call, add rule:\n${first.yaml}`;
 }
 
@@ -365,11 +396,16 @@ async function promptUnit(
 					.then(resolveSuggestions)
 					.catch(() => ({ options: [], byLabel: new Map<string, Suggestion>() }))
 			: undefined;
+	// Shell-control bash commands cannot be suppressed by a remembered rule:
+	// drop both remember options and say why.
+	const rememberDisabled = bashRememberDisabled(unitArgs);
+	const lines = dialogLines(decision, pieces);
+	if (rememberDisabled) lines.push("", BASH_SHELL_CONTROL_NOTE);
 	const chosen = await chooseLabel(
 		ui,
 		title,
-		[ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER],
-		dialogLines(decision, pieces),
+		rememberDisabled ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER],
+		lines,
 		suggestionsPromise?.then(result => result.options),
 	);
 	switch (chosen) {

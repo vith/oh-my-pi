@@ -86,21 +86,87 @@ function findNearestProjectRoot(cwd: string): string {
 }
 
 /**
+ * Result cache for {@link loadRuleLayers}: the layer files are read and
+ * parsed on every permission evaluation (per bash piece, per tool call), so
+ * cache the parsed result per (cwd, home, resolved file set) and invalidate
+ * when any layer file's mtime/size changes or a file appears/disappears. The
+ * resolved paths are part of the key so a project-root layer appearing or
+ * disappearing (which changes the resolved project file) misses instead of
+ * serving stale rules. Tests mutate temp rule files rapidly; size is compared
+ * alongside mtime so same-mtime rewrites are still detected.
+ */
+interface RuleLayerCacheEntry {
+	stats: Array<{ mtimeMs: number; size: number } | null>;
+	result: RuleLoadResult;
+}
+
+const ruleLayerCache = new Map<string, RuleLayerCacheEntry>();
+
+/** Drop the cached rule-layer loads (tests that rewrite rule files rapidly). */
+export function clearRuleLayerCache(): void {
+	ruleLayerCache.clear();
+}
+
+function layerFileStats(files: {
+	dynamic: string;
+	project: string;
+	user: string;
+}): Array<{ mtimeMs: number; size: number } | null> {
+	const stats: Array<{ mtimeMs: number; size: number } | null> = [];
+	for (const file of [files.dynamic, files.project, files.user]) {
+		try {
+			const stat = fs.statSync(file);
+			stats.push({ mtimeMs: stat.mtimeMs, size: stat.size });
+		} catch {
+			// Missing file (or unreadable at stat time): the load reports the
+			// real read error; a null stat always counts as a change so the
+			// entry cannot be served stale.
+			stats.push(null);
+		}
+	}
+	return stats;
+}
+
+function sameLayerFileStats(
+	left: Array<{ mtimeMs: number; size: number } | null>,
+	right: Array<{ mtimeMs: number; size: number } | null>,
+): boolean {
+	for (let i = 0; i < left.length; i++) {
+		const a = left[i];
+		const b = right[i];
+		if (a === null || b === null) {
+			if (a !== b) return false;
+			continue;
+		}
+		if (a.mtimeMs !== b.mtimeMs || a.size !== b.size) return false;
+	}
+	return true;
+}
+
+/**
  * Load the three file-backed layers in precedence order (dynamic → project → user),
  * deduplicating ids within each file, dropping expired rules, and collecting
  * per-file errors. A broken or missing file contributes no rules.
  */
 export function loadRuleLayers(cwd: string, home?: string): RuleLoadResult {
 	const files = ruleFiles(cwd, home);
+	const key = `${cwd}\u0000${home ?? ""}\u0000${files.dynamic}\u0000${files.project}\u0000${files.user}`;
+	const stats = layerFileStats(files);
+	const cached = ruleLayerCache.get(key);
+	if (cached !== undefined && sameLayerFileStats(cached.stats, stats)) {
+		return cached.result;
+	}
+
 	const rules: PermissionRule[] = [];
 	const errors: string[] = [];
-
 	for (const layer of LAYER_ORDER) {
 		const loaded = loadRuleFile(files[layer], layer);
 		rules.push(...loaded.rules);
 		errors.push(...loaded.errors);
 	}
-	return { rules, errors };
+	const result: RuleLoadResult = { rules, errors };
+	ruleLayerCache.set(key, { stats, result });
+	return result;
 }
 
 function loadRuleFile(file: string, layer: RuleLayer): { rules: PermissionRule[]; errors: string[] } {

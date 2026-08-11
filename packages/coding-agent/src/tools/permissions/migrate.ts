@@ -10,6 +10,7 @@ import {
 } from "../../config/settings";
 import { type ApprovalPolicy, normalizePolicy } from "../approval";
 import { normalizeBashApprovalPattern } from "../bash";
+import { legacyBashPattern } from "./engine";
 import { type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
 
 /**
@@ -111,8 +112,20 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 				const match = typeof record.match === "string" ? normalizeBashApprovalPattern(record.match) : undefined;
 				const policy = normalizePolicy(record.approval);
 				if (match === undefined || match.length === 0 || policy === undefined) continue;
-				rules.push(makeRule("bash", { command: match }, policy, ruleIndex++));
+				// A /…/-wrapped legacy pattern was glob-literal (and inert) under
+				// the pre-engine approval path; permission rules would reinterpret
+				// it as an unanchored regex — a behavior change for allow rules.
+				// Preserve the legacy semantics in the migrated rule and flag it.
+				const regexWrapped = match.startsWith("/") && match.endsWith("/") && match.length >= 2;
+				rules.push(
+					makeRule("bash", { command: regexWrapped ? legacyBashPattern(match) : match }, policy, ruleIndex++),
+				);
 				notices.push(`bash.patterns "${match}" becomes a bash permission rule (action: ${policy}).`);
+				if (regexWrapped) {
+					notices.push(
+						`bash.patterns "${match}" is /…/-wrapped: the pre-engine approval path treated it as literal glob text (it never matched), and the migrated rule keeps that behavior. Permission rules interpret /…/ as a regex — edit the rule if you intended regex matching.`,
+					);
+				}
 			}
 		}
 	}

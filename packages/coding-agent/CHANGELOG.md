@@ -38,6 +38,12 @@
 
 ### Fixed
 
+- Parked subagent approvals now settle when the agent dies: aborting a session (executor kill, budget stop, terminate, interrupt) or the tool call itself rejects the parked promise with a clear "aborted" error, drops the pending from the registry, and clears the awaiting-approval roster marker instead of leaving the run blocked forever (spec §6.3).
+- The approval dialog no longer offers "Allow & remember…"/"Deny & remember…" for bash commands whose rule-based allows degrade under the shell-control guard (pipelines, redirects, substitutions, `-c`/`-e` reinterpretation) — remembered rules could never suppress those prompts; a dialog note explains why, and the model-visible allow suggestion says no rule can allow the call.
+- Bash permission audit records now carry the per-piece breakdown with each piece's rule id/layer, and compound denials keep the decisive piece's rule attribution, so `/permissions list` audit-hit counts reflect bash rules.
+- Legacy `/…/`-wrapped `bash.patterns` values keep their pre-engine glob-literal (inert) semantics instead of being reinterpreted as unanchored regexes (an over-allow for legacy allow rules); `/permissions migrate` preserves the behavior and flags the pattern with a notice.
+- Rule-layer files are now cached per (cwd, home) with mtime/size invalidation, and the approval gate skips its second evaluation when an extension did not revise the call input — repeated evaluations no longer re-read and re-parse the three rule files on every bash piece.
+
 - Retried concurrent-request caps with a short backoff without deleting valid Copilot credentials or rotating through sibling accounts.
 - Fixed the default `textVerbosity` setting being forwarded to OpenAI Codex requests unless the user explicitly configures it, preserving Codex's native response-control defaults. ([#4949](https://github.com/can1357/oh-my-pi/issues/4949))
 - Reduced streaming CPU usage by coalescing the cumulative `message_update` deltas of a turn at the event-controller dispatch boundary: at most one streaming-state rebuild runs per ~33ms window instead of one per token, cutting the per-token handler work that dominated the CPU profile of streaming sessions (especially at high token rates) while preserving per-delta speech output. Subscriber dispatch is serialized so a rapid stream tail (`message_update` → `message_end` → `agent_end`) cannot overtake the coalesced flush. ([#7443](https://github.com/can1357/oh-my-pi/issues/7443))

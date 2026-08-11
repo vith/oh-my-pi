@@ -13,7 +13,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import type { PermissionPolicy } from "./engine";
+import type { PermissionPolicy, PieceEvaluation } from "./engine";
 import type { RuleLayer } from "./rules";
 
 export interface AuditRecord {
@@ -27,7 +27,8 @@ export interface AuditRecord {
 	ruleId?: string;
 	layer?: RuleLayer;
 	reason?: string;
-	pieces?: Array<{ text: string; policy: PermissionPolicy }>;
+	/** Per-piece breakdown for bash calls; each piece carries its own rule attribution (spec §7). */
+	pieces?: PieceEvaluation[];
 	outcome?: "executed" | "blocked" | "error";
 }
 

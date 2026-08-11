@@ -86,6 +86,25 @@ describe("buildCandidates", () => {
 		expect(labels).toContain("Tool: bash always");
 	});
 
+	it("offers no remember candidates for shell-control bash commands", () => {
+		// Allow rules on shell-control commands degrade to a prompt (engine
+		// ruling R1) and whole-command matches never see per-piece evaluation,
+		// so exact/pattern/tool remember rules can never suppress the prompt.
+		for (const command of [
+			"git log | head -5",
+			"python3 -c'x'", // concatenated -c form (guard-true on its own)
+			"python3 -c 'print(1)'", // space-separated -c with shell chars in the quoted arg
+		]) {
+			expect(buildCandidates("bash", { command })).toEqual([]);
+			expect(buildCandidates("bash", { command }, [pendingPiece(command)])).toEqual([]);
+		}
+		// Control: the same scopes stay for a shell-control-free command.
+		const control = buildCandidates("bash", { command: "git status -s" });
+		expect(control.some(candidate => candidate.rule.match.command === "git status -s")).toBe(true);
+		expect(control.some(candidate => candidate.rule.match.command === "git *")).toBe(true);
+		expect(control.some(candidate => candidate.rule.match.arg === "*")).toBe(true);
+	});
+
 	it("file tools: exact path and parent glob", () => {
 		const c = buildCandidates("write", { path: "src/foo/bar.ts" });
 		expect(c.some(x => x.label.includes("src/foo/bar.ts"))).toBe(true);
@@ -234,23 +253,38 @@ describe("promptForDecision", () => {
 	});
 
 	it("PTY remember candidates are scoped to the whole command text", async () => {
+		// A shell-control-free command: PTY calls prompt once for the whole
+		// command, so the remember scopes use the whole text (which per-piece
+		// evaluation of a single-piece command sees).
 		const home = tempHome();
-		const { ui } = queuedSelectUi(["Allow & remember…", "Exact: echo a && echo b"]);
+		const { ui } = queuedSelectUi(["Allow & remember…", "Exact: echo a b"]);
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a b")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a b", pty: true }, decision, fakeCtx(home));
+		expect(res.policy).toBe("allow");
+
+		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		const written = doc.rules.find(r => (r.match as Record<string, unknown>).command === "echo a b");
+		expect(written).toBeDefined();
+		expect(written?.action).toBe("allow");
+	});
+
+	it("PTY compound commands lose the dead remember options", async () => {
+		// A PTY compound is prompted as one unit with the whole command text,
+		// but per-piece rule evaluation never sees that text and rule allows
+		// degrade under shell control — the remember options are dropped.
+		const { ui, calls } = queuedSelectUi(["Allow once"]);
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
 		const res = await promptForDecision(
 			ui,
 			"bash",
 			{ command: "echo a && echo b", pty: true },
 			decision,
-			fakeCtx(home),
+			fakeCtx(tempHome()),
 		);
 		expect(res.policy).toBe("allow");
-
-		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
-		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
-		const written = doc.rules.find(r => (r.match as Record<string, unknown>).command === "echo a && echo b");
-		expect(written).toBeDefined();
-		expect(written?.action).toBe("allow");
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toEqual(["Allow once", "Deny"]);
 	});
 
 	it("forced prompts (provider safety checks) offer only Approve/Deny", async () => {
@@ -262,6 +296,22 @@ describe("promptForDecision", () => {
 		expect(res.policy).toBe("allow");
 		expect(calls).toHaveLength(1);
 		expect(calls[0]).toEqual(["Approve", "Deny"]);
+	});
+
+	it("drops the remember options with a note for shell-control bash commands", async () => {
+		const captured: { request?: PermissionDialogRequest } = {};
+		const ui = {
+			...noopUi(),
+			showPermissionDialog: async (request: PermissionDialogRequest) => {
+				captured.request = request;
+				return 0; // "Allow once"
+			},
+		} as unknown as ExtensionUIContext;
+		const decision = fakeDecision({ pieces: [pendingPiece("git status | sh")] });
+		const res = await promptForDecision(ui, "bash", { command: "git status | sh" }, decision, fakeCtx(tempHome()));
+		expect(res.policy).toBe("allow");
+		expect(captured.request?.options.map(option => option.label)).toEqual(["Allow once", "Deny"]);
+		expect(captured.request?.lines?.some(line => line.includes("Remembered rules cannot suppress"))).toBe(true);
 	});
 
 	it("uses the dialog when the UI exposes showPermissionDialog", async () => {
@@ -421,5 +471,11 @@ describe("renderAllowSuggestion", () => {
 		expect(rule!.tool).toBe("bash");
 		expect(rule!.action).toBe("allow");
 		expect((rule!.match as Record<string, unknown>).command).toBe("git push");
+	});
+
+	it("explains that no rule can allow a shell-control command", () => {
+		const text = renderAllowSuggestion("bash", { command: "python3 -c'x'" });
+		expect(text).toContain("No rule can allow this call");
+		expect(text).toContain("shell control");
 	});
 });

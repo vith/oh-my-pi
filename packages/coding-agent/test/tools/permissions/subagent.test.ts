@@ -62,6 +62,15 @@ function fakeSession(sessionId: string): AgentSession {
 	return { sessionManager: { getSessionId: () => sessionId } } as unknown as AgentSession;
 }
 
+/** Poll until a session has at least one parked pending (bounded). */
+async function waitUntilParked(sessionId: string): Promise<void> {
+	for (let attempt = 0; attempt < 400; attempt++) {
+		if (pendingApprovalsForSession(sessionId).length > 0) return;
+		await Bun.sleep(5);
+	}
+	throw new Error(`call never parked for session ${sessionId}`);
+}
+
 afterEach(() => {
 	for (const id of FAKE_IDS) {
 		unregisterPermissionHandler(id);
@@ -314,5 +323,34 @@ describe("wrapper park integration", () => {
 				sessionManager,
 			} as unknown as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
+	it("rejects the parked call when the tool call's abort signal fires", async () => {
+		const never = Promise.withResolvers<{ policy: "allow" | "deny" }>();
+		registerPermissionHandler(sessionId, () => never.promise);
+		const controller = new AbortController();
+		const parked = bashTool().execute("park-abort-signal", { command: "echo never" }, controller.signal, undefined, {
+			settings: approvalSettings({ "tools.approvalMode": "always-ask" }),
+			sessionManager,
+		} as unknown as AgentToolContext);
+		// Wait until the call is actually parked before aborting it.
+		await waitUntilParked(sessionId);
+		controller.abort();
+		await expect(parked).rejects.toThrow(/aborted/);
+		// The parked entry is dropped: no leaked PendingApproval, no roster marker.
+		expect(pendingApprovalsForSession(sessionId)).toEqual([]);
+	});
+
+	it("rejects the parked call when the session is aborted", async () => {
+		const never = Promise.withResolvers<{ policy: "allow" | "deny" }>();
+		registerPermissionHandler(sessionId, () => never.promise);
+		const parked = bashTool().execute("park-abort-session", { command: "echo never" }, undefined, undefined, {
+			settings: approvalSettings({ "tools.approvalMode": "always-ask" }),
+			sessionManager,
+		} as unknown as AgentToolContext);
+		await waitUntilParked(sessionId);
+		await session.abort();
+		await expect(parked).rejects.toThrow(/aborted/);
+		expect(pendingApprovalsForSession(sessionId)).toEqual([]);
 	});
 });

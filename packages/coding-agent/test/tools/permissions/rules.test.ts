@@ -1,8 +1,9 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	clearRuleLayerCache,
 	isRuleExpired,
 	loadRuleLayers,
 	normalizeRule,
@@ -18,6 +19,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `perm-rules-${Snowflake.next()
 const home = path.join(tmp, "home");
 const project = path.join(tmp, "project");
 afterAll(() => removeSyncWithRetries(tmp));
+afterEach(() => clearRuleLayerCache());
 
 function write(file: string, content: string) {
 	fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -93,6 +95,45 @@ describe("loadRuleLayers", () => {
 		expect(isRuleExpired({ ...base, ttl: 60, expiresAt: Date.now() - 1 })).toBe(true); // past stamp
 		expect(isRuleExpired({ ...base, ttl: 60, expiresAt: Date.now() + 60_000 })).toBe(false); // future stamp
 		expect(isRuleExpired({ ...base })).toBe(false); // no ttl — never expires
+	});
+
+	it("caches layer loads until a layer file's mtime or size changes", () => {
+		clearRuleLayerCache();
+		const readSpy = vi.spyOn(fs, "readFileSync");
+		try {
+			write(
+				path.join(project, ".omp", "permissions.yml"),
+				"rules:\n  - id: cached1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+			);
+			loadRuleLayers(project, home);
+			loadRuleLayers(project, home);
+			// Two loads of unchanged files: one parse pass (three reads).
+			expect(readSpy).toHaveBeenCalledTimes(3);
+			// A rewrite with different content (size change) invalidates the cache.
+			write(
+				path.join(project, ".omp", "permissions.yml"),
+				"rules:\n  - id: cached2\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+			);
+			loadRuleLayers(project, home);
+			expect(readSpy).toHaveBeenCalledTimes(6);
+			// A pure mtime touch (same content and size) also invalidates it.
+			write(
+				path.join(project, ".omp", "permissions.yml"),
+				"rules:\n  - id: cached2\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+			);
+			fs.utimesSync(
+				path.join(project, ".omp", "permissions.yml"),
+				new Date(Date.now() - 60_000),
+				new Date(Date.now() + 60_000),
+			);
+			loadRuleLayers(project, home);
+			expect(readSpy).toHaveBeenCalledTimes(9);
+			// Re-loads reflect the latest file content.
+			expect(loadRuleLayers(project, home).rules.some(r => r.id === "cached2")).toBe(true);
+		} finally {
+			readSpy.mockRestore();
+			clearRuleLayerCache();
+		}
 	});
 });
 
