@@ -15,6 +15,10 @@
 
 - Legacy `tools.approvalMode`, `tools.approval.<tool>`, and `bash.patterns` settings now map onto the permission engine (posture, legacy user policy, and legacy rule layer) instead of driving the old approval path; `/permissions migrate` rewrites them into rule files.
 
+### Fixed
+
+- Fixed `/permissions migrate` silently dropping the legacy `tools.approvalMode` posture: consuming the key now seeds `permissions.default` with the mapped posture (yolo→allow, write/always-ask→prompt) unless it is already configured, so the hidden legacy setting cannot keep governing behavior or flip the posture to prompt unnoticed. Pending-migration notices now surface as TUI warnings (with a log warning) instead of info toasts.
+
 ### Removed
 
 - Removed the binary Approve/Deny approval prompt.

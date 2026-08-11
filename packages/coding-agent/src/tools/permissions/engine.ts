@@ -42,9 +42,24 @@ type ApprovalSubjectLike = Pick<AgentTool, "name" | "approval" | "formatApproval
 const BASH_TOOL = { name: "bash", approval: undefined, formatApprovalDetails: undefined };
 
 /** `permissions.default` is read through the settings schema (added with the engine; Task 6 extends the group). */
-const POSTURE_KEY = "permissions.default";
+export const POSTURE_KEY = "permissions.default";
 
 let invalidRegexWarned = false;
+
+let legacyPostureWarned = false;
+
+/**
+ * Map a legacy `tools.approvalMode` value onto the engine posture
+ * (yolo → allow; write and always-ask → prompt). Unmappable values return
+ * `undefined` and the caller falls back to the posture default. Single source
+ * of truth for the mapping — the migration plan mirrors it when it seeds
+ * `permissions.default` from the legacy key.
+ */
+export function postureFromApprovalMode(mode: unknown): Posture | undefined {
+	if (mode === "yolo") return "allow";
+	if (mode === "write" || mode === "always-ask") return "prompt";
+	return undefined;
+}
 
 /**
  * Resolve the default posture (precedence step 11): an explicitly configured
@@ -61,9 +76,16 @@ export function resolvePosture(settings: Pick<Settings, "get" | "isConfigured">)
 		return raw === "allow" || raw === "deny" ? raw : "prompt";
 	}
 	if (settings.isConfigured("tools.approvalMode")) {
-		const mode = settings.get("tools.approvalMode");
-		if (mode === "yolo") return "allow";
-		if (mode === "write" || mode === "always-ask") return "prompt";
+		const posture = postureFromApprovalMode(settings.get("tools.approvalMode"));
+		if (posture !== undefined) {
+			if (!legacyPostureWarned) {
+				legacyPostureWarned = true;
+				logger.warn(
+					"Permission posture resolved from legacy tools.approvalMode, which is hidden from the settings UI. Run /permissions migrate to move it to permissions.default.",
+				);
+			}
+			return posture;
+		}
 	}
 	return "prompt";
 }

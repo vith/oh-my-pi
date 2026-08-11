@@ -10,7 +10,7 @@ import {
 } from "../../config/settings";
 import { type ApprovalPolicy, normalizePolicy } from "../approval";
 import { normalizeBashApprovalPattern } from "../bash";
-import { legacyBashPattern } from "./engine";
+import { legacyBashPattern, postureFromApprovalMode, POSTURE_KEY, type Posture } from "./engine";
 import { type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
 
 /**
@@ -39,6 +39,14 @@ export interface MigrationPlan {
 	removeSettings: string[];
 	/** User-facing mapping notices describing the dry run. */
 	notices: string[];
+	/**
+	 * `permissions.default` value to write when a legacy `tools.approvalMode`
+	 * is consumed and the new key is not explicitly configured. Seeding the new
+	 * setting with the mapped posture keeps the legacy behavior after the key
+	 * is removed and makes the posture visible/editable in the settings UI
+	 * (the legacy key is config-file-only and hidden).
+	 */
+	postureSetting?: { key: typeof POSTURE_KEY; value: Posture };
 }
 
 const LEGACY_APPROVAL_MODE = "tools.approvalMode";
@@ -53,6 +61,7 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 	const rules: MigrationPlan["rules"] = [];
 	const removeSettings: string[] = [];
 	const notices: string[] = [];
+	let postureSetting: MigrationPlan["postureSetting"];
 	// Position in the ordered plan; makes rule ids injective and deterministic.
 	let ruleIndex = 0;
 
@@ -70,13 +79,25 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 		} else {
 			notices.push(notOwnedNotice(LEGACY_APPROVAL_MODE));
 		}
-		// Mirrors the engine's resolvePosture mapping (yolo -> allow; write and
-		// always-ask both prompt): the notice tells the user what to configure
-		// under permissions.default to keep their posture.
-		const posture = mode === "yolo" ? "allow" : "prompt";
-		notices.push(
-			`tools.approvalMode: ${mode} maps to permissions.default: ${posture}. Set permissions.default to keep this posture after migration.`,
-		);
+		// The legacy key is hidden from the settings UI but still governs the
+		// engine posture (resolvePosture consults it), so removing it without
+		// seeding permissions.default would silently flip the posture to
+		// "prompt". Seed the new key with the mapped posture unless the user
+		// already configured it — an explicit permissions.default wins over the
+		// legacy key at decision time and must not be overwritten.
+		const posture = postureFromApprovalMode(mode);
+		if (posture !== undefined) {
+			if (settings.isConfigured(POSTURE_KEY)) {
+				notices.push(
+					`tools.approvalMode: ${mode} maps to permissions.default: ${posture}; permissions.default is already configured and takes precedence, so it is left unchanged.`,
+				);
+			} else {
+				postureSetting = { key: POSTURE_KEY, value: posture };
+				notices.push(
+					`tools.approvalMode: ${mode} maps to permissions.default: ${posture}. Migration sets permissions.default to ${posture} so the posture survives the legacy key's removal — change it in settings at any time.`,
+				);
+			}
+		}
 	}
 
 	if (settings.isConfigured(LEGACY_APPROVAL)) {
@@ -137,7 +158,12 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 		notices.push(`Legacy settings key(s) ${removeSettings.join(", ")} will be removed from config.`);
 	}
 
-	return { rules, removeSettings, notices };
+	return {
+		rules,
+		removeSettings,
+		notices,
+		...(postureSetting !== undefined ? { postureSetting } : {}),
+	};
 }
 
 /**
@@ -172,6 +198,9 @@ export async function applyMigration(plan: MigrationPlan, cwd: string, home?: st
 
 	for (const key of plan.removeSettings) {
 		removeSettingKey(key);
+	}
+	if (plan.postureSetting !== undefined) {
+		globalSettings.set(plan.postureSetting.key, plan.postureSetting.value);
 	}
 	await globalSettings.flush();
 }

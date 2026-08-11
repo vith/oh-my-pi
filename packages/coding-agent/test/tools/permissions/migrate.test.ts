@@ -79,6 +79,11 @@ describe("planMigration", () => {
 
 		expect(plan.removeSettings).toEqual(["tools.approvalMode", "tools.approval", "bash.patterns"]);
 
+		// approvalMode "write" maps to posture "prompt" and seeds the new key
+		// (permissions.default is not configured), so the hidden legacy key
+		// stops governing posture after removal.
+		expect(plan.postureSetting).toEqual({ key: "permissions.default", value: "prompt" });
+
 		expect(plannedRules(plan)).toContainEqual({
 			id: "legacy-bash-0",
 			tool: "bash",
@@ -150,7 +155,30 @@ describe("planMigration", () => {
 		expect(plan.rules).toEqual([]);
 		expect(plan.removeSettings).toEqual([]);
 		expect(plan.notices).toEqual([]);
+		expect(plan.postureSetting).toBeUndefined();
 		expect(firstRunNotice(settings)).toBeNull();
+	});
+
+	it("does not overwrite an explicitly configured permissions.default when consuming approvalMode", async () => {
+		// An explicit permissions.default wins over the legacy key at decision
+		// time (resolvePosture), so migration must not seed over it.
+		fs.writeFileSync(
+			path.join(agentDir, "config.yml"),
+			YAML.stringify({ tools: { approvalMode: "yolo" }, permissions: { default: "prompt" } }, null, 2),
+		);
+		const settings = await Settings.init({ agentDir, cwd });
+		const plan = planMigration(settings, cwd, home);
+
+		expect(plan.postureSetting).toBeUndefined();
+		expect(plan.removeSettings).toEqual(["tools.approvalMode"]);
+		// the notice explains that the explicit setting wins
+		expect(plan.notices.some(notice => notice.includes("already configured"))).toBe(true);
+
+		await applyMigration(plan, cwd, home);
+		const config = YAML.parse(fs.readFileSync(path.join(agentDir, "config.yml"), "utf8")) as Record<string, unknown>;
+		expect(config.permissions).toEqual({ default: "prompt" });
+		expect((config.tools as Record<string, unknown>).approvalMode).toBeUndefined();
+		expect(settings.get("permissions.default")).toBe("prompt");
 	});
 
 	it("excludes legacy keys that live in a project layer from removal, with a notice", async () => {
@@ -245,6 +273,11 @@ describe("applyMigration", () => {
 		expect(settings.isConfigured("tools.approval")).toBe(false);
 		expect(settings.isConfigured("tools.approvalMode")).toBe(false);
 		expect(settings.isConfigured("bash.patterns")).toBe(false);
+
+		// the mapped posture was seeded into the new, UI-visible setting
+		expect(settings.isConfigured("permissions.default")).toBe(true);
+		expect(settings.get("permissions.default")).toBe("prompt");
+		expect(config.permissions).toEqual({ default: "prompt" });
 	});
 
 	it("keeps distinct rules when legacy entries slug identically", async () => {
@@ -335,6 +368,8 @@ describe("applyMigration", () => {
 		expect(reloaded.isConfigured("tools.approval")).toBe(false);
 		expect(reloaded.isConfigured("tools.approvalMode")).toBe(false);
 		expect(reloaded.isConfigured("bash.patterns")).toBe(false);
+		expect(reloaded.isConfigured("permissions.default")).toBe(true);
+		expect(reloaded.get("permissions.default")).toBe("prompt");
 		expect(firstRunNotice(reloaded)).toBeNull();
 	});
 });

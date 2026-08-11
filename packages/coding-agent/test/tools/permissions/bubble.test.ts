@@ -328,7 +328,7 @@ describe("showFirstRunNotices", () => {
 		restoreSettingsTestState(settingsState);
 	});
 
-	it("surfaces each mapping notice via notify while legacy keys remain", async () => {
+	it("surfaces a warning summary plus each mapping notice via notify while legacy keys remain", async () => {
 		fs.writeFileSync(
 			path.join(agentDir, "config.yml"),
 			YAML.stringify({ tools: { approvalMode: "write" } }, null, 2),
@@ -336,11 +336,16 @@ describe("showFirstRunNotices", () => {
 		const settings = await Settings.init({ agentDir, cwd });
 		const notices = firstRunNotice(settings);
 		expect(notices).not.toBeNull();
-		const expected = notices ?? [];
+		const noticeList = notices ?? [];
 
 		const notify = vi.fn();
 		expect(showFirstRunNotices(settings, notify)).toBe(true);
-		expect(notify.mock.calls.map(call => call[0])).toEqual(expected);
+		const calls = notify.mock.calls as Array<[string, string | undefined]>;
+		// the summary names the remediation command and every message is a warning
+		expect(calls[0][0]).toContain("/permissions migrate");
+		expect(calls.every(call => call[1] === "warning")).toBe(true);
+		// the mapping notices follow the summary in order
+		expect(calls.slice(1).map(call => call[0])).toEqual(noticeList);
 	});
 
 	it("shows nothing on a clean config", async () => {
