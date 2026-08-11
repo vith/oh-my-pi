@@ -5,7 +5,7 @@ import { type ApprovalPolicy, getToolDecision, normalizePolicy, type ResolvedApp
 import { bashApprovalPatternToRegExp, normalizeBashApprovalPattern } from "../bash";
 import { CURATED_ALLOW_TOOLS, matchCuratedDeny } from "./curated";
 import { loadRuleLayers, type PermissionRule, type RuleLayer } from "./rules";
-import { isSinglePiece, parseCommand, type ShellPiece } from "./split";
+import { extractSubCommands, isSinglePiece, parseCommand, type ShellPiece } from "./split";
 
 export type PermissionPolicy = "allow" | "deny" | "prompt";
 export type Posture = "allow" | "prompt" | "deny";
@@ -179,7 +179,26 @@ function matchPatternValue(key: string, value: unknown, pattern: unknown): boole
 	return value === pattern;
 }
 
+/**
+ * Unquoted constructs that make a piece unanalyzable in place: separators that
+ * survive into a piece, and redirects. Pipelines, `$(…)`/backticks, and parens
+ * are NOT here — their sub-commands are evaluated through the rule pipeline
+ * (`extractSubCommands` + recursion) instead of degrading.
+ */
 const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
+	"\n": true,
+	"\r": true,
+	";": true,
+	"&": true,
+	"<": true,
+	">": true,
+};
+/**
+ * The full original control set, used for content inside quotes: a `-c`/`-e`
+ * option reinterprets that content as code, so ANY control there (including
+ * analyzable constructs) marks the argument suspicious.
+ */
+const BASH_APPROVAL_ALL_CONTROL_CHARS: Record<string, true> = {
 	"\n": true,
 	"\r": true,
 	";": true,
@@ -192,6 +211,13 @@ const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
 	"(": true,
 	")": true,
 };
+/**
+ * Interpreter escape hatches whose argument is code by definition, regardless
+ * of content: PowerShell `-Command` and cmd.exe `/c` `/k`. Unconditional so a
+ * rule allow never vouches for them; benign `-c` flag usages (`curl -c`,
+ * `grep -c`, `git -c`) stay content-gated below.
+ */
+const BASH_APPROVAL_COMMAND_FLAG_RE = /(?:^|[ \t])(?:-[Cc]ommand|\/[ck])(?:[= \t]|$|['"])/u;
 const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$|['"])/u;
 /**
  * Concatenated option forms (`python3 -c'…'`, `perl -e'…'`, `git -c'x=y'`,
@@ -207,10 +233,13 @@ const BASH_APPROVAL_CONCATENATED_OPTION_RE = /(?:^|[ \t])(?:-[^- \t]*[ce]|--(?:c
 /**
  * Restored from the pre-engine bash approval fn (plan ruling R1): an `allow`
  * rule must never vouch for a command that can smuggle a second command
- * through shell control syntax — pipelines, substitutions, redirects, `-c`
- * reinterpreting options — even when the whole line parses as one piece.
- * Conservative text-based scan on the piece text; false positives over-prompt
- * (safe).
+ * through shell syntax the rule pipeline cannot analyze — redirects and
+ * `-c`/`-e`/`-Command`/`/c` reinterpreting options — even when the whole line
+ * parses as one piece. Pipelines, `$(…)`, and backticks are NOT guarded here:
+ * their sub-commands are evaluated through the rule pipeline itself
+ * (`extractSubCommands` + recursive `evaluateBashCommand`), so a rule allow
+ * only stands when every sub-command passes. Conservative text-based scan on
+ * the piece text; false positives over-prompt (safe).
  */
 export function hasBashApprovalShellControl(command: string): boolean {
 	let quote: "'" | '"' | undefined;
@@ -220,14 +249,14 @@ export function hasBashApprovalShellControl(command: string): boolean {
 		if (quote === "'") {
 			if (ch === "'") {
 				quote = undefined;
-			} else if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, ch)) {
+			} else if (Object.hasOwn(BASH_APPROVAL_ALL_CONTROL_CHARS, ch)) {
 				hasReinterpretableShellControl = true;
 			}
 			continue;
 		}
 		if (ch === "\\") {
 			const escaped = command[i + 1];
-			if (escaped && Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, escaped)) {
+			if (escaped && Object.hasOwn(BASH_APPROVAL_ALL_CONTROL_CHARS, escaped)) {
 				hasReinterpretableShellControl = true;
 			}
 			i++;
@@ -239,10 +268,11 @@ export function hasBashApprovalShellControl(command: string): boolean {
 				continue;
 			}
 			// Expansion is active inside double quotes even in the original line.
-			if (ch === "`" || ch === "$") return true;
-			// Other control characters are literal here but become executable if a
-			// `-c`/`-e` option reinterprets the argument through another shell.
-			if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, ch)) hasReinterpretableShellControl = true;
+			// Any control there (including analyzable substitutions) can be
+			// re-executed if a `-c`/`-e` option reinterprets the argument, so it
+			// marks the reinterpretable flag; substitutions themselves are
+			// analyzed by the recursion rather than degrading in place.
+			if (Object.hasOwn(BASH_APPROVAL_ALL_CONTROL_CHARS, ch)) hasReinterpretableShellControl = true;
 			continue;
 		}
 		if (ch === "'" || ch === '"') {
@@ -253,10 +283,12 @@ export function hasBashApprovalShellControl(command: string): boolean {
 	}
 	// Options such as `git -c alias.x='!...'` and `sh -c "..."` reinterpret
 	// otherwise literal quoted or escaped arguments as executable code;
-	// concatenated forms (`-c'…'`, `-e'…'`) count on their own.
+	// concatenated forms (`-c'…'`, `-e'…'`) count on their own. PowerShell
+	// `-Command` and cmd.exe `/c` `/k` are code-by-definition and unconditional.
 	return (
 		(hasReinterpretableShellControl && BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE.test(command)) ||
-		BASH_APPROVAL_CONCATENATED_OPTION_RE.test(command)
+		BASH_APPROVAL_CONCATENATED_OPTION_RE.test(command) ||
+		BASH_APPROVAL_COMMAND_FLAG_RE.test(command)
 	);
 }
 
@@ -510,12 +542,78 @@ function denyReason(piece: PieceEvaluation): string {
 	return `${base} — ${detail}`;
 }
 
-function evaluateBashPiece(piece: ShellPiece, ctx: EngineContext, legacyAllowEnabled: boolean): BashPieceResult {
+function evaluateBashPiece(
+	piece: ShellPiece,
+	ctx: EngineContext,
+	legacyAllowEnabled: boolean,
+	depth: number,
+): BashPieceResult {
 	const decision = evaluatePermissionInner(BASH_TOOL, { command: piece.text }, ctx, legacyAllowEnabled);
+	if (decision.policy !== "allow") {
+		return {
+			evaluation: {
+				text: piece.text,
+				policy: decision.policy,
+				ruleId: decision.ruleId,
+				layer: decision.layer,
+				reason: decision.reason,
+			},
+			source: decision.source,
+		};
+	}
+
+	// A rule-based allow must not vouch for a command that smuggles executable
+	// content through analyzable shell constructs (pipelines, `$(…)`/backtick
+	// substitutions): each sub-command is evaluated through the same pipeline,
+	// and the piece allow only stands when every sub-command is allowed.
+	// Unanalyzable residue (malformed constructs, non-simple pipeline stages,
+	// excessive nesting) degrades the allow to a prompt (R1 — over-prompt).
+	const subs = extractSubCommands(piece.text, depth);
+	if (subs === null) {
+		return {
+			evaluation: {
+				text: piece.text,
+				policy: "prompt",
+				ruleId: decision.ruleId,
+				layer: decision.layer,
+				reason: decision.reason,
+			},
+			source: "rule",
+		};
+	}
+	let sawPrompt: BashPieceResult | undefined;
+	for (const sub of subs) {
+		const subDecision = evaluateBashCommand(sub, ctx, depth + 1);
+		if (subDecision.policy === "deny") {
+			return {
+				evaluation: {
+					text: piece.text,
+					policy: "deny",
+					ruleId: subDecision.ruleId ?? decision.ruleId,
+					layer: subDecision.layer ?? decision.layer,
+					reason: subDecision.reason,
+				},
+				source: subDecision.source,
+			};
+		}
+		if (subDecision.policy === "prompt" && sawPrompt === undefined) {
+			sawPrompt = {
+				evaluation: {
+					text: piece.text,
+					policy: "prompt",
+					ruleId: subDecision.ruleId,
+					layer: subDecision.layer,
+					reason: subDecision.reason,
+				},
+				source: subDecision.source,
+			};
+		}
+	}
+	if (sawPrompt !== undefined) return sawPrompt;
 	return {
 		evaluation: {
 			text: piece.text,
-			policy: decision.policy,
+			policy: "allow",
 			ruleId: decision.ruleId,
 			layer: decision.layer,
 			reason: decision.reason,
@@ -533,12 +631,12 @@ function evaluateBashPiece(piece: ShellPiece, ctx: EngineContext, legacyAllowEna
  * Legacy `bash.patterns` allow rules only apply when the whole command is a
  * single piece; deny/prompt patterns match any piece text.
  */
-export function evaluateBashCommand(command: string, ctx: EngineContext): EngineDecision {
+export function evaluateBashCommand(command: string, ctx: EngineContext, depth = 0): EngineDecision {
 	const out = parseCommand(command);
 	const pieces: ShellPiece[] =
 		out.ok && out.pieces.length > 0 ? out.pieces : [{ text: command.trim(), operator: null }];
 	const legacyAllowEnabled = isSinglePiece(command);
-	const results = pieces.map(piece => evaluateBashPiece(piece, ctx, legacyAllowEnabled));
+	const results = pieces.map(piece => evaluateBashPiece(piece, ctx, legacyAllowEnabled, depth));
 	const evaluations = results.map(result => result.evaluation);
 
 	const denied = results.find(result => result.evaluation.policy === "deny");

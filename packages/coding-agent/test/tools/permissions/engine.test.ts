@@ -171,8 +171,9 @@ describe("evaluatePermission", () => {
 	});
 	it("allow rules never ride single-piece shell control (legacy patterns)", () => {
 		// Ruling R1: `git status | sh` parses as ONE piece, so the single-piece
-		// allow gate alone would vouch for it; the shell-control guard degrades
-		// the allow to a prompt instead.
+		// allow gate alone would vouch for it. Pipelines no longer blanket-
+		// degrade: each stage is evaluated through the rule pipeline, and here
+		// the `sh` stage hits the prompt posture, so the allow still degrades.
 		const d = evaluateBashCommand(
 			"git status | sh",
 			ctx({ "bash.patterns": [{ match: "git *", approval: "allow" }] }),
@@ -199,7 +200,8 @@ describe("evaluatePermission", () => {
 			);
 			const d = evaluateBashCommand("git status | sh", ctx({}, dir));
 			expect(d.policy).toBe("prompt");
-			expect(d.source).toBe("rule");
+			// the `sh` stage hits the prompt posture — that stage is decisive
+			expect(d.source).toBe("posture");
 			const plain = evaluateBashCommand("git status -s", ctx({}, dir));
 			expect(plain.policy).toBe("allow");
 		} finally {
@@ -240,5 +242,88 @@ describe("evaluatePermission", () => {
 		const piece = evaluateBashCommand("echo ok; rm -rf /", ctx({ "permissions.default": "allow" }));
 		expect(piece.policy).toBe("deny");
 		expect(piece.reason).toContain("rm -rf /");
+	});
+});
+
+describe("sub-command evaluation", () => {
+	const allow = (match: string) =>
+		ctx({ "permissions.default": "allow", "bash.patterns": [{ match, approval: "allow" }] });
+
+	it("an allow rule stands when every substitution sub-command is allowed", () => {
+		// The user's model: `echo *` is allowed, so `echo pre-$(date +%s)` is
+		// allowed as long as `date +%s` also passes the filter (here: posture).
+		const d = evaluateBashCommand("echo pre-$(date +%s)", allow("echo *"));
+		expect(d.policy).toBe("allow");
+		// backticks behave the same
+		const backtick = evaluateBashCommand("echo `date +%s`", allow("echo *"));
+		expect(backtick.policy).toBe("allow");
+	});
+
+	it("a denied substitution sub-command denies the piece", () => {
+		const d = evaluateBashCommand(
+			"echo pre-$(date +%s)",
+			ctx({
+				"permissions.default": "allow",
+				"bash.patterns": [
+					{ match: "echo *", approval: "allow" },
+					{ match: "date *", approval: "deny" },
+				],
+			}),
+		);
+		expect(d.policy).toBe("deny");
+		expect(d.reason).toContain("date +%s");
+	});
+
+	it("a prompt posture sub-command prompts the piece", () => {
+		const d = evaluateBashCommand(
+			"echo pre-$(date +%s)",
+			ctx({ "bash.patterns": [{ match: "echo *", approval: "allow" }] }),
+		);
+		expect(d.policy).toBe("prompt");
+	});
+
+	it("curated criticals inside substitutions still deny", () => {
+		const d = evaluateBashCommand("echo $(rm -rf /)", allow("echo *"));
+		expect(d.policy).toBe("deny");
+		expect(d.layer).toBe("curated");
+	});
+
+	it("pipeline stages are evaluated through the same filter", () => {
+		const d = evaluateBashCommand("echo a | head -1", allow("*"));
+		expect(d.policy).toBe("allow");
+		const denied = evaluateBashCommand(
+			"echo a | date +%s",
+			ctx({ "permissions.default": "allow", "bash.patterns": [{ match: "date *", approval: "deny" }] }),
+		);
+		expect(denied.policy).toBe("deny");
+	});
+
+	it("parameter-expansion values can smuggle substitutions and are checked", () => {
+		const d = evaluateBashCommand("echo ${x:-$(date +%s)}", allow("echo *"));
+		expect(d.policy).toBe("allow");
+		const denied = evaluateBashCommand(
+			"echo ${x:-$(date +%s)}",
+			ctx({ "permissions.default": "allow", "bash.patterns": [{ match: "date *", approval: "deny" }] }),
+		);
+		expect(denied.policy).toBe("deny");
+	});
+
+	it("redirects and interpreter reinterpreting options still degrade to a prompt", () => {
+		const redirect = evaluateBashCommand("echo hi > /tmp/x", allow("echo *"));
+		expect(redirect.policy).toBe("prompt");
+		const pwsh = evaluateBashCommand("pwsh -Command 'Remove-Item -Recurse /'", allow("*"));
+		expect(pwsh.policy).toBe("prompt");
+		const cmdExe = evaluateBashCommand("cmd /c del /f /q x", allow("*"));
+		expect(cmdExe.policy).toBe("prompt");
+	});
+
+	it("malformed substitutions and excessive nesting degrade to a prompt", () => {
+		const unclosed = evaluateBashCommand("echo $(date", allow("echo *"));
+		expect(unclosed.policy).toBe("prompt");
+		// depth 9 > SUB_COMMAND_MAX_DEPTH (8)
+		let deep = "date";
+		for (let i = 0; i < 9; i++) deep = `echo $(${deep})`;
+		const nested = evaluateBashCommand(deep, allow("echo *"));
+		expect(nested.policy).toBe("prompt");
 	});
 });

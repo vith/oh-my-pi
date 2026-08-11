@@ -13,6 +13,14 @@ interface RawNode {
 	operator?: string;
 	words?: string[];
 	redirects?: string[];
+	/**
+	 * Command texts of `$(…)`/backtick substitutions inside a simple command's
+	 * words, collected grammar-level by the Rust parser (quote-aware, nested
+	 * through double quotes and parameter-expansion values).
+	 */
+	substitutions?: string[];
+	/** Set when a word carries substitution syntax the word parser rejected. */
+	substitutionsError?: boolean;
 	children?: RawNode[];
 }
 
@@ -117,6 +125,51 @@ export function isSinglePiece(command: string): boolean {
 	const out = parseCommand(command);
 	if (!out.ok) return false;
 	return out.pieces.length === 1 && out.pieces[0].operator === null;
+}
+
+/**
+ * Maximum nesting depth for sub-command evaluation; deeper structures are
+ * treated as unanalyzable and the caller degrades to a prompt.
+ */
+const SUB_COMMAND_MAX_DEPTH = 8;
+
+/**
+ * Extract the analyzable sub-commands of a piece: pipeline stages and the
+ * `$(…)`/backtick command substitutions the Rust parser collected from the
+ * piece's words (grammar-level, quote-aware). Returns:
+ *   - `[]`          — no sub-commands (plain simple command),
+ *   - `string[]`    — the sub-command texts, in execution order,
+ *   - `null`        — the piece carries shell control that cannot be analyzed
+ *                     (unparseable structure, non-simple pipeline stage,
+ *                     nesting deeper than {@link SUB_COMMAND_MAX_DEPTH}).
+ */
+export function extractSubCommands(pieceText: string, depth = 0): string[] | null {
+	if (depth >= SUB_COMMAND_MAX_DEPTH) return null;
+
+	const node = parseCommandNode(pieceText);
+	if (node === null || node.substitutionsError === true) return null;
+
+	const subs = [...(node.substitutions ?? [])];
+
+	// Pipeline stages are separate simpleCommand children of the pipeline node.
+	if (node.kind === "pipeline") {
+		const stages: string[] = [];
+		for (const child of node.children ?? []) {
+			if (child.kind !== "simpleCommand" || child.text === undefined) return null;
+			stages.push(child.text.trim());
+		}
+		return [...subs, ...stages];
+	}
+	return subs;
+}
+
+function parseCommandNode(text: string): RawNode | null {
+	try {
+		const nodes = JSON.parse(natives.parseShellCommand(text)) as RawNode[];
+		return nodes.length === 1 ? nodes[0] : null;
+	} catch {
+		return null;
+	}
 }
 
 export function nestedCommandTexts(nodes: unknown[]): string[] {
