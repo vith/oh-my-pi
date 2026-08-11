@@ -3,8 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	isRuleExpired,
 	loadRuleLayers,
 	normalizeRule,
+	type PermissionRule,
 	removeDynamicRule,
 	ruleFiles,
 	writeDynamicRule,
@@ -66,14 +68,30 @@ describe("loadRuleLayers", () => {
 		// Reset layers written by the previous tests; assertions count total rules.
 		fs.rmSync(path.join(home, ".omp", "agent", "permissions.yml"), { force: true });
 		fs.rmSync(path.join(home, ".omp", "agent", "permissions.dynamic.yml"), { force: true });
+		// A fresh ttl rule survives load: the stamp is load time + ttl.
 		write(
 			path.join(project, ".omp", "permissions.yml"),
 			"rules:\n  - id: exp\n    tool: bash\n    match: { command: 'x' }\n    action: allow\n    ttl: 1\n",
 		);
-		// Written "1 second ago" cannot be simulated by file mtime; instead the
-		// test asserts loadRuleLayers output excludes a rule whose ttl is 1 with
-		// a now far in the future via the exported isRuleExpired contract:
-		expect(loadRuleLayers(project, home).rules).toHaveLength(1); // fresh
+		expect(loadRuleLayers(project, home).rules).toHaveLength(1);
+		// ttl 0 stamps the rule expired at load time, so the drop branch runs.
+		write(
+			path.join(project, ".omp", "permissions.yml"),
+			"rules:\n  - id: exp\n    tool: bash\n    match: { command: 'x' }\n    action: allow\n    ttl: 0\n",
+		);
+		expect(loadRuleLayers(project, home).rules).toHaveLength(0);
+	});
+	it("isRuleExpired compares the load-time stamp against now", () => {
+		const base: PermissionRule = {
+			id: "r1",
+			tool: "bash",
+			match: { command: "x" },
+			action: "allow",
+			layer: "dynamic",
+		};
+		expect(isRuleExpired({ ...base, ttl: 60, expiresAt: Date.now() - 1 })).toBe(true); // past stamp
+		expect(isRuleExpired({ ...base, ttl: 60, expiresAt: Date.now() + 60_000 })).toBe(false); // future stamp
+		expect(isRuleExpired({ ...base })).toBe(false); // no ttl — never expires
 	});
 });
 
