@@ -9,7 +9,7 @@ import type {
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { type SettingPath, Settings, type SettingValue } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import { type ApprovalMode, formatApprovalPrompt, truncateForPrompt } from "../../tools/approval";
@@ -431,6 +431,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		};
 
 		if (approvalCheck.required) {
+			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
+			if (scheduledCall?.id === toolCallId && scheduledCall.name === this.tool.name) {
+				await untilAborted(signal, () => this.runner.waitForToolApprovalPreview(toolCallId));
+			}
+
 			const hasApprovalHandlers =
 				this.runner.hasHandlers("tool_approval_requested") || this.runner.hasHandlers("tool_approval_resolved");
 			const sessionId = context?.sessionManager?.getSessionId() ?? "";
