@@ -1,15 +1,30 @@
 #!/usr/bin/env bun
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 /**
- * Fork version bump — mirrors the bump steps of scripts/release.ts (which
- * cannot run in this fork: it requires the `main` branch and pushes tags to
- * origin, i.e. the upstream repo).
+ * Fork release — one command to cut a fork build.
  *
- * Version shape: `<nearest vX.Y.Z tag, patch+1>+<identifier>`, default
- * identifier `vith-fork` (override via OMP_FORK_IDENTIFIER). Re-running on
- * the same upstream tag iterates the build metadata (`17.2.13+vith-fork` →
- * `17.2.13+vith-fork.2`) so another fork build can be produced without
- * syncing upstream; a newer tag or a different identifier starts a fresh
- * sequence. Commits the bump but creates no tag and pushes nothing.
+ * Mirrors the bump steps of scripts/release.ts (which cannot run in this
+ * fork: it requires the `main` branch and pushes tags to origin, i.e. the
+ * upstream repo) and adds the native-addon rebuild the compiled binary needs:
+ * the coding-agent build embeds `packages/natives/native/*.node` but does NOT
+ * compile it, so a checkout whose addon predates the version bump embeds a
+ * stale addon and the binary dies at startup with a sentinel mismatch.
+ *
+ * Version shape: `<nearest vX.Y.Z tag, patch+1>+<identifier>.<commits since
+ * the tag>.<HEAD short hash>`, default identifier `vith-fork` (override via
+ * OMP_FORK_IDENTIFIER). The commit count and short hash make the version
+ * deterministic per commit: every new commit since the tag bumps the count,
+ * so re-running after committing more changes always produces a distinct
+ * version, and the hash disambiguates diverged checkouts. Syncing upstream to
+ * a newer tag moves the base patch and resets the count.
+ *
+ * Pipeline: pre-flight → derive → bump version files → regenerate lockfiles →
+ * `bun run check` → commit the bump → build natives → verify sentinel → clear
+ * the per-version natives cache → build the binary → smoke-test → link `omp`
+ * into PATH. Creates no tag and pushes nothing (a fork tag would become the
+ * nearest `v[0-9]*` tag and poison the next derivation).
  */
 import { $, Glob } from "bun";
 import { compareVersions } from "../packages/utils/src/version.ts";
@@ -35,25 +50,67 @@ function bumpPatch(version: string): string {
 }
 
 /**
- * Derive the next fork version.
- *
- * The base is the nearest upstream tag's patch+1 (or the current core version
- * when no tag is reachable) plus the fork identifier. When `currentVersion`
- * is already a fork build of that base, the build metadata is iterated
- * (`17.2.13+vith-fork` → `17.2.13+vith-fork.2`) so the script can be re-run
- * for another fork build on the same upstream version. A newer `base` (after
- * syncing upstream) or a different identifier starts a fresh sequence.
+ * Git state the fork version is derived from.
  */
-export function deriveForkVersion(base: string | undefined, currentVersion: string, identifier: string): string {
-	const patchBase = base ?? currentVersion.split("+")[0];
-	const baseFork = `${bumpPatch(patchBase)}+${identifier}`;
-	const iterationPrefix = `${baseFork}.`;
-	if (currentVersion === baseFork || currentVersion.startsWith(iterationPrefix)) {
-		const suffix = currentVersion.slice(iterationPrefix.length);
-		const iteration = /^\d+$/.test(suffix) ? Number(suffix) : 1;
-		return `${baseFork}.${iteration + 1}`;
+export interface ForkGitInfo {
+	/** Nearest upstream-style tag (`vX.Y.Z` without the `v`), if one is reachable. */
+	tagVersion: string | undefined;
+	/** Commits between the tag (or the repo root when no tag) and HEAD. */
+	commitsSince: number;
+	/** Short hash of HEAD. */
+	shortHash: string;
+}
+
+/**
+ * Derive the fork version for the current commit.
+ *
+ * The core is the nearest upstream tag's patch+1 (or the current core version
+ * when no tag is reachable). The build metadata is
+ * `<identifier>.<commits since the tag>.<HEAD short hash>`, so the version is
+ * deterministic per commit: new commits since the tag bump the count, and the
+ * hash disambiguates two checkouts that share a count (e.g. after a sync).
+ */
+export function deriveForkVersion(git: ForkGitInfo, currentVersion: string, identifier: string): string {
+	const base = git.tagVersion ?? currentVersion.split("+")[0];
+	return `${bumpPatch(base)}+${identifier}.${git.commitsSince}.${git.shortHash}`;
+}
+
+/** The napi export name the loader validates, e.g. `__piNativesV17_2_13_vith_fork`. */
+export function expectedSentinel(version: string): string {
+	return `__piNativesV${version.replace(/[^A-Za-z0-9]/g, "_")}`;
+}
+
+/**
+ * Addon filenames for a platform tag, mirroring the loader's
+ * `getAddonFilenames` (modern/baseline are x64-only variants).
+ */
+export function addonFilenames(platformTag: string): string[] {
+	return [
+		`pi_natives.${platformTag}.node`,
+		`pi_natives.${platformTag}-modern.node`,
+		`pi_natives.${platformTag}-baseline.node`,
+	];
+}
+
+/**
+ * The per-version native cache directory, mirroring the loader's
+ * `getNativesDir()`: XDG_DATA_HOME wins only when its `omp` directory exists.
+ */
+export function nativesCacheDir(version: string, env: Record<string, string | undefined> = process.env): string {
+	const xdg = env.XDG_DATA_HOME;
+	if (xdg && fs.existsSync(path.join(xdg, "omp"))) {
+		return path.join(xdg, "omp", "natives", version);
 	}
-	return baseFork;
+	return path.join(os.homedir(), ".omp", "natives", version);
+}
+
+async function fileContainsSentinel(filePath: string, sentinel: string): Promise<boolean> {
+	try {
+		const content = await Bun.file(filePath).text();
+		return content.includes(sentinel);
+	} catch {
+		return false;
+	}
 }
 
 /** Nearest reachable tag matching upstream release style `vX.Y.Z` (e.g. `v17.2.12`). */
@@ -91,7 +148,7 @@ async function promoteChangelogs(version: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-	console.log("\n=== Fork Version Bump ===\n");
+	console.log("\n=== Fork Release ===\n");
 
 	// 1. Pre-flight: no tracked changes. Untracked files are ignored — the pi
 	// sandbox (ASRT/bwrap) leaves empty read-only mount-point files in the cwd
@@ -108,14 +165,22 @@ async function main(): Promise<void> {
 	}
 
 	// 2. Derive the fork version: nearest upstream tag (or the current core
-	// version when no tag is reachable), patch+1, `+` suffix. If the current
-	// version is already a fork build of the same base, the build metadata is
-	// iterated so a second fork build on the same upstream version is possible.
+	// version when no tag is reachable), patch+1, then `+identifier.commitCount.shortHash`
+	// so the version is deterministic per commit.
 	const tag = await nearestTagVersion();
+	const revList = tag
+		? await $`git rev-list --count ${`v${tag}`}..HEAD`.quiet()
+		: await $`git rev-list --count HEAD`.quiet();
+	const shortHash = (await $`git rev-parse --short HEAD`.quiet()).stdout.toString().trim();
+	const commitsSince = Number(revList.stdout.toString().trim());
+	if (!Number.isInteger(commitsSince) || commitsSince < 0) {
+		console.error(`Error: could not count commits since ${tag ? `v${tag}` : "the repo root"}`);
+		process.exit(1);
+	}
 	const current = (await Bun.file("packages/utils/package.json").json()) as { version: string };
-	const version = deriveForkVersion(tag, current.version, FORK_IDENTIFIER);
+	const version = deriveForkVersion({ tagVersion: tag, commitsSince, shortHash }, current.version, FORK_IDENTIFIER);
 	console.log(
-		`  base: ${tag ?? current.version.split("+")[0]} (${tag ? "git tag" : "package.json fallback"}), target: ${version}`,
+		`  base: ${tag ?? current.version.split("+")[0]} (${tag ? "git tag" : "package.json fallback"}), commits: ${commitsSince}, head: ${shortHash}, target: ${version}`,
 	);
 
 	if (tag && compareVersions(version, tag) <= 0) {
@@ -148,10 +213,10 @@ async function main(): Promise<void> {
 	await $`sd '^version = "[^"]+"' ${`version = "${version}"`} Cargo.toml`;
 
 	// 6. pi-natives version sentinel in lock-step (mirrors release.ts's sd +
-	// verification; `replace(/[^A-Za-z0-9]/g, "_")` is the same rule the JS
-	// loader uses, so the suffix stays consistent across all three files).
+	// verification; `expectedSentinel` is the same rule the JS loader uses, so
+	// the suffix stays consistent across all three files).
 	console.log(`Bumping pi-natives version sentinel to v${version}...`);
-	const sentinelName = `__piNativesV${version.replace(/[^A-Za-z0-9]/g, "_")}`;
+	const sentinelName = expectedSentinel(version);
 	const sentinelFiles = [
 		"crates/pi-natives/src/lib.rs",
 		"packages/natives/native/index.d.ts",
@@ -183,12 +248,89 @@ async function main(): Promise<void> {
 	console.log("Running checks...");
 	await $`bun run check`;
 
-	// 10. Commit only — no tag, no push (deliberate: a fork tag would become
-	// the nearest `v[0-9]*` tag and poison the next derivation).
+	// 10. Commit the bump before building — a build failure then leaves a
+	// clean tree instead of a half-bumped checkout. No tag, no push
+	// (deliberate: a fork tag would become the nearest `v[0-9]*` tag and
+	// poison the next derivation).
 	console.log("Committing...");
 	await git(["add", "-u"]);
 	await git(["commit", "-m", `chore: bump version to ${version}`]);
-	console.log("\nDone. Run `bun --cwd=packages/coding-agent run build` to produce a binary.");
+
+	// 11. Build the native addon for this machine. The coding-agent build
+	// embeds whatever `packages/natives/native/*.node` is on disk but does not
+	// compile it, so this must run first.
+	console.log("Building native addon...");
+	await $`bun --cwd=packages/natives run build`.quiet();
+	const platformTag = `${process.platform}-${process.arch}`;
+	const nativeDir = "packages/natives/native";
+
+	// 12. Verify the rebuilt addon carries the current sentinel.
+	console.log("Verifying addon sentinel...");
+	const builtAddons = addonFilenames(platformTag).filter(name => fs.existsSync(path.join(nativeDir, name)));
+	const validAddons: string[] = [];
+	for (const name of builtAddons) {
+		const fullPath = path.join(nativeDir, name);
+		if (await fileContainsSentinel(fullPath, sentinelName)) {
+			validAddons.push(name);
+			console.log(`  ✓ ${name} exposes ${sentinelName}`);
+		} else {
+			console.error(`  ✗ ${name} does NOT expose ${sentinelName} (stale addon)`);
+		}
+	}
+	if (builtAddons.length === 0) {
+		console.error(`Error: no addon produced for ${platformTag} in ${nativeDir}. Check the native build output.`);
+		process.exit(1);
+	}
+	if (validAddons.length === 0) {
+		console.error(
+			`Error: the built addons do not expose ${sentinelName}. The Rust crate is out of sync with the ` +
+				"version bump — check crates/pi-natives/src/lib.rs and the natives build.",
+		);
+		process.exit(1);
+	}
+
+	// 13. Clear the per-version cache the loader would otherwise trust: it
+	// never auto-cleans the current version's dir and extraction skips on
+	// size match, so a stale addon there would be loaded over a fresh build.
+	console.log("Clearing natives cache...");
+	const cacheDir = nativesCacheDir(version);
+	fs.rmSync(cacheDir, { recursive: true, force: true });
+	console.log(`  removed ${cacheDir}`);
+
+	// 14. Build the binary (embeds the freshly built addon).
+	console.log("Building binary...");
+	await $`bun --cwd=packages/coding-agent run build`.quiet();
+
+	// 15. Smoke test.
+	console.log("Smoke test...");
+	const binary = path.join("packages", "coding-agent", "dist", "omp");
+	if (!fs.existsSync(binary)) {
+		console.error(`Error: binary not produced at ${binary}`);
+		process.exit(1);
+	}
+	const smoke = await $`${binary} --version`.nothrow().quiet();
+	const output = smoke.stdout.toString().trim();
+	if (smoke.exitCode !== 0 || !output.includes(`omp/${version}`)) {
+		console.error(
+			`Error: smoke test failed — "${binary} --version" exited ${smoke.exitCode} with:\n${output}\n` +
+				"If it is a natives sentinel error, delete the cache and re-run.",
+		);
+		process.exit(1);
+	}
+	console.log(`  ✓ ${output}`);
+
+	// 16. Link `omp` into PATH so the fresh checkout is runnable from the
+	// shell. Best-effort: a failed link leaves the built binary usable.
+	console.log("Linking omp into PATH...");
+	const link = await $`bun --cwd=packages/coding-agent link && sh scripts/link-omp.sh`.nothrow().quiet();
+	if (link.exitCode !== 0) {
+		const detail = (link.stderr.toString().trim() || link.stdout.toString().trim()).split("\n").pop() ?? "";
+		console.warn(`  warning: link step failed (${detail}); run it manually later`);
+	} else {
+		console.log("  ✓ linked");
+	}
+
+	console.log(`\nDone. Binary: ${binary}, shell command: omp --version`);
 }
 
 if (import.meta.main) await main();
