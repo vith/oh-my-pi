@@ -3,7 +3,7 @@ members = ["crates/pi-*", "crates/vendor/*"]
 resolver = "3"
 
 [workspace.package]
-version = "17.2.15+vith-fork.83.6361c8739d"
+version = "17.2.15+vith-fork.87.d419fb9692"
 edition = "2024"
 license = "MIT"
 authors = ["Can Boluk"]

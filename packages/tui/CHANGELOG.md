@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.2.15+vith-fork.87.d419fb9692] - 2026-08-12
+
 ### Fixed
 
 - Desktop notifications now replace the previous toast instead of stacking unread entries, and the live toast is cleared once it is stale: the D-Bus path (GNOME/VTE terminals) tracks the daemon-assigned id (`notify-send --print-id`) and sends the next toast with `--replace-id`, closes via `CloseNotification`, and the Kitty OSC 99 path reuses one id per process and closes by id; user input in the TUI clears whatever toast is still live.

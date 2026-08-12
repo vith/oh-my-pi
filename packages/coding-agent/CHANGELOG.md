@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.2.15+vith-fork.87.d419fb9692] - 2026-08-12
+
 ### Fixed
 
 - The "Waiting for input" notification sent while the `ask` tool blocks is now cleared when the ask resolves (answered, cancelled, aborted, or auto-selected by the ask timeout), so it no longer lingers unread in the desktop notification list.
