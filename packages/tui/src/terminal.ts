@@ -359,6 +359,7 @@ export function emergencyTerminalRestore(): void {
 					"\x1b[<u" + // Pop kitty keyboard protocol
 					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
 					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
+					"\x1b[?1004l" + // Disable focus reporting (click-to-dismiss arming)
 					// Leave the alternate screen only when a fullscreen overlay
 					// actually holds it — on Windows, DECRST 1049 on the main
 					// buffer homes the cursor (unconditional CursorRestoreState
@@ -482,6 +483,13 @@ export interface Terminal {
 	 * is unavailable — not that the private mode itself is unsupported.
 	 */
 	onPrivateModeReport?(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void;
+	/**
+	 * Register a callback invoked with `true` on focus-in (`CSI I`) and
+	 * `false` on focus-out (`CSI O`), while DECSET 1004 focus reporting is
+	 * enabled (see ProcessTerminal.start()). Optional so custom Terminals
+	 * built against older pi-tui versions keep working.
+	 */
+	onFocusChange?(callback: (focused: boolean) => void): void;
 }
 
 /**
@@ -538,6 +546,8 @@ function isPrivateModeSupported(status: string): boolean {
 export class ProcessTerminal implements Terminal {
 	#wasRaw = false;
 	#inputHandler?: (data: string) => void;
+	/** OSC 1004 focus-reporting subscriber (single consumer: the TUI). */
+	#focusHandler?: (focused: boolean) => void;
 	#resizeHandler?: () => void;
 	#stdoutResizeListener?: () => void;
 	#kittyProtocolActive = false;
@@ -697,6 +707,15 @@ export class ProcessTerminal implements Terminal {
 		this.#privateModeCallbacks.push(callback);
 	}
 
+	/**
+	 * Register the focus-reporting callback. Invoked with `true` when the
+	 * terminal reports focus-in (`CSI I`) and `false` on focus-out (`CSI O`),
+	 * only while DECSET 1004 is enabled (see start()).
+	 */
+	onFocusChange(callback: (focused: boolean) => void): void {
+		this.#focusHandler = callback;
+	}
+
 	start(onInput: (data: string) => void, onResize: () => void, onDisconnect?: () => void): void {
 		this.#inputHandler = onInput;
 		this.#resizeHandler = onResize;
@@ -741,6 +760,14 @@ export class ProcessTerminal implements Terminal {
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		this.#safeWrite("\x1b[?2004h");
+
+		// Enable focus reporting (DECSET 1004): the terminal emits `CSI I` on
+		// focus-in and `CSI O` on focus-out. The TUI closes a stale desktop
+		// notification on focus-in, so returning to the window (alt-tab /
+		// click-to-focus) clears the toast even before any keystroke.
+		// Terminals without support ignore the mode and stay on input-only
+		// dismissal.
+		this.#safeWrite("\x1b[?1004h");
 
 		// Force normal cursor-key (DECCKM) and numeric-keypad mode (terminfo
 		// `rmkx` = "\x1b[?1l\x1b>"). omp decodes both CSI ("\x1b[A") and SS3
@@ -1179,6 +1206,15 @@ export class ProcessTerminal implements Terminal {
 				}, 100);
 				return;
 			}
+			// Focus reporting (DECSET 1004): `CSI I` = focus-in, `CSI O` =
+			// focus-out. Swallow both — focus events are terminal signals, not
+			// input — and notify the subscriber so the TUI can clear a stale
+			// toast on focus-in. No-op when the terminal does not support or
+			// report the mode.
+			if (sequence === "\x1b[I" || sequence === "\x1b[O") {
+				this.#focusHandler?.(sequence === "\x1b[I");
+				return;
+			}
 			if (this.#inputHandler) {
 				this.#inputHandler(sequence);
 			}
@@ -1556,7 +1592,7 @@ export class ProcessTerminal implements Terminal {
 		// Disable mouse tracking (enabled only by fullscreen overlays; safe
 		// no-ops otherwise). Covers crash paths that reach stop() without the
 		// TUI's own overlay teardown running.
-		this.#safeWrite("\x1b[?1006l\x1b[?1003l\x1b[?1000l");
+		this.#safeWrite("\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?1004l");
 
 		// Disable Mode 2031 appearance change notifications
 		this.#safeWrite("\x1b[?2031l");

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Desktop notifications now replace the previous toast instead of stacking unread entries, and the live toast is cleared once it is stale: the D-Bus path (GNOME/VTE terminals) tracks the daemon-assigned id (`notify-send --print-id`) and sends the next toast with `--replace-id`, closes via `CloseNotification`, and the Kitty OSC 99 path reuses one id per process and closes by id; user input in the TUI clears whatever toast is still live.
+
+### Added
+
+- The live desktop notification is also dismissed when the terminal window regains focus (OSC 1004 focus reporting) or is clicked while a toast is on screen (transient button-event tracking armed only while a toast is live), so returning to the window clears the toast even before typing.
+
 ## [17.2.13] - 2026-08-11
 
 ### Fixed

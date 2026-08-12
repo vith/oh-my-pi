@@ -5,6 +5,7 @@ import {
 	closeDesktopNotification,
 	type DesktopNotifier,
 	hasLinuxDesktopSession,
+	isDesktopNotificationLive,
 	resetDesktopNotificationTracking,
 	resetDesktopNotifierCache,
 	resolveDesktopNotifier,
@@ -440,5 +441,102 @@ describe("closeDesktopNotification", () => {
 		});
 
 		expect(() => closeDesktopNotification()).not.toThrow();
+	});
+});
+
+describe("click-to-dismiss tracking", () => {
+	const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+	let writes: string[];
+
+	beforeEach(() => {
+		resetDesktopNotifierCache();
+		resetDesktopNotificationTracking();
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		writes = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		resetDesktopNotifierCache();
+		resetDesktopNotificationTracking();
+		if (stdoutIsTtyDescriptor) {
+			Object.defineProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
+		} else {
+			delete (process.stdout as { isTTY?: boolean }).isTTY;
+		}
+	});
+
+	it("arms button-event tracking when the daemon assigns a notification id", async () => {
+		const which = vi.spyOn(utils, "$which");
+		which.mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
+		vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
+
+		sendDesktopNotification("first");
+		await Bun.sleep(0);
+
+		expect(writes).toContain("\x1b[?1000h\x1b[?1006h");
+	});
+
+	it("never arms when no id comes back, so selection stays untouched", async () => {
+		const which = vi.spyOn(utils, "$which");
+		which.mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
+		vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+
+		sendDesktopNotification("first");
+		await Bun.sleep(0);
+
+		expect(writes).toEqual([]);
+	});
+
+	it("disarms when the toast closes and stays disarmed for no-op closes", async () => {
+		const which = vi.spyOn(utils, "$which");
+		which.mockImplementation(name =>
+			name === "notify-send" ? "/usr/bin/notify-send" : name === "gdbus" ? "/usr/bin/gdbus" : null,
+		);
+		const spawn = vi
+			.spyOn(Bun, "spawn")
+			.mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
+
+		sendDesktopNotification("first");
+		await Bun.sleep(0);
+		expect(writes).toContain("\x1b[?1000h\x1b[?1006h");
+
+		spawn.mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
+		closeDesktopNotification();
+		expect(writes.filter(w => w === "\x1b[?1006l\x1b[?1000l")).toHaveLength(1);
+
+		// A repeated close is a no-op and must not toggle tracking again.
+		closeDesktopNotification();
+		expect(writes.filter(w => w === "\x1b[?1006l\x1b[?1000l")).toHaveLength(1);
+	});
+
+	it("isDesktopNotificationLive tracks the armed window", async () => {
+		const which = vi.spyOn(utils, "$which");
+		which.mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
+		vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
+
+		expect(isDesktopNotificationLive()).toBe(false);
+		sendDesktopNotification("first");
+		await Bun.sleep(0);
+		expect(isDesktopNotificationLive()).toBe(true);
+		closeDesktopNotification();
+		expect(isDesktopNotificationLive()).toBe(false);
+	});
+
+	it("writes no tracking sequences outside a real terminal", async () => {
+		Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true });
+		const which = vi.spyOn(utils, "$which");
+		which.mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
+		vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
+
+		sendDesktopNotification("first");
+		await Bun.sleep(0);
+		closeDesktopNotification();
+
+		expect(writes).toEqual([]);
 	});
 });

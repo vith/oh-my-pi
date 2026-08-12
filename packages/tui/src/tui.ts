@@ -22,6 +22,7 @@ import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { planDeccaraFills } from "./deccara";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
+import { routeSgrMouseInput } from "./mouse";
 import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteImage,
@@ -1587,6 +1588,12 @@ export class TUI extends Container {
 			if (synchronizedOutputUserOverride() !== null) return;
 			this.#setSynchronizedOutput(supported);
 		});
+		// Focus-in means the user is back at the window: clear any live toast
+		// before they even type (alt-tab / click-to-focus). Terminals without
+		// OSC 1004 support never fire this and keep input-only dismissal.
+		this.terminal.onFocusChange?.(focused => {
+			if (focused) TERMINAL.closeNotification();
+		});
 		this.terminal.start(
 			data => this.#handleInput(data),
 			() => {
@@ -2419,6 +2426,16 @@ export class TUI extends Container {
 		// shell's notification list never accumulates unread omp entries. No-op
 		// when nothing is live.
 		TERMINAL.closeNotification();
+
+		// Click-to-dismiss: while a toast is live the send path arms
+		// button-event tracking, so a click clears it even when the window was
+		// already focused (focus-in only fires on focus gain). Mouse reports
+		// only exist in the main view while that tracking is armed, so consume
+		// them here — fullscreen overlays own their mouse tracking and handle
+		// their own reports before this dispatch.
+		if (!this.#altActive && routeSgrMouseInput(data, () => true)) {
+			return;
+		}
 
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every

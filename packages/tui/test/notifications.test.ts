@@ -554,4 +554,90 @@ describe("terminal notifications", () => {
 			tui.stop();
 		}
 	});
+
+	it("ProcessTerminal enables focus reporting on start and disables it on stop", () => {
+		const { terminal, writes } = setupProcessTerminal();
+		try {
+			expect(writes.join("")).toContain("\x1b[?1004h");
+		} finally {
+			terminal.stop();
+		}
+		expect(writes.join("")).toContain("\x1b[?1004l");
+	});
+
+	it("ProcessTerminal swallows OSC 1004 focus reports and forwards them to the focus callback", () => {
+		const { terminal, received } = setupProcessTerminal();
+		const focusEvents: boolean[] = [];
+		terminal.onFocusChange(focused => focusEvents.push(focused));
+		try {
+			process.stdin.emit("data", "\x1b[I");
+			process.stdin.emit("data", "\x1b[O");
+			process.stdin.emit("data", "\x1b[I");
+			expect(focusEvents).toEqual([true, false, true]);
+			// Focus reports are terminal signals, never forwarded as input.
+			expect(received).toEqual([]);
+			// Ordinary input still flows through unchanged.
+			process.stdin.emit("data", "x");
+			expect(received).toEqual(["x"]);
+		} finally {
+			terminal.stop();
+		}
+	});
+
+	it("focus-in clears the live desktop notification via the TUI focus hook", () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+		try {
+			tui.start();
+			// Drop any calls from startup capability probes; only the focus report
+			// below may trigger a close.
+			const before = close.mock.calls.length;
+			terminal.sendFocus(true);
+			expect(close.mock.calls.length).toBeGreaterThan(before);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("focus-out does not clear the live desktop notification", () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+		try {
+			tui.start();
+			const before = close.mock.calls.length;
+			terminal.sendFocus(false);
+			expect(close.mock.calls.length).toBe(before);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("consumes main-view mouse reports so click-to-dismiss never reaches components", () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+		try {
+			tui.start();
+			const received: string[] = [];
+			tui.addInputListener(data => {
+				received.push(data);
+				return undefined;
+			});
+			const before = close.mock.calls.length;
+			// SGR mouse press (button 0, col 10, row 5): the click-to-dismiss
+			// report the send path arms while a toast is live.
+			terminal.sendInput("\x1b[<0;10;5M");
+			expect(close.mock.calls.length).toBeGreaterThan(before);
+			// The report is consumed at the TUI dispatch: neither input listeners
+			// nor focused components observe it.
+			expect(received).toEqual([]);
+			// Ordinary keys still flow through to listeners.
+			terminal.sendInput("x");
+			expect(received).toEqual(["x"]);
+		} finally {
+			tui.stop();
+		}
+	});
 });

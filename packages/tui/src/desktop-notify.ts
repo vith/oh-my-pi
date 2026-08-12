@@ -126,6 +126,22 @@ const URGENCY_BYTE: Record<ResolvedNotificationFields["urgency"], number> = {
 };
 
 /**
+ * Transient click-to-dismiss: while a toast is live, enable button-event
+ * tracking (DECSET 1000 + SGR 1006) so a click on the terminal clears it even
+ * when the window was already focused (focus-in only fires on focus gain).
+ * Armed when the daemon assigns an id, disarmed when the toast closes, so
+ * mouse selection behaves normally whenever no toast is live. Mouse reports
+ * arriving while armed are consumed by the TUI dispatch, never by components.
+ */
+const CLICK_DISMISS_TRACKING_ON = "\x1b[?1000h\x1b[?1006h";
+const CLICK_DISMISS_TRACKING_OFF = "\x1b[?1006l\x1b[?1000l";
+
+/** Write a terminal control sequence; a no-op outside a real terminal. */
+function writeTerminalSequence(sequence: string): void {
+	if (process.stdout.isTTY) process.stdout.write(sequence);
+}
+
+/**
  * Build the argv that delivers `message` through the resolved notifier. Pure
  * helper so tests assert exact wire shape without spawning a child. Notes:
  * - `notify-send` accepts title + body positionally and a numeric expire
@@ -202,6 +218,15 @@ export function buildDesktopNotifyCloseCommand(notifier: DesktopNotifier, id: nu
  * toast is ever live — the shell never accumulates unread entries.
  */
 let currentDesktopNotificationId: number | null = null;
+
+/**
+ * Whether a daemon-assigned toast is currently live. The TUI gates main-view
+ * mouse consumption on this: reports only exist while click-to-dismiss is
+ * armed, and the first one (the press) clears the toast.
+ */
+export function isDesktopNotificationLive(): boolean {
+	return currentDesktopNotificationId !== null;
+}
 
 /** Reset live-notification tracking. Tests only. */
 export function resetDesktopNotificationTracking(): void {
@@ -285,7 +310,10 @@ export function sendDesktopNotification(message: string | TerminalNotification):
 		// kill timer and never throws; failure just means no replacement
 		// tracking (a fresh notification, exactly the pre-fix behavior).
 		void readDesktopNotificationId(child).then(id => {
-			if (id !== null) currentDesktopNotificationId = id;
+			if (id === null) return;
+			currentDesktopNotificationId = id;
+			// Arm click-to-dismiss (see CLICK_DISMISS_TRACKING_ON).
+			writeTerminalSequence(CLICK_DISMISS_TRACKING_ON);
 		});
 	} catch {
 		// Best-effort: a failed spawn is silent.
@@ -302,6 +330,9 @@ export function closeDesktopNotification(): void {
 	const id = currentDesktopNotificationId;
 	if (id === null) return;
 	currentDesktopNotificationId = null;
+	// Disarm click-to-dismiss (see CLICK_DISMISS_TRACKING_OFF) so selection
+	// behavior is untouched while no toast is live.
+	writeTerminalSequence(CLICK_DISMISS_TRACKING_OFF);
 	// Only gdbus can express a close — notify-send has no close option — so
 	// resolve it directly instead of reusing the send path's cached notifier,
 	// which prefers notify-send and would silently no-op every close on
