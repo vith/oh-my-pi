@@ -532,7 +532,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 			if (!isRecord(parsed)) return "exec";
 			try {
-				return resolveToolTier(inst, parsed);
+				// The tier is the mounted tool's own (argument-dependent) approval; the
+				// policyKey makes the outer gate consult `tools.approval.<device>` for
+				// this dispatch before falling back to `tools.approval.write`, so users
+				// can scope allow/deny/prompt to a single device (issue #7923).
+				return { tier: resolveToolTier(inst, parsed), policyKey: xdevTarget.name! };
 			} catch {
 				return "exec";
 			}

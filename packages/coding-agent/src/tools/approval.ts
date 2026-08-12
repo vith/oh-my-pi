@@ -28,6 +28,8 @@ export interface ResolvedApproval {
 	 * through so the audit-visible decision keeps piece-level attribution.
 	 */
 	engineDecision?: EngineDecision;
+	/** User-policy key that produced `source: "user"` (defaults to the tool name). */
+	policyKey?: string;
 }
 
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
@@ -73,12 +75,15 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 			rawEngine !== null && typeof rawEngine === "object" && !Array.isArray(rawEngine)
 				? (rawEngine as EngineDecision)
 				: undefined;
+		const policyKey =
+			typeof record.policyKey === "string" && record.policyKey.length > 0 ? record.policyKey : undefined;
 		return {
 			tier,
 			override: record.override === true,
 			...(policy ? { policy } : {}),
 			...(reason ? { reason } : {}),
 			...(engineDecision !== undefined ? { engineDecision } : {}),
+			...(policyKey ? { policyKey } : {}),
 		};
 	}
 
@@ -114,6 +119,11 @@ function modeApprovesTier(mode: ApprovalMode, tier: ToolTier): boolean {
  *
  * Resolution order:
  *  1. Tool `approval(args)` decision, defaulting to tier "exec" when omitted.
+ *     A decision may carry a `policyKey` — `tools.approval.<policyKey>` is then
+ *     the user override consulted instead of `tools.approval.<tool.name>`, with
+ *     the invoking tool's own policy as the fallback when the user set none for
+ *     the keyed sub-tool (e.g. an `xd://` device dispatch without a device
+ *     policy still honors `tools.approval.write`).
  *  2. User per-tool override, if set and valid.
  *  3. Active mode tier comparison.
  *
@@ -127,7 +137,14 @@ export function resolveApproval(
 	userConfig: Record<string, unknown> = {},
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
-	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
+	const policyKey = decision.policyKey ?? tool.name;
+	const userPolicy = Object.hasOwn(userConfig, policyKey) ? normalizePolicy(userConfig[policyKey]) : undefined;
+	const fallbackPolicy =
+		policyKey !== tool.name && userPolicy === undefined && Object.hasOwn(userConfig, tool.name)
+			? normalizePolicy(userConfig[tool.name])
+			: undefined;
+	const effectiveUserPolicy = userPolicy ?? fallbackPolicy;
+	const userPolicyKey = userPolicy !== undefined ? policyKey : tool.name;
 
 	if (decision.policy === "deny") {
 		return {
@@ -135,11 +152,18 @@ export function resolveApproval(
 			tier: decision.tier,
 			override: decision.override,
 			source: "tool",
+			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
-	if (userPolicy === "deny") {
-		return { policy: "deny", tier: decision.tier, override: decision.override, source: "user" };
+	if (effectiveUserPolicy === "deny") {
+		return {
+			policy: "deny",
+			tier: decision.tier,
+			override: decision.override,
+			source: "user",
+			policyKey: userPolicyKey,
+		};
 	}
 
 	if (mode === "yolo") {
@@ -149,14 +173,16 @@ export function resolveApproval(
 				tier: decision.tier,
 				override: false,
 				source: "tool",
+				...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 				...(decision.reason ? { reason: decision.reason } : {}),
 			};
 		}
 		return {
-			policy: userPolicy ?? "allow",
+			policy: effectiveUserPolicy ?? "allow",
 			tier: decision.tier,
 			override: false,
-			source: userPolicy ? "user" : "mode",
+			source: effectiveUserPolicy ? "user" : "mode",
+			...(effectiveUserPolicy ? { policyKey: userPolicyKey } : {}),
 		};
 	}
 
@@ -166,6 +192,7 @@ export function resolveApproval(
 			tier: decision.tier,
 			override: true,
 			source: "tool",
+			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
@@ -176,12 +203,19 @@ export function resolveApproval(
 			tier: decision.tier,
 			override: false,
 			source: "tool",
+			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
 		};
 	}
 
-	if (userPolicy) {
-		return { policy: userPolicy, tier: decision.tier, override: false, source: "user" };
+	if (effectiveUserPolicy) {
+		return {
+			policy: effectiveUserPolicy,
+			tier: decision.tier,
+			override: false,
+			source: "user",
+			policyKey: userPolicyKey,
+		};
 	}
 
 	if (modeApprovesTier(mode, decision.tier)) {
@@ -209,15 +243,15 @@ export function requiresApproval(
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
 ): { required: boolean; reason?: string } {
-	const { policy, reason, source } = resolveApproval(tool, args, mode, userConfig);
+	const { policy, reason, source, policyKey } = resolveApproval(tool, args, mode, userConfig);
 
 	if (policy === "deny") {
 		if (source === "tool") {
 			throw new Error(`Tool "${tool.name}" is blocked by tool policy.${reason ? `\nReason: ${reason}` : ""}`);
 		}
 		throw new Error(
-			`Tool "${tool.name}" is blocked by user policy.\n` +
-				`To allow: remove "tools.approval.${tool.name}: deny" from config.`,
+			`Tool "${policyKey ?? tool.name}" is blocked by user policy.\n` +
+				`To allow: remove "tools.approval.${policyKey ?? tool.name}: deny" from config.`,
 		);
 	}
 
