@@ -243,7 +243,7 @@ This fork is developed exclusively in **git worktrees on feature branches**:
 
 ## Commands
 
-- NEVER commit unless asked.
+- Commit frequently in small granular commits as work progresses, with conventional subjects and scope (e.g. `feat(coding-agent): ...`, `test(coding-agent): ...`, `docs: ...`). Never leave finished work uncommitted or one big commit at the end.
 - Never use `tsc`/`npx tsc` — always `bun check`.
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
 
