@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `/recap` slash command to generate the status recap on demand (same LLM side-channel pipeline as the idle recap), including while the main turn is streaming.
+
 ### Fixed
 
 - The "Waiting for input" notification sent while the `ask` tool blocks is now cleared when the ask resolves (answered, cancelled, aborted, or auto-selected by the ask timeout), so it no longer lingers unread in the desktop notification list.
