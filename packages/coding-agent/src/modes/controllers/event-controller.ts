@@ -157,6 +157,10 @@ export class EventController {
 	// In-flight ephemeral recap turn; aborted by #cancelIdleRecap when any
 	// activity (new turn, compaction, editor draft) supersedes the idle recap.
 	#idleRecapAbort?: AbortController;
+	// True while the in-flight recap turn was triggered on demand (`/recap`)
+	// rather than by the idle timer. A manual run must not be cancelled by the
+	// next agent_end's `#scheduleIdleRecap`, and it re-arms the idle timer itself.
+	#idleRecapManual = false;
 	#ircExpiryTimers = new Map<string, NodeJS.Timeout>();
 	// Insertion-ordered IRC cards not yet retired; values are the transcript
 	// components each card contributed (see #retireIrcCard for the guard).
@@ -2081,6 +2085,9 @@ export class EventController {
 	}
 
 	#scheduleIdleRecap(): void {
+		// A manual recap is in flight: don't cancel it or arm on top of it; the
+		// manual run schedules the idle timer itself on completion.
+		if (this.#idleRecapManual) return;
 		this.#cancelIdleRecap();
 		if (this.ctx.viewSession.isCompacting) return;
 
@@ -2098,18 +2105,49 @@ export class EventController {
 	}
 
 	/**
+	 * Generate the recap on demand (the `/recap` slash command): same ephemeral
+	 * side-channel pipeline as the idle recap, but with manual gates — it runs
+	 * even while the main turn is streaming and regardless of `recap.enabled`,
+	 * since the user asked explicitly. Hard refusals: no active model, empty
+	 * conversation, or an in-progress compaction. Supersedes any pending idle
+	 * timer and any in-flight recap turn; the idle timer is re-armed on
+	 * completion so the automatic recap starts a fresh delay.
+	 */
+	runRecap(): Promise<void> {
+		this.#cancelIdleRecap();
+		return this.#runIdleRecap(true);
+	}
+
+	/**
 	 * Generate the idle recap with an ephemeral side-channel turn over the
 	 * current conversation (same pipeline as `/btw`) and surface it as a status
 	 * line. Live goal/title and the active todo task are passed as anchoring
 	 * hints because the snapshot only carries conversation history, not the
 	 * controller's todo/goal state. The request is abortable: any activity
 	 * cancels it via #cancelIdleRecap, and idle conditions are re-checked after
-	 * the reply lands so a stale recap never paints over fresh work.
+	 * the reply lands so a stale recap never paints over fresh work. The
+	 * manual mode (`/recap`) relaxes both gates: it runs while streaming and
+	 * paints unless superseded, and re-arms the idle timer on completion.
 	 */
-	async #runIdleRecap(): Promise<void> {
-		if (!this.#idleConditionsHold()) return;
-		if (!this.ctx.viewSession.model) return;
-		if (this.ctx.viewSession.messages.length === 0) return;
+	async #runIdleRecap(manual = false): Promise<void> {
+		if (manual) {
+			if (!this.ctx.viewSession.model) {
+				this.ctx.showStatus("No active model for recap");
+				return;
+			}
+			if (this.ctx.viewSession.messages.length === 0) {
+				this.ctx.showStatus("No conversation to recap yet");
+				return;
+			}
+			if (this.ctx.viewSession.isCompacting) {
+				this.ctx.showStatus("Recap unavailable while compacting");
+				return;
+			}
+		} else {
+			if (!this.#idleConditionsHold()) return;
+			if (!this.ctx.viewSession.model) return;
+			if (this.ctx.viewSession.messages.length === 0) return;
+		}
 
 		const promptText = prompt.render(idleRecapPrompt, {
 			goal: this.#idleRecapGoalText() ?? "",
@@ -2118,16 +2156,25 @@ export class EventController {
 
 		const abort = new AbortController();
 		this.#idleRecapAbort = abort;
+		this.#idleRecapManual = manual;
 		try {
 			const { replyText } = await this.ctx.viewSession.runEphemeralTurn({ promptText, signal: abort.signal });
-			if (this.#idleRecapAbort !== abort || abort.signal.aborted || !this.#idleConditionsHold()) return;
+			if (this.#idleRecapAbort !== abort || abort.signal.aborted) return;
+			if (!manual && !this.#idleConditionsHold()) return;
 			const recap = previewLine(replyText, TRUNCATE_LENGTHS.RECAP);
 			if (!recap) return;
 			this.ctx.showStatus(theme.fg("dim", theme.italic(`※ recap: ${recap}`)), { dim: false });
 		} catch (error) {
-			if (!abort.signal.aborted) logger.debug("Idle recap turn failed", { error: String(error) });
+			if (!abort.signal.aborted) {
+				logger.debug("Idle recap turn failed", { error: String(error) });
+				if (manual) this.ctx.showStatus("Recap failed");
+			}
 		} finally {
-			if (this.#idleRecapAbort === abort) this.#idleRecapAbort = undefined;
+			if (this.#idleRecapAbort === abort) {
+				this.#idleRecapAbort = undefined;
+				this.#idleRecapManual = false;
+				if (manual) this.#scheduleIdleRecap();
+			}
 		}
 	}
 

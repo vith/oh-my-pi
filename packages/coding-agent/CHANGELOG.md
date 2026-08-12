@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ## [17.2.15+vith-fork.87.d419fb9692] - 2026-08-12
+### Added
+
+- Added the `/recap` slash command to generate the status recap on demand (same LLM side-channel pipeline as the idle recap), including while the main turn is streaming.
 
 ### Fixed
 

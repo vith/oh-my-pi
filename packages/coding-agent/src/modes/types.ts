@@ -418,6 +418,7 @@ export interface InteractiveModeContext {
 	/** Queue a message for delivery only after the active agent turn would stop. */
 	handleQueueCommand(message: string): Promise<void>;
 	handleBtwCommand(question: string): Promise<void>;
+	handleRecapCommand(): Promise<void>;
 	handleTanCommand(work: string): Promise<void>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;

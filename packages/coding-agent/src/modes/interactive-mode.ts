@@ -5072,6 +5072,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#btwController.start(question);
 	}
 
+	handleRecapCommand(): Promise<void> {
+		return this.#eventController.runRecap();
+	}
+
 	handleTanCommand(work: string): Promise<void> {
 		return this.#tanCommandController.start(work);
 	}
