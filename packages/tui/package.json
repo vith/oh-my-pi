@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-tui",
-  "version": "17.2.15+vith-fork.87.d419fb9692",
+  "version": "17.2.15+vith-fork.93.7a93b804f5",
   "description": "Terminal User Interface library with differential rendering for efficient text-based applications",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
