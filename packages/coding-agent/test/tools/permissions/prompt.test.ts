@@ -13,6 +13,7 @@ import {
 	buildCandidates,
 	buildDialogLines,
 	promptForDecision,
+	rememberCompound,
 	renderAllowSuggestion,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/prompt";
 import { normalizeRule, ruleFiles } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
@@ -115,12 +116,15 @@ const COMPOUND_ACTIONS = [
 ] as const;
 
 describe("buildCandidates", () => {
-	it("bash: exact, first-token pattern, tool-wide", () => {
+	it("bash: exact and first-token pattern, never tool-wide (spec §5.1)", () => {
+		// bash can execute anything, so a tool-wide allow is the yolo knob and
+		// the dialog never offers it (hand-editable in the file only).
 		const c = buildCandidates("bash", { command: "git status -s" });
 		const labels = c.map(x => x.label);
 		expect(labels).toContain("Exact: git status -s");
 		expect(labels).toContain("Pattern: git *");
-		expect(labels).toContain("Tool: bash always");
+		expect(labels).not.toContain("Tool: bash always");
+		expect(c.some(x => x.rule.match.arg === "*")).toBe(false);
 	});
 
 	it("offers no remember candidates for unanalyzable shell-control bash commands", () => {
@@ -142,18 +146,19 @@ describe("buildCandidates", () => {
 		const control = buildCandidates("bash", { command: "git status -s" });
 		expect(control.some(candidate => candidate.rule.match.command === "git status -s")).toBe(true);
 		expect(control.some(candidate => candidate.rule.match.command === "git *")).toBe(true);
-		expect(control.some(candidate => candidate.rule.match.arg === "*")).toBe(true);
+		expect(control.some(candidate => candidate.rule.match.arg === "*")).toBe(false); // no tool-wide for bash
 		// A pipeline is analyzable: its candidates come back too.
 		const piped = buildCandidates("bash", { command: "git log | head -5" });
 		expect(piped.some(candidate => candidate.rule.match.command === "git log | head -5")).toBe(true);
 		expect(piped.some(candidate => candidate.rule.match.command === "git *")).toBe(true);
 	});
 
-	it("file tools: exact path and parent glob", () => {
+	it("file tools: exact path and parent glob, no tool-wide for write tools", () => {
 		const c = buildCandidates("write", { path: "src/foo/bar.ts" });
 		expect(c.some(x => x.label.includes("src/foo/bar.ts"))).toBe(true);
 		expect(c.some(x => x.label.includes("src/foo/**"))).toBe(true);
-		expect(c.some(x => x.label.includes("Tool: write always"))).toBe(true);
+		// write is exec-capable, so no tool-wide offer (spec §5.1)
+		expect(c.some(x => x.label.includes("Tool: write always"))).toBe(false);
 	});
 
 	it("renders YAML previews normalizeRule accepts (round-trip)", () => {
@@ -177,7 +182,7 @@ describe("buildCandidates", () => {
 		expect(denies.length).toBeGreaterThan(0);
 		expect(denies.some(x => x.rule.match.command === "git push")).toBe(true);
 		expect(denies.some(x => x.rule.match.command === "git *")).toBe(true);
-		expect(denies.some(x => x.rule.match.arg === "*")).toBe(true);
+		expect(denies.some(x => x.rule.match.arg === "*")).toBe(false); // no tool-wide deny for bash
 	});
 
 	it("offers no deny candidates when every piece is hard-denied", () => {
@@ -194,6 +199,128 @@ describe("buildCandidates", () => {
 		expect(ids.size).toBe(c.length);
 		const singleToken = buildCandidates("write", { path: "./**" });
 		expect(new Set(singleToken.map(x => x.rule.id)).size).toBe(singleToken.length);
+	});
+});
+
+describe("rememberCompound", () => {
+	// Distinct first tokens so the two globs differ (git → "git *", echo → "echo *").
+	const twoPieces = [pendingPiece("git log -n 5"), pendingPiece("echo hi")];
+
+	function dialogUi(
+		requests: PermissionDialogRequest[],
+		onRequest: (request: PermissionDialogRequest) => number | undefined,
+	) {
+		return {
+			...noopUi(),
+			showPermissionDialog: async (request: PermissionDialogRequest) => {
+				requests.push(request);
+				return onRequest(request);
+			},
+		} as unknown as ExtensionUIContext;
+	}
+
+	async function writtenCommands(ctx: EngineContext): Promise<Array<Record<string, unknown>>> {
+		const file = ruleFiles(ctx.cwd, ctx.home).dynamic;
+		if (!fs.existsSync(file)) return [];
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		return doc.rules.map(rule => rule.match as Record<string, unknown>);
+	}
+
+	it("builds first-token globs, preselects the write option, writes the checked rules", async () => {
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		const requests: PermissionDialogRequest[] = [];
+		const ui = dialogUi(requests, request => {
+			expect(request.checklist).toBe(true);
+			expect(request.allowEdit).toBe(true);
+			expect(request.initialIndex).toBe(2); // write button preselected — Enter writes (spec §5.1)
+			expect(request.previewFor).toBeDefined();
+			expect(request.options).toHaveLength(3);
+			expect(request.options[0]).toEqual({
+				label: "git *",
+				description: "git log -n 5",
+				checked: true,
+				toggleable: true,
+			});
+			expect(request.options[1]).toEqual({
+				label: "echo *",
+				description: "echo hi",
+				checked: true,
+				toggleable: true,
+			});
+			const write = request.options[2];
+			expect(write?.label).toBe("Write checked allow rules (2)");
+			expect(write?.labelFor?.([true, true, false])).toBe("Write checked allow rules (2)");
+			expect(write?.labelFor?.([true, false, false])).toBe("Write checked allow rules (1)");
+			// preview renders the YAML of the checked rows only
+			const preview = request.previewFor?.([true, false, false]);
+			expect(preview).toContain("git *");
+			expect(preview).not.toContain("echo *");
+			return 2; // the write button
+		});
+		const remembered = await rememberCompound(ui, twoPieces, "allow", ctx);
+		expect(remembered).toBeDefined();
+		expect(remembered?.match).toEqual({ command: "git *" }); // first written rule
+		expect(requests).toHaveLength(1);
+		const commands = (await writtenCommands(ctx)).map(match => match.command).sort();
+		expect(commands).toEqual(["echo *", "git *"]);
+	});
+
+	it("skips unchecked rows read back from the dialog (component write-back)", async () => {
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		const ui = dialogUi([], request => {
+			// simulate the component's space-toggle write-back (Task 4 Step 4):
+			// the user unchecks the first row, then presses Enter on the write
+			// button.
+			request.options[0]!.checked = false;
+			return 2;
+		});
+		const remembered = await rememberCompound(ui, twoPieces, "allow", ctx);
+		expect(remembered).toBeDefined();
+		expect(remembered?.match).toEqual({ command: "echo *" });
+		expect((await writtenCommands(ctx)).map(match => match.command)).toEqual(["echo *"]);
+	});
+
+	it("returns undefined and writes nothing when every row is unchecked", async () => {
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		const ui = dialogUi([], request => {
+			request.options[0]!.checked = false;
+			request.options[1]!.checked = false;
+			return 2;
+		});
+		const remembered = await rememberCompound(ui, twoPieces, "allow", ctx);
+		expect(remembered).toBeUndefined();
+		expect(await writtenCommands(ctx)).toEqual([]);
+	});
+
+	it("e sentinel (-2) edits the row-0 glob via ui.input and writes it", async () => {
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		let inputTitle = "";
+		const ui = {
+			...noopUi(),
+			showPermissionDialog: async () => -2, // e on checklist row 0
+			input: async (title: string) => {
+				inputTitle = title;
+				return "git log -5 *";
+			},
+		} as unknown as ExtensionUIContext;
+		const remembered = await rememberCompound(ui, twoPieces, "allow", ctx);
+		expect(remembered).toBeDefined();
+		expect(remembered?.match).toEqual({ command: "git log -5 *" });
+		expect(inputTitle).toContain("git log -n 5");
+		expect((await writtenCommands(ctx)).map(match => match.command)).toEqual(["git log -5 *"]);
+	});
+
+	it("plain cancel (-1) writes nothing", async () => {
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		const { ui } = queuedDialogUi([-1]);
+		const remembered = await rememberCompound(ui, twoPieces, "allow", ctx);
+		expect(remembered).toBeUndefined();
+		expect(await writtenCommands(ctx)).toEqual([]);
 	});
 });
 
@@ -466,6 +593,64 @@ describe("promptForDecision", () => {
 		const file = ruleFiles(ctx.cwd, ctx.home).dynamic;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toContain("git *");
+	});
+
+	it("single-piece scope: Pattern is preselected, Custom… is offered, bash has no Tool always", async () => {
+		const home = tempHome();
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([1, 1], requests); // Allow & remember… → Pattern (preselected)
+		const decision = fakeDecision({ pieces: [pendingPiece("git branch -a")] });
+		const res = await promptForDecision(ui, "bash", { command: "git branch -a" }, decision, fakeCtx(home));
+		expect(res.policy).toBe("allow");
+		expect(res.remembered?.match).toEqual({ command: "git *" }); // first-token glob
+		expect(requests).toHaveLength(2);
+		const scope = requests[1]!;
+		expect(scope.initialIndex).toBe(1); // Pattern preselected
+		const labels = scope.options.map(option => option.label);
+		expect(labels).toEqual(["Exact: git branch -a", "Pattern: git *", "Custom…"]);
+		expect(labels).not.toContain("Tool: bash always");
+		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["git *"]);
+	});
+
+	it("Custom… edits the glob via ui.input and writes the edited pattern", async () => {
+		const home = tempHome();
+		let placeholder = "";
+		let dialogCalls = 0;
+		const ui = {
+			...noopUi(),
+			showPermissionDialog: async () => {
+				dialogCalls += 1;
+				return dialogCalls === 1 ? 1 : 2; // Allow & remember… → Custom…
+			},
+			input: async (_title: string, current?: string) => {
+				placeholder = current ?? "";
+				return "git branch -a *";
+			},
+		} as unknown as ExtensionUIContext;
+		const decision = fakeDecision({ pieces: [pendingPiece("git branch -a")] });
+		const res = await promptForDecision(ui, "bash", { command: "git branch -a" }, decision, fakeCtx(home));
+		expect(res.policy).toBe("allow");
+		expect(res.remembered?.match).toEqual({ command: "git branch -a *" });
+		// the placeholder is the recommended first-token glob (spec §5.1:
+		// "narrower or wider than the first-token pattern")
+		expect(placeholder).toBe("git *");
+		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["git branch -a *"]);
+	});
+
+	it("Tool always is offered for read-only tools", async () => {
+		const home = tempHome();
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([1, 0], requests); // Allow & remember… → Exact call
+		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
+		const res = await promptForDecision(ui, "read", { path: "src/x.ts" }, decision, fakeCtx(home));
+		expect(res.policy).toBe("allow");
+		expect(requests).toHaveLength(2);
+		const labels = requests[1]!.options.map(option => option.label);
+		expect(labels).toContain("Tool: read always"); // read is in CURATED_ALLOW_TOOLS
 	});
 
 	it("drill-down Back with pieces left undecided denies the call", async () => {

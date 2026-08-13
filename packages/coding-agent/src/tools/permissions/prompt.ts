@@ -9,9 +9,9 @@
  * closed to deny). PTY calls, non-bash calls, forced prompts, and single-piece
  * calls keep the single-unit flow: per pending piece the user picks from
  * Allow once / Allow & remember… / Deny / Deny & remember…, then a scope-level
- * choice of candidate rules (exact, pattern, tool-wide) that preview the exact
- * YAML they write. Remembering writes a dynamic rule (`writeDynamicRule` into
- * the dynamic layer file).
+ * choice of candidate rules (exact, pattern, custom, tool-wide for read-only
+ * tools) that preview the exact YAML they write. Remembering writes a dynamic
+ * rule (`writeDynamicRule` into the dynamic layer file).
  *
  * PTY calls (spec §4.3) cannot be execution-split: they prompt once for the
  * whole command, with candidates scoped to the whole command text.
@@ -24,7 +24,7 @@ import type {
 	PermissionDialogOption,
 	PermissionDialogRequest,
 } from "../../extensibility/extensions/types";
-import { isSafeConsumerStage } from "./curated";
+import { CURATED_ALLOW_TOOLS, isSafeConsumerStage } from "./curated";
 import {
 	type EngineContext,
 	type EngineDecision,
@@ -42,6 +42,8 @@ export interface CandidateRule {
 	label: string;
 	yaml: string;
 	rule: Omit<PermissionRule, "layer">;
+	/** The remember scope (spec §5.1) this candidate writes; lets chooseCandidate preselect Pattern. */
+	scope: CandidateScope;
 }
 
 /** Outcome of the whole approval prompt: the policy, plus the rule remembered (if any). */
@@ -170,34 +172,49 @@ function candidate(
 		match,
 		action,
 	};
-	return { label, yaml: renderCandidateYaml(rule), rule };
+	return { label, yaml: renderCandidateYaml(rule), rule, scope };
 }
 
-/** bash: exact command, first-token pattern (`git *`), tool-wide. */
+/** Tool-always scope is offered only for read-only tools (spec §5.1); never for bash/exec tools. */
+function toolWideAllowed(toolName: string): boolean {
+	return (CURATED_ALLOW_TOOLS as readonly string[]).includes(toolName);
+}
+
+/** bash: exact command, first-token pattern (`git *`), tool-wide only for read-only tools (never bash). */
 function bashCandidates(toolName: string, command: string, action: RuleAction): CandidateRule[] {
 	const firstToken = command.trim().split(/\s+/u)[0] ?? "";
 	const pattern = `${firstToken} *`;
 	const deny = action === "deny";
-	return [
+	const candidates: CandidateRule[] = [
 		candidate(toolName, action, "exact", { command }, `${deny ? "Deny exact" : "Exact"}: ${command}`),
 		candidate(toolName, action, "pattern", { command: pattern }, `${deny ? "Deny pattern" : "Pattern"}: ${pattern}`),
-		candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
 	];
+	if (toolWideAllowed(toolName)) {
+		candidates.push(
+			candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
+		);
+	}
+	return candidates;
 }
 
-/** file tools: exact path, parent-dir glob (`src/**`), tool-wide. */
+/** file tools: exact path, parent-dir glob (`src/**`), tool-wide only for read-only tools. */
 function fileCandidates(toolName: string, key: string, fileArg: string, action: RuleAction): CandidateRule[] {
 	const parent = path.dirname(fileArg);
 	const glob = parent === "." ? "./**" : `${parent}/**`;
 	const deny = action === "deny";
-	return [
+	const candidates: CandidateRule[] = [
 		candidate(toolName, action, "exact", { [key]: fileArg }, `${deny ? "Deny exact" : "Exact"}: ${fileArg}`),
 		candidate(toolName, action, "pattern", { [key]: glob }, `${deny ? "Deny pattern" : "Pattern"}: ${glob}`),
-		candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
 	];
+	if (toolWideAllowed(toolName)) {
+		candidates.push(
+			candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
+		);
+	}
+	return candidates;
 }
 
-/** others: exact args + tool-wide. */
+/** others: exact args + tool-wide only for read-only tools. */
 function genericCandidates(toolName: string, args: unknown, action: RuleAction): CandidateRule[] {
 	const exactArgs = stringEntries(args);
 	const deny = action === "deny";
@@ -205,9 +222,11 @@ function genericCandidates(toolName: string, args: unknown, action: RuleAction):
 	if (Object.keys(exactArgs).length > 0) {
 		candidates.push(candidate(toolName, action, "exact", exactArgs, deny ? "Deny exact call" : "Exact call"));
 	}
-	candidates.push(
-		candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
-	);
+	if (toolWideAllowed(toolName)) {
+		candidates.push(
+			candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
+		);
+	}
 	return candidates;
 }
 
@@ -399,6 +418,9 @@ async function chooseLabel(
 	return ui.select(title, [...options]);
 }
 
+/** The single-piece scope dialog's glob-edit option (spec §5.1). */
+const CUSTOM_LABEL = "Custom…";
+
 /** Level-2 scope choice: pick one candidate (with its YAML preview) or cancel. */
 async function chooseCandidate(
 	ui: ExtensionUIContext,
@@ -407,20 +429,63 @@ async function chooseCandidate(
 ): Promise<CandidateRule | undefined> {
 	if (candidates.length === 0) return undefined;
 	if (ui.showPermissionDialog) {
+		const options: PermissionDialogOption[] = [];
+		for (const candidateItem of candidates) {
+			options.push({ label: candidateItem.label, description: candidateItem.yaml });
+			// Custom… sits right after Pattern (spec §5.1): the disagreement
+			// escape edits the recommended glob, narrower or wider.
+			if (candidateItem.scope === "pattern") options.push({ label: CUSTOM_LABEL });
+		}
 		const request: PermissionDialogRequest = {
 			title,
-			options: candidates.map(candidateItem => ({ label: candidateItem.label, description: candidateItem.yaml })),
+			options,
+			initialIndex: Math.max(
+				0,
+				candidates.findIndex(candidateItem => candidateItem.scope === "pattern"),
+			),
 		};
 		const index = await ui.showPermissionDialog(request);
-		return index === undefined ? undefined : candidates[index];
+		if (index === undefined || index === -1) return undefined; // cancel
+		if (options[index]?.label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
+		return candidates[index];
 	}
-	const label = await ui.select(
-		title,
-		candidates.map(candidateItem => candidateItem.label),
-	);
+	const labels = [
+		...candidates.map(candidateItem => candidateItem.label),
+		...(candidates.some(candidateItem => candidateItem.scope === "pattern") ? [CUSTOM_LABEL] : []),
+	];
+	const label = await ui.select(title, labels);
 	if (label === undefined) return undefined;
+	if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
 	const index = candidates.findIndex(candidateItem => candidateItem.label === label);
 	return index >= 0 ? candidates[index] : undefined;
+}
+
+/**
+ * Custom… (spec §5.1): edit the recommended pattern glob via `ui.input`,
+ * returning a pattern-scope candidate for the caller to write. Cancel/empty
+ * edits resolve to undefined (no rule).
+ */
+async function editCustomCandidate(
+	ui: ExtensionUIContext,
+	title: string,
+	candidates: CandidateRule[],
+): Promise<CandidateRule | undefined> {
+	if (ui.input === undefined) return undefined;
+	const recommended = candidates.find(candidateItem => candidateItem.scope === "pattern");
+	if (recommended === undefined) return undefined; // Custom… is only offered next to a Pattern
+	const matchKey = Object.keys(recommended.rule.match)[0] ?? "command";
+	const current = String(recommended.rule.match[matchKey] ?? "");
+	const edited = await ui.input(`Edit pattern (${title})`, current);
+	if (edited === undefined || edited.trim().length === 0) return undefined;
+	const value = edited.trim();
+	const deny = recommended.rule.action === "deny";
+	return candidate(
+		recommended.rule.tool,
+		recommended.rule.action,
+		"pattern",
+		{ [matchKey]: value },
+		`${deny ? "Deny pattern" : "Pattern"}: ${value}`,
+	);
 }
 
 async function writeRememberedRule(rule: Omit<PermissionRule, "layer">, ctx: EngineContext): Promise<void> {
@@ -509,14 +574,7 @@ async function promptUnit(
 	}
 }
 
-/**
- * Compound remember dialog (spec §5.1): per-piece first-token glob checklist.
- *
- * Task 5 ships a minimal working version (checklist with the write option, no
- * `e`-edit/`Custom…` rows) so the compound flow is testable end-to-end; Task 6
- * replaces it with the full dialog (edit sentinels, custom globs, preselected
- * write option).
- */
+/** Compound remember dialog (spec §5.1): per-piece first-token glob checklist with live YAML preview. */
 export async function rememberCompound(
 	ui: ExtensionUIContext,
 	pendingPieces: PieceEvaluation[],
@@ -526,39 +584,73 @@ export async function rememberCompound(
 	const toRule = (piece: PieceEvaluation): CandidateRule => {
 		const firstToken = piece.text.trim().split(/\s+/u)[0] ?? "";
 		const pattern = `${firstToken} *`;
-		return candidate("bash", action, "pattern", { command: pattern }, pattern);
+		return candidate("bash", action, "pattern", { command: pattern }, `${pattern}`);
 	};
-	const verb = action === "allow" ? "allow" : "deny";
-	const options: PermissionDialogOption[] = pendingPieces.map(piece => {
-		const rule = toRule(piece);
-		return {
-			label: rule.rule.match.command as string,
-			description: piece.text,
-			checked: true,
-			toggleable: true,
-		};
-	});
-	options.push({
-		label: `Write checked ${verb} rules (${pendingPieces.length})`,
-		labelFor: checked => `Write checked ${verb} rules (${checked.filter(Boolean).length})`,
-	});
+	const buildOptions = (pieces: PieceEvaluation[]): PermissionDialogOption[] => {
+		const options: PermissionDialogOption[] = pieces.map(piece => {
+			const rule = toRule(piece);
+			return {
+				label: rule.rule.match.command as string,
+				description: piece.text,
+				checked: true,
+				toggleable: true,
+			};
+		});
+		options.push({
+			label: `Write checked ${action === "allow" ? "allow" : "deny"} rules (${pieces.length})`,
+			labelFor: checked =>
+				`Write checked ${action === "allow" ? "allow" : "deny"} rules (${checked.filter(Boolean).length})`,
+		});
+		return options;
+	};
+	const previewFor = (checked: boolean[]): string =>
+		checked
+			.map((on, index) => (on ? renderCandidateYaml(toRule(pendingPieces[index]!).rule) : ""))
+			.filter(Boolean)
+			.join("\n");
+
 	const request: PermissionDialogRequest = {
-		title: `Remember ${verb} — what rule?`,
-		options,
+		title: `Remember ${action === "allow" ? "allow" : "deny"} — what rule?`,
+		lines: [
+			{
+				segments: [{ text: `${pendingPieces.length} pending pieces — an exact match would never fire again, so:` }],
+				style: "muted",
+			},
+		],
+		options: buildOptions(pendingPieces),
 		checklist: true,
+		allowEdit: true,
+		previewFor,
+		// The write button is preselected: all rows start checked, so Enter
+		// writes immediately (spec §5.1). Row = pieces.length (last option).
+		initialIndex: pendingPieces.length,
 	};
 	const index = await ui.showPermissionDialog?.(request);
-	if (index === undefined || index === -1) return undefined; // plain cancel
+	if (index === -1 || index === undefined) return undefined; // plain cancel
+	if (index < -1) {
+		// e: edit the selected piece's glob, then write the edited rule directly.
+		const pieceIndex = -index - 2;
+		const piece = pendingPieces[pieceIndex];
+		if (piece === undefined || ui.input === undefined) return undefined;
+		const current = toRule(piece).rule.match.command as string;
+		const edited = await ui.input(`Edit glob for ${piece.text}`, current);
+		if (edited === undefined || edited.trim().length === 0) return undefined;
+		const rule = candidate("bash", action, "pattern", { command: edited.trim() }, edited.trim());
+		await writeRememberedRule(rule.rule, ctx);
+		return rule.rule;
+	}
 	const picked = request.options[index];
-	if (picked === undefined || picked.labelFor === undefined) return undefined; // piece row — nothing to write
+	if (picked === undefined || picked.labelFor === undefined) return undefined; // piece row picked — no write
+	// The component wrote checked state back onto the request's option objects
+	// (Task 4 Step 4), so read the final state from the request.
 	const written: Array<Omit<PermissionRule, "layer">> = [];
-	for (const [pieceIndex, option] of request.options.entries()) {
-		if (option.checked && pieceIndex < pendingPieces.length) {
-			const rule = toRule(pendingPieces[pieceIndex]!);
-			await writeRememberedRule(rule.rule, ctx);
-			written.push(rule.rule);
+	for (const option of request.options) {
+		if (option.toggleable === true && option.checked === true) {
+			written.push(candidate("bash", action, "pattern", { command: option.label }, option.label).rule);
 		}
 	}
+	if (written.length === 0) return undefined;
+	for (const rule of written) await writeRememberedRule(rule, ctx);
 	return written[0];
 }
 
