@@ -270,7 +270,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		return {
 			settings: context?.autoApprove === true || settings === undefined ? autoApproveSettings(base) : base,
 			cwd: context?.sessionManager?.getCwd() ?? process.cwd(),
-			home: undefined,
+			home: context?.home,
 		};
 	}
 

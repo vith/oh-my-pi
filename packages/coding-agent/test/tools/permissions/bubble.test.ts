@@ -38,6 +38,7 @@ const SUB_ID = "test-bubble-sub";
 const ROOT_SESSION_ID = "sess-bubble-root";
 const SUB_SESSION_ID = "sess-bubble-sub";
 const FAKE_IDS = [ROOT_ID, SUB_ID];
+const tempHomes = new Set<string>();
 
 function fakeDecision(): EngineDecision {
 	return { policy: "prompt", tier: "exec", source: "posture", override: false, reason: "no matching rule" };
@@ -81,6 +82,10 @@ function registerTree(): void {
 }
 
 afterEach(() => {
+	for (const dir of tempHomes) {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+	tempHomes.clear();
 	for (const id of FAKE_IDS) {
 		unregisterPermissionHandler(id);
 		abortPendingForSession(id);
@@ -129,6 +134,12 @@ interface BubbleHarness {
 function makeController(
 	options: { suggestionsProvider?: PermissionControllerDeps["suggestionsProvider"] } = {},
 ): BubbleHarness {
+	// The engine resolves rules against the real home when `home` is undefined
+	// (os.homedir()), which makes these tests depend on the developer's live
+	// permission files — e.g. a remembered `echo *` allow rule silently turns
+	// "echo hi" into an allowed call with no dialog. Isolate a temp home.
+	const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "omp-bubble-test-"));
+	tempHomes.add(tempHome);
 	const notify = vi.fn();
 	let capturedRequest: PermissionDialogRequest | undefined;
 	const showPermissionDialog = vi.fn(async (request: PermissionDialogRequest) => {
@@ -163,7 +174,7 @@ function makeController(
 		rootSessionId: ROOT_SESSION_ID,
 		ui: () => ui,
 		agentRefByManagerId: id => (id === SUB_SESSION_ID ? subRef : undefined),
-		engineContext: () => ({ settings: Settings.isolated({}), cwd: process.cwd(), home: undefined }),
+		engineContext: () => ({ settings: Settings.isolated({}), cwd: process.cwd(), home: tempHome }),
 		...(options.suggestionsProvider !== undefined ? { suggestionsProvider: options.suggestionsProvider } : {}),
 		attachedManagerId: () => attached,
 	});

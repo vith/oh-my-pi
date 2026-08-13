@@ -97,6 +97,7 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 		await expect(
 			bashTool().execute("posture-prompt", { command: "echo blocked" }, undefined, undefined, {
 				settings,
+				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
@@ -107,6 +108,7 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask", "permissions.default": "allow" });
 		const result = await bashTool().execute("posture-allow", { command: "echo ok" }, undefined, undefined, {
 			settings,
+			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("ok");
 	});
@@ -115,6 +117,7 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 		const settings = approvalSettings({ "tools.approvalMode": "yolo" });
 		const result = await bashTool().execute("yolo-legacy", { command: "echo ok" }, undefined, undefined, {
 			settings,
+			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("ok");
 	});
@@ -127,6 +130,7 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 		await expect(
 			bashTool().execute("critical-deny", { command: "rm -rf /" }, undefined, undefined, {
 				settings,
+				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/Critical pattern detected|blocked/i);
 	});
@@ -172,6 +176,7 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 			bashTool().execute("audit-compound", { command: "git status && npm publish" }, undefined, undefined, {
 				settings,
 				sessionManager,
+				home: tempDir,
 			} as unknown as AgentToolContext),
 		).rejects.toThrow(/Denied: piece "npm publish"/);
 

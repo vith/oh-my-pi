@@ -166,7 +166,7 @@ describe("wrapper records permission decisions into the audit log", () => {
 	}
 
 	function ctx(settings: Settings): AgentToolContext {
-		return { settings, sessionManager } as unknown as AgentToolContext;
+		return { settings, sessionManager, home: tempDir } as unknown as AgentToolContext;
 	}
 
 	it("records an allowed call after execution with outcome executed", async () => {

@@ -302,6 +302,7 @@ describe("wrapper park integration", () => {
 		const result = await bashTool().execute("park-allow", { command: "echo park-allow-ok" }, undefined, undefined, {
 			settings: approvalSettings({ "tools.approvalMode": "always-ask" }),
 			sessionManager,
+			home: tempDir,
 		} as unknown as AgentToolContext);
 		expect(textOf(result)).toContain("park-allow-ok");
 	});
@@ -312,6 +313,7 @@ describe("wrapper park integration", () => {
 			bashTool().execute("park-deny", { command: "echo never" }, undefined, undefined, {
 				settings: approvalSettings({ "tools.approvalMode": "always-ask" }),
 				sessionManager,
+				home: tempDir,
 			} as unknown as AgentToolContext),
 		).rejects.toThrow("Tool call denied by user: bash");
 	});
@@ -321,6 +323,7 @@ describe("wrapper park integration", () => {
 			bashTool().execute("park-nohandler", { command: "echo never" }, undefined, undefined, {
 				settings: approvalSettings({ "tools.approvalMode": "always-ask" }),
 				sessionManager,
+				home: tempDir,
 			} as unknown as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
@@ -332,6 +335,7 @@ describe("wrapper park integration", () => {
 		const parked = bashTool().execute("park-abort-signal", { command: "echo never" }, controller.signal, undefined, {
 			settings: approvalSettings({ "tools.approvalMode": "always-ask" }),
 			sessionManager,
+			home: tempDir,
 		} as unknown as AgentToolContext);
 		// Wait until the call is actually parked before aborting it.
 		await waitUntilParked(sessionId);
@@ -347,6 +351,7 @@ describe("wrapper park integration", () => {
 		const parked = bashTool().execute("park-abort-session", { command: "echo never" }, undefined, undefined, {
 			settings: approvalSettings({ "tools.approvalMode": "always-ask" }),
 			sessionManager,
+			home: tempDir,
 		} as unknown as AgentToolContext);
 		await waitUntilParked(sessionId);
 		await session.abort();
