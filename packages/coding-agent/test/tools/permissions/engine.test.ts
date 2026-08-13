@@ -7,6 +7,7 @@ import {
 	evaluateBashCommand,
 	evaluatePermission,
 	matchClassOf,
+	nearMissLine,
 	patternSpecificity,
 	resolvePosture,
 	resolveWholeCommandRule,
@@ -423,6 +424,43 @@ describe("sub-command evaluation", () => {
 			);
 			const d = evaluateBashCommand("echo data | sh", dynamicCtx(dir));
 			expect(d.policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+});
+
+describe("piece evaluation data (v3 dialog)", () => {
+	// EngineContext with a temp home (dynamic layer file stays hermetic).
+	const homeCtx = (dir: string) => ({
+		settings: Settings.isolated({ "permissions.default": "prompt" }),
+		cwd: "/tmp/perm-test",
+		home: dir,
+	});
+
+	test("piece evaluations carry the top-level operator", () => {
+		const decision = evaluateBashCommand("git log -n 5 && git status", ctx());
+		const ops = (decision.pieces ?? []).map(piece => piece.operator);
+		expect(ops[0]).toBeNull();
+		expect(ops[1]).toBe("&&");
+	});
+
+	test("near-miss only reports a genuinely close rule (same first token, narrower)", () => {
+		// dynamic rule file: allow bash "git branch -a *" + allow bash "echo *".
+		// The echo rule shares no first token with git commands, so it is never
+		// close (plan ruling: the original "git status" negative case was wrong —
+		// git status IS a near miss of "git branch -a *").
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: branch-a\n    tool: bash\n    match: { command: 'git branch -a *' }\n    action: allow\n  - id: echo-all\n    tool: bash\n    match: { command: 'echo *' }\n    action: allow\n",
+			);
+			const c = homeCtx(dir);
+			const miss = nearMissLine("git branch -b new", c);
+			expect(miss).toContain("git branch -a *");
+			expect(miss).not.toContain("echo *"); // different command family is never close
+			expect(nearMissLine("npm test", c)).toBeUndefined(); // no rule in this family
 		} finally {
 			removeSyncWithRetries(dir);
 		}

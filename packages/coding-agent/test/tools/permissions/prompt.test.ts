@@ -8,8 +8,10 @@ import type {
 	EngineDecision,
 	PieceEvaluation,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
+import { evaluateBashCommand } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
 import {
 	buildCandidates,
+	buildDialogLines,
 	promptForDecision,
 	renderAllowSuggestion,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/prompt";
@@ -29,6 +31,11 @@ function tempHome(): string {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-prompt-${Snowflake.next()}-`));
 	tempHomes.push(dir);
 	return dir;
+}
+
+function write(file: string, content: string) {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, content);
 }
 
 function fakeDecision(overrides: Partial<EngineDecision> = {}): EngineDecision {
@@ -320,7 +327,11 @@ describe("promptForDecision", () => {
 		const res = await promptForDecision(ui, "bash", { command: "git status < seed" }, decision, fakeCtx(tempHome()));
 		expect(res.policy).toBe("allow");
 		expect(captured.request?.options.map(option => option.label)).toEqual(["Allow once", "Deny"]);
-		expect(captured.request?.lines?.some(line => line.includes("Remembered rules cannot suppress"))).toBe(true);
+		expect(
+			captured.request?.lines?.some(
+				line => typeof line === "string" && line.includes("Remembered rules cannot suppress"),
+			),
+		).toBe(true);
 	});
 
 	it("uses the dialog when the UI exposes showPermissionDialog", async () => {
@@ -486,5 +497,32 @@ describe("renderAllowSuggestion", () => {
 		const text = renderAllowSuggestion("bash", { command: "python3 -c'x'" });
 		expect(text).toContain("No rule can allow this call");
 		expect(text).toContain("shell control");
+	});
+});
+
+describe("buildDialogLines", () => {
+	it("renders summary, operator prefixes, and safe-tail dimming", () => {
+		// dynamic rule file: allow bash "echo *" — the middle piece of the
+		// compound rides the rule; the two git pieces have no rule (prompt).
+		const home = tempHome();
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: echo-all\n    tool: bash\n    match: { command: 'echo *' }\n    action: allow\n",
+		);
+		const ctx = fakeCtx(home);
+		const decision = evaluateBashCommand("git log -n 5 | head -1 && echo hi && git status | head -3", ctx);
+		const lines = buildDialogLines(decision, decision.pieces, ctx);
+		// summary line is accent-styled and counts pending pieces
+		expect(lines[0]?.style).toBe("accent");
+		expect(lines[0]?.segments[0]?.text).toContain("2 of 3 pieces need approval");
+		// second piece row starts with the && operator segment
+		const operatorRow = lines.find(line => line.segments.some(segment => segment.text.startsWith("&& ")));
+		expect(operatorRow).toBeDefined();
+		// safe tail is a dim segment
+		const tailSeg = lines.flatMap(line => line.segments).find(segment => segment.text.includes("|head"));
+		expect(tailSeg?.dim).toBe(true);
+		// status text per v3 wording
+		expect(JSON.stringify(lines)).toContain("no rule");
+		expect(JSON.stringify(lines)).toContain("allowed · remembered this session");
 	});
 });

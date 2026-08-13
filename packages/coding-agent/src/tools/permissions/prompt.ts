@@ -14,14 +14,17 @@ import * as path from "node:path";
 import { YAML } from "bun";
 import type {
 	ExtensionUIContext,
+	PermissionDialogLine,
 	PermissionDialogOption,
 	PermissionDialogRequest,
 } from "../../extensibility/extensions/types";
+import { isSafeConsumerStage } from "./curated";
 import {
 	type EngineContext,
 	type EngineDecision,
 	evaluateBashCommand,
 	hasBashApprovalShellControl,
+	nearMissLine,
 	type PieceEvaluation,
 } from "./engine";
 import { type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
@@ -248,38 +251,78 @@ function defaultTitle(toolName: string, decision: EngineDecision): string {
 	return lines.join("\n");
 }
 
-function pieceStatus(piece: PieceEvaluation): string {
-	switch (piece.policy) {
-		case "allow":
-			return "allowed";
-		case "deny":
-			return "denied";
-		case "prompt":
-			return "pending";
+function pieceStatusText(piece: PieceEvaluation): { text: string; style?: "muted" | "text" | "accent" } {
+	if (piece.policy === "allow") {
+		if (piece.ruleId === undefined) return { text: "allowed" };
+		return piece.layer === "dynamic"
+			? { text: "allowed · remembered this session", style: "muted" }
+			: { text: `allowed · ${piece.layer ?? "rule"} rule ${piece.ruleId}`, style: "muted" };
 	}
+	if (piece.policy === "deny") return { text: "denied", style: "accent" };
+	return piece.ruleId !== undefined
+		? { text: `prompt · rule ${piece.ruleId}`, style: "accent" }
+		: { text: "no rule", style: "accent" };
 }
 
-function pieceStatusLine(piece: PieceEvaluation): string {
-	const rule =
-		piece.ruleId !== undefined ? ` (rule ${piece.ruleId}${piece.layer !== undefined ? `, ${piece.layer}` : ""})` : "";
-	return `${piece.text} — ${pieceStatus(piece)}${rule}`;
+/** Split a piece at its last pipe; the tail is dimmable when it is a safe consumer. */
+export function splitSafeTail(text: string): { prefix: string; tail?: string } {
+	const pipeIndex = text.lastIndexOf("|");
+	if (pipeIndex < 0) return { prefix: text };
+	const tail = text.slice(pipeIndex).trim();
+	// The tokenizer glues the pipe to the stage ("… |head -1"); the consumer
+	// check reads the stage text, so strip the leading pipe (plan ruling).
+	if (tail.length === 0 || !isSafeConsumerStage(tail.replace(/^\|/u, ""))) return { prefix: text };
+	return { prefix: text.slice(0, pipeIndex).trimEnd(), tail: ` ${tail}` };
 }
 
-/** Decision context + per-piece breakdown shown in the dialog. */
-function dialogLines(decision: EngineDecision, pieces: PieceEvaluation[] | undefined): string[] {
-	const lines: string[] = [];
-	lines.push(
-		decision.ruleId !== undefined
-			? `Rule: ${decision.ruleId}${decision.layer !== undefined ? ` (${decision.layer})` : ""}`
-			: "no rule — default posture",
-	);
-	if (decision.reason !== undefined) lines.push(`Reason: ${decision.reason}`);
+/** v3 dialog lines (spec §5.1): summary, operator-prefixed piece rows, dim safe tails, near-miss. */
+export function buildDialogLines(
+	decision: EngineDecision,
+	pieces: PieceEvaluation[] | undefined,
+	ctx?: EngineContext,
+): PermissionDialogLine[] {
+	const lines: PermissionDialogLine[] = [];
 	if (pieces !== undefined && pieces.length > 0) {
-		lines.push("");
-		for (const [index, piece] of pieces.entries()) {
-			lines.push(`${index + 1}. ${pieceStatusLine(piece)}`);
+		const pending = pieces.filter(piece => piece.policy === "prompt").length;
+		if (pieces.length > 1) {
+			lines.push({
+				segments: [{ text: `${pending} of ${pieces.length} pieces need approval — no rule covers this command` }],
+				style: "accent",
+			});
 		}
+		for (const [index, piece] of pieces.entries()) {
+			const { prefix, tail } = splitSafeTail(piece.text);
+			const segments: Array<{ text: string; dim?: boolean }> = [];
+			const operator =
+				index > 0 && piece.operator !== undefined && piece.operator !== null ? `${piece.operator} ` : "";
+			segments.push({ text: `${operator}${prefix}` });
+			if (tail !== undefined) segments.push({ text: tail, dim: true });
+			const status = pieceStatusText(piece);
+			const line: PermissionDialogLine = {
+				segments,
+				style: piece.policy === "allow" ? "allowed" : piece.policy === "deny" ? "denied" : "text",
+				status,
+			};
+			lines.push(line);
+			if (piece.policy === "prompt" && ctx !== undefined) {
+				const miss = nearMissLine(piece.text, ctx);
+				if (miss !== undefined) lines.push({ segments: [{ text: miss }], style: "muted" });
+			}
+		}
+		return lines;
 	}
+	// Single-unit (non-bash / PTY) context line, v3 wording.
+	lines.push({
+		segments: [
+			{
+				text:
+					decision.ruleId !== undefined
+						? `rule ${decision.ruleId}${decision.layer ? ` (${decision.layer})` : ""}`
+						: "no rule",
+			},
+		],
+		style: decision.ruleId !== undefined ? "muted" : "accent",
+	});
 	return lines;
 }
 
@@ -322,7 +365,7 @@ async function chooseLabel(
 	ui: ExtensionUIContext,
 	title: string,
 	options: string[],
-	lines?: readonly string[],
+	lines?: readonly (string | PermissionDialogLine)[],
 	suggestions?: Promise<PermissionDialogOption[]>,
 ): Promise<string | undefined> {
 	if (ui.showPermissionDialog) {
@@ -386,7 +429,7 @@ async function promptUnit(
 
 	if (opts.includeCandidates === false) {
 		// Provider safety-check forced prompt: no candidates, binary choice only.
-		const chosen = await chooseLabel(ui, title, [APPROVE, DENY], dialogLines(decision, pieces));
+		const chosen = await chooseLabel(ui, title, [APPROVE, DENY], buildDialogLines(decision, pieces, ctx));
 		const approved = chosen === APPROVE || chosen === ALLOW_ONCE;
 		return { policy: approved ? "allow" : "deny" };
 	}
@@ -404,7 +447,7 @@ async function promptUnit(
 	// Shell-control bash commands cannot be suppressed by a remembered rule:
 	// drop both remember options and say why.
 	const rememberDisabled = bashRememberDisabled(unitArgs);
-	const lines = dialogLines(decision, pieces);
+	const lines: (string | PermissionDialogLine)[] = buildDialogLines(decision, pieces, ctx);
 	if (rememberDisabled) lines.push("", BASH_SHELL_CONTROL_NOTE);
 	const chosen = await chooseLabel(
 		ui,

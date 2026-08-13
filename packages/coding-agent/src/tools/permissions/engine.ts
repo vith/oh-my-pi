@@ -16,6 +16,8 @@ export interface PieceEvaluation {
 	ruleId?: string;
 	layer?: RuleLayer;
 	reason?: string;
+	/** Top-level control operator that preceded this piece (bash compounds only). */
+	operator?: ShellPiece["operator"];
 }
 
 export interface EngineDecision {
@@ -575,6 +577,7 @@ function evaluateBashPiece(
 		return {
 			evaluation: {
 				text: piece.text,
+				operator: piece.operator,
 				policy: decision.policy,
 				ruleId: decision.ruleId,
 				layer: decision.layer,
@@ -595,6 +598,7 @@ function evaluateBashPiece(
 		return {
 			evaluation: {
 				text: piece.text,
+				operator: piece.operator,
 				policy: "prompt",
 				ruleId: decision.ruleId,
 				layer: decision.layer,
@@ -610,6 +614,7 @@ function evaluateBashPiece(
 			return {
 				evaluation: {
 					text: piece.text,
+					operator: piece.operator,
 					policy: "deny",
 					ruleId: subDecision.ruleId ?? decision.ruleId,
 					layer: subDecision.layer ?? decision.layer,
@@ -627,6 +632,7 @@ function evaluateBashPiece(
 			sawPrompt = {
 				evaluation: {
 					text: piece.text,
+					operator: piece.operator,
 					policy: "prompt",
 					ruleId: subDecision.ruleId,
 					layer: subDecision.layer,
@@ -640,6 +646,7 @@ function evaluateBashPiece(
 	return {
 		evaluation: {
 			text: piece.text,
+			operator: piece.operator,
 			policy: "allow",
 			ruleId: decision.ruleId,
 			layer: decision.layer,
@@ -730,4 +737,32 @@ export function evaluateBashCommand(command: string, ctx: EngineContext, depth =
 		override: false,
 		pieces: evaluations,
 	};
+}
+
+/**
+ * Near-miss line (spec §5.1): the closest rule that shares the piece's first
+ * token with a narrower glob but does not match it. Undefined when nothing is
+ * genuinely close (different command families are never shown).
+ */
+export function nearMissLine(pieceText: string, ctx: EngineContext): string | undefined {
+	const firstToken = pieceText.trim().split(/\s+/u)[0] ?? "";
+	if (firstToken.length === 0) return undefined;
+	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
+	let best: PermissionRule | undefined;
+	let bestSpecificity = 0;
+	for (const rule of rules) {
+		if (rule.tool !== "bash" && rule.tool !== "*") continue;
+		const pattern = rule.match.command;
+		if (typeof pattern !== "string" || isRegexWrapped(pattern)) continue;
+		const patternToken = pattern.split(/\s+/u)[0] ?? "";
+		if (patternToken !== firstToken) continue;
+		if (matchRule(rule, "bash", { command: pieceText })) continue; // matches — not a miss
+		const specificity = patternSpecificity("command", pattern);
+		if (specificity > bestSpecificity) {
+			bestSpecificity = specificity;
+			best = rule;
+		}
+	}
+	if (best === undefined || best.match.command === undefined) return undefined;
+	return `≈ ${best.id}: ${String(best.match.command)} (too narrow for this command)`;
 }

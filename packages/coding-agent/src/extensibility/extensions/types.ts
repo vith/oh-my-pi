@@ -132,19 +132,38 @@ export interface ExtensionUISelectOption {
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
 
+/** One rendered line of the permission dialog: text segments (safe tails dimmable) plus an optional right-aligned status. */
+export interface PermissionDialogLine {
+	segments: Array<{ text: string; dim?: boolean }>;
+	style?: "muted" | "text" | "accent" | "allowed" | "denied";
+	status?: { text: string; style?: "muted" | "text" | "accent" };
+}
+
 /** One numbered option in the permission approval dialog. */
 export interface PermissionDialogOption {
 	label: string;
 	/** Secondary lines shown under the label (e.g. the YAML preview the option writes). */
 	description?: string;
+	/** Checklist mode: starts checked. */
+	checked?: boolean;
+	/** Checklist mode: space toggles this option. */
+	toggleable?: boolean;
+	/** Checklist mode: recompute the label from the current checked array (write button count). */
+	labelFor?: (checked: boolean[]) => string;
 }
 
 /** Content of the permission approval dialog. */
 export interface PermissionDialogRequest {
 	title: string;
 	/** Context lines shown under the title (decision context, per-piece status list). */
-	lines?: readonly string[];
-	options: readonly PermissionDialogOption[];
+	lines?: readonly (string | PermissionDialogLine)[];
+	options: PermissionDialogOption[];
+	/** Row to preselect; -1/omitted = no selection (Task 6's Pattern preselect). */
+	initialIndex?: number;
+	/** Checklist mode: space toggles toggleable options. */
+	checklist?: boolean;
+	/** Edit mode: a key opens a text editor for the picked option. */
+	allowEdit?: boolean;
 	/**
 	 * Task 11 (§5.3): asynchronously appended LLM-suggested rules. The dialog
 	 * shows a spinner while the promise is pending and appends the options when

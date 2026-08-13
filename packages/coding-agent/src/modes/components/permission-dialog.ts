@@ -9,7 +9,7 @@
  * already shown. Suggestions that resolve after the user chose are dropped.
  */
 import { Container, Loader, Markdown, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
-import type { PermissionDialogOption } from "../../extensibility/extensions";
+import type { PermissionDialogLine, PermissionDialogOption } from "../../extensibility/extensions";
 import { getMarkdownTheme, theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import { DynamicBorder } from "./dynamic-border";
@@ -31,7 +31,7 @@ export class PermissionDialogComponent extends Container {
 
 	constructor(
 		title: string,
-		lines: readonly string[],
+		lines: readonly (string | PermissionDialogLine)[],
 		options: readonly PermissionDialogOption[],
 		onSelect: (index: number) => void,
 		onCancel: () => void,
@@ -47,7 +47,11 @@ export class PermissionDialogComponent extends Container {
 		this.addChild(new Spacer(1));
 		this.addChild(new Markdown(title, 1, 0, getMarkdownTheme(), { color: t => theme.fg("accent", t) }));
 		this.addChild(new Spacer(1));
-		for (const line of lines) {
+		for (const rawLine of lines) {
+			// Task 4 replaces this loop with the v3 line model (segments/status
+			// rendering); until then, string lines pass through and structured
+			// lines flatten to their segment text.
+			const line = typeof rawLine === "string" ? rawLine : rawLine.segments.map(segment => segment.text).join("");
 			this.addChild(new Text(theme.fg("muted", line), 1, 0));
 		}
 		if (lines.length > 0) {
