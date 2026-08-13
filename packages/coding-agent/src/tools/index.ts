@@ -63,7 +63,7 @@ import { PermissionsTool } from "./permissions/manage";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
-import { ThinkTool } from "./think";
+import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
@@ -469,6 +469,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			: undefined;
 	const goalEnabled = session.settings.get("goal.enabled");
 	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
+	const externalThinkingActive =
+		session.settings.get("externalThinking") && supportsExternalThinking(session.getActiveModel?.());
 	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
 		requestedTools.push("goal");
 	}
@@ -567,7 +569,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (session.settings.get("memory.backend") === "mnemopi" && !requestedTools.includes("memory_edit")) {
 			requestedTools.push("memory_edit");
 		}
-		if (session.settings.get("externalThinking") && !requestedTools.includes("think")) {
+		if (externalThinkingActive && !requestedTools.includes("think")) {
 			requestedTools.push("think");
 		}
 		// Auto-learn tools are gated by `autolearn.enabled` but, like the memory
@@ -612,7 +614,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "inspect_image") return isInspectImageToolActive(session);
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "security_scan") return session.settings.get("security.enabled");
-		if (name === "think") return session.settings.get("externalThinking");
+		if (name === "think") return externalThinkingActive;
 		if (name === "ask") return session.settings.get("ask.enabled");
 		if (name === "browser") return session.settings.get("browser.enabled");
 		if (name === "computer") return session.settings.get("computer.enabled");
@@ -659,7 +661,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 					...Object.entries(BUILTIN_TOOLS)
 						.filter(([name]) => isToolAllowed(name))
 						.map(([name, factory]) => [name, factory] as const),
-					...(session.settings.get("externalThinking") ? ([["think", HIDDEN_TOOLS.think]] as const) : []),
+					...(externalThinkingActive ? ([["think", HIDDEN_TOOLS.think]] as const) : []),
 					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
 					...(goalModeActive ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
 				];
