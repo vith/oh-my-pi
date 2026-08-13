@@ -239,12 +239,21 @@ async function testCommand(rest: string, ctx: RunPermissionCommandContext): Prom
 	if (command.length === 0) return 'Usage: permissions test "<command>"';
 	const decision = evaluateBashCommand(command, { settings: ctx.settings, cwd: ctx.cwd });
 	// Whole-command winner (spec §3.1 step 2): the deciding rule's match class
-	// and specificity explain why it beat the other matches.
+	// and specificity explain why it beat the other matches. The engine
+	// evaluates the tokenizer's normalized piece text (the parser glues `|` to
+	// the next stage), so for single-piece commands resolve over that same
+	// text; multi-piece commands fall back to the raw command.
 	const { rules } = loadRuleLayers(ctx.cwd);
-	const best = resolveWholeCommandRule(rules, "bash", { command });
+	const bestCommand =
+		decision.pieces !== undefined && decision.pieces.length === 1 ? decision.pieces[0].text : command;
+	const best = resolveWholeCommandRule(rules, "bash", { command: bestCommand });
 	const commandPattern = best?.rule.match.command;
 	const matchClass =
-		best !== undefined && typeof commandPattern === "string" ? matchClassOf(commandPattern, command) : undefined;
+		best !== undefined && typeof commandPattern === "string" ? matchClassOf(commandPattern, bestCommand) : undefined;
+	const specificity =
+		best !== undefined && typeof commandPattern === "string"
+			? patternSpecificity("command", commandPattern)
+			: undefined;
 
 	const lines = [`Dry-run: bash "${command}"`, `decision: ${decision.policy}`];
 	if (decision.ruleId !== undefined) lines.push(`rule: ${decision.ruleId}`);
@@ -255,12 +264,18 @@ async function testCommand(rest: string, ctx: RunPermissionCommandContext): Prom
 		const attribution = piece.ruleId !== undefined ? ` (${piece.ruleId}, ${piece.layer ?? "?"})` : "";
 		lines.push(`  piece: ${piece.text} -> ${piece.policy}${attribution}`);
 	}
-	if (best !== undefined && matchClass !== undefined) {
-		lines.push(`class: ${matchClass} (specificity ${patternSpecificity("command", String(commandPattern))})`);
-	}
-	if (best !== undefined) {
-		const otherMatches = rules.filter(rule => matchRule(rule, "bash", { command })).length - 1;
-		lines.push(`resolved: ${best.rule.id} beats ${otherMatches} other matches`);
+	// Annotate only when the file-backed whole-command winner actually produced
+	// the decision: a legacy pattern, stage-level override, curated hard-deny,
+	// or R1 degradation decides otherwise, and annotating a non-deciding rule
+	// would contradict `decision:`.
+	if (best !== undefined && decision.ruleId === best.rule.id) {
+		if (matchClass !== undefined && specificity !== undefined) {
+			lines.push(`class: ${matchClass} (specificity ${specificity})`);
+		}
+		const otherMatches = rules.filter(rule => matchRule(rule, "bash", { command: bestCommand })).length - 1;
+		if (otherMatches > 0) {
+			lines.push(`resolved: ${best.rule.id} beats ${otherMatches} other matches`);
+		}
 	}
 	return lines.join("\n");
 }
