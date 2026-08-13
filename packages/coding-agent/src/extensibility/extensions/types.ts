@@ -164,6 +164,8 @@ export interface PermissionDialogRequest {
 	checklist?: boolean;
 	/** Edit mode: a key opens a text editor for the picked option. */
 	allowEdit?: boolean;
+	/** Checklist mode: summary line computed from the current checked array; empty string hides it. */
+	previewFor?: (checked: boolean[]) => string;
 	/**
 	 * Task 11 (§5.3): asynchronously appended LLM-suggested rules. The dialog
 	 * shows a spinner while the promise is pending and appends the options when

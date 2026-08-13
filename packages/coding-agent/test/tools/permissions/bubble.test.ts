@@ -202,8 +202,9 @@ describe("PermissionController", () => {
 		expect(pendingApprovalsForSession(SUB_SESSION_ID)).toEqual([pending]);
 
 		// (a) root notification names the subagent (registry display name — the
-		// wrapper never sets agentId) and the pending command.
-		expect(h.notify).toHaveBeenCalledWith("Subagent Worker is waiting for approval: echo hi");
+		// wrapper never sets agentId) and the pending command; it is a warning so
+		// it cannot be mistaken for a routine info notice.
+		expect(h.notify).toHaveBeenCalledWith("Subagent Worker is waiting for approval: echo hi", "warning");
 
 		// (b) a pending entry was appended to the SUBAGENT's session.
 		expect(h.entries).toEqual([
@@ -222,6 +223,9 @@ describe("PermissionController", () => {
 		h.controller.onFocusAttached(fakeSession(SUB_SESSION_ID));
 		await expect(parked).resolves.toEqual({ policy: "allow" });
 		expect(h.showPermissionDialog).toHaveBeenCalledTimes(1);
+
+		// (d) the answer is acknowledged through the root UI with the policy.
+		expect(h.notify).toHaveBeenCalledWith(expect.stringContaining("Approval answered: allowed"));
 
 		// The answered pending is dropped from the registry.
 		expect(pendingApprovalsForSession(SUB_SESSION_ID)).toEqual([]);
@@ -301,7 +305,7 @@ describe("PermissionController", () => {
 			() => null,
 			() => null,
 		);
-		expect(h.notify).toHaveBeenCalledWith(`Subagent ${ROOT_SESSION_ID} is waiting for approval: echo hi`);
+		expect(h.notify).toHaveBeenCalledWith(`Subagent ${ROOT_SESSION_ID} is waiting for approval: echo hi`, "warning");
 
 		h.controller.dispose();
 		await outcome;

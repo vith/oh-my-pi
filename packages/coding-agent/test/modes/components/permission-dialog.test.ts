@@ -64,6 +64,8 @@ describe("PermissionDialogComponent", () => {
 			},
 		);
 
+		// No selection by default: Enter alone must not confirm; j moves first.
+		component.handleInput("j");
 		component.handleInput(ENTER);
 		expect(selected).toEqual([0]);
 
@@ -101,6 +103,8 @@ describe("PermissionDialogComponent", () => {
 		);
 		component.addOption({ label: "Pattern: git *", description: "action: allow" });
 		expect(render(component)).toContain("2. Pattern: git *");
+		// First j enters the list (row 0); second reaches the appended row 1.
+		component.handleInput("j");
 		component.handleInput("j");
 		component.handleInput(ENTER);
 		expect(selected).toEqual([1]);
@@ -125,6 +129,8 @@ describe("PermissionDialogComponent", () => {
 		const out = render(component);
 		expect(out).not.toContain("Suggesting rules…");
 		expect(out).toContain("2. Allow bash: git push");
+		// First j enters the list (row 0); second reaches the appended row 1.
+		component.handleInput("j");
 		component.handleInput("j");
 		component.handleInput(ENTER);
 		expect(selected).toEqual([1]);
@@ -140,6 +146,8 @@ describe("PermissionDialogComponent", () => {
 			() => {},
 			{ suggestions: deferred.promise },
 		);
+		// Enter alone is a no-op under no-selection; navigate, then confirm.
+		component.handleInput("j");
 		component.handleInput(ENTER);
 		deferred.resolve([{ label: "Allow bash: git push" }]);
 		await deferred.promise;
@@ -188,5 +196,172 @@ describe("PermissionDialogComponent", () => {
 		expect(out).not.toContain("Suggesting rules…");
 		expect(requestRender).toHaveBeenCalled();
 		component.dispose();
+	});
+
+	it("renders line segments with dim tails and right-aligned status", () => {
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[
+				{
+					segments: [{ text: "git log" }, { text: " |head -1", dim: true }],
+					style: "text",
+					status: { text: "no rule" },
+				},
+			],
+			[{ label: "Allow once" }],
+			() => {},
+			() => {},
+		);
+		const out = render(component);
+		const row = out.split("\n").find(line => line.includes("git log"));
+		expect(row).toBeDefined();
+		expect(row).toContain("|head");
+		// The status is padded onto the same line, right-aligned to the width.
+		expect(row).toContain("no rule");
+	});
+
+	it("initialIndex preselects an option (enter picks it)", () => {
+		const selected: number[] = [];
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }, { label: "Deny" }],
+			index => selected.push(index),
+			() => {},
+			{ initialIndex: 1 },
+		);
+		component.handleInput(ENTER);
+		expect(selected).toEqual([1]);
+	});
+
+	it("checklist mode: space toggles checked, rewrites labelFor labels, previews, and writes back to the source option", () => {
+		const options: PermissionDialogOption[] = [
+			{ label: "git log *", toggleable: true, checked: true },
+			{ label: "Write checked (1)", labelFor: checked => `Write checked (${checked.filter(Boolean).length})` },
+		];
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			options,
+			() => {},
+			() => {},
+			// Space toggles the selected row; checklist flows preselect (Task 6).
+			{
+				checklist: true,
+				initialIndex: 0,
+				previewFor: checked => `Applying ${checked.filter(Boolean).length} rule(s)`,
+			},
+		);
+		let out = render(component);
+		expect(out).toContain("[x] git log *");
+		expect(out).toContain("Write checked (1)");
+		expect(out).toContain("Applying 1 rule(s)");
+
+		component.handleInput(" ");
+		out = render(component);
+		expect(out).toContain("[ ] git log *");
+		expect(out).toContain("Write checked (0)");
+		expect(out).toContain("Applying 0 rule(s)");
+		// The caller's option object receives the toggled state (Task 6 reads it).
+		expect(options[0]?.checked).toBe(false);
+	});
+
+	it("l toggles line truncation; truncated lines end with …", () => {
+		const longLine = "x".repeat(200);
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[{ segments: [{ text: longLine }] }],
+			[{ label: "Allow once" }],
+			() => {},
+			() => {},
+		);
+		let out = render(component);
+		const row = out.split("\n").find(line => line.includes("…"));
+		expect(row).toBeDefined();
+		expect(row!.trimEnd().endsWith("…")).toBe(true);
+		expect(row!.trimEnd().length).toBeLessThan(80);
+		expect(out).not.toContain(longLine);
+
+		component.handleInput("l");
+		out = render(component);
+		// Expanded text wraps across rows; join them to compare the full line.
+		expect(
+			out
+				.split("\n")
+				.map(line => line.trim())
+				.join(""),
+		).toContain(longLine);
+	});
+
+	it("e triggers onEdit when allowEdit is set; ignored without it", () => {
+		const edited: number[] = [];
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }, { label: "Deny" }],
+			() => {},
+			() => {},
+			{ checklist: true, allowEdit: true, initialIndex: 1, onEdit: index => edited.push(index) },
+		);
+		component.handleInput("e");
+		expect(edited).toEqual([1]);
+
+		const unedited: number[] = [];
+		const plain = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }],
+			() => {},
+			() => {},
+			{ checklist: true },
+		);
+		plain.handleInput("e");
+		expect(unedited).toEqual([]);
+	});
+
+	it("has no selected row by default: no highlight and enter is a no-op until navigation", () => {
+		const selected: number[] = [];
+		let cancelled = 0;
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }, { label: "Deny" }],
+			index => selected.push(index),
+			() => {
+				cancelled++;
+			},
+		);
+		// No row is painted with the selection background before navigation.
+		const bgPaint = darkTheme!.bg("selectedBg", "").replace(/\x1b\[49m$/u, "");
+		const optionRow = () =>
+			component
+				.render(80)
+				.join("\n")
+				.split("\n")
+				.find(line => line.includes("Allow once"));
+		expect(optionRow()).not.toContain(bgPaint);
+
+		component.handleInput(ENTER);
+		expect(selected).toEqual([]);
+		expect(cancelled).toBe(0);
+
+		// Explicit -1 behaves like the omitted default.
+		const explicitSelected: number[] = [];
+		const explicit = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }, { label: "Deny" }],
+			index => explicitSelected.push(index),
+			() => {},
+			{ initialIndex: -1 },
+		);
+		explicit.handleInput(ENTER);
+		expect(explicitSelected).toEqual([]);
+
+		// After navigation the row highlights and enter selects it.
+		component.handleInput("j");
+		expect(optionRow()).toContain(bgPaint);
+		component.handleInput(ENTER);
+		expect(selected).toEqual([0]);
 	});
 });

@@ -121,7 +121,8 @@ export class PermissionController {
 		// The wrapper never sets `agentId`, so the registry ref's display name
 		// is the user-facing identity for the notice and the entry.
 		const agentLabel = ref?.displayName || ref?.id || pending.sessionId;
-		this.#deps.ui()?.notify(`Subagent ${agentLabel} is waiting for approval: ${command}`);
+		// Warning type: the default info notice was easy to miss (user finding 2026-08-13).
+		this.#deps.ui()?.notify(`Subagent ${agentLabel} is waiting for approval: ${command}`, "warning");
 		session?.sessionManager.appendCustomMessageEntry(PERMISSION_PENDING_TYPE, "", true, {
 			agentId: agentLabel,
 			toolName: pending.toolName,
@@ -187,6 +188,13 @@ export class PermissionController {
 			this.#answerers.delete(pending.key);
 			answered = true;
 			answer({ policy: resolution.policy });
+			// Acknowledge the answer: the pending entry's "waiting" heading alone
+			// left the user unsure the answer landed (user finding 2026-08-13).
+			this.#deps
+				.ui()
+				?.notify(
+					`Approval answered: ${resolution.policy === "allow" ? "allowed" : "denied"} — ${agentLabel} resumed`,
+				);
 		} catch (err) {
 			const answer = this.#answerers.get(pending.key);
 			this.#answerers.delete(pending.key);
