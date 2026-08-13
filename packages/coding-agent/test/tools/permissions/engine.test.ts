@@ -547,7 +547,19 @@ describe("denyOverrideSuggestion (spec §5.2)", () => {
 		home: dir,
 	});
 
-	test("finds an allow that beats a general deny", () => {
+	test("no deny rule means a posture deny — no override can exist", () => {
+		// no rules at all: a dynamic allow beats the posture, so the caller
+		// suggests the first candidate instead of a dead end.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			const result = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
+			expect(result.status).toBe("no-deny");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("a deny with no beating allow is a dead end", () => {
 		// dynamic file: deny bash "* | head *"
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
 		try {
@@ -555,7 +567,9 @@ describe("denyOverrideSuggestion (spec §5.2)", () => {
 				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
 				"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n",
 			);
-			expect(denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir))).toBeUndefined();
+			const result = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
+			expect(result.status).toBe("dead-end");
+			if (result.status === "dead-end") expect(result.deny.id).toBe("deny-pipe");
 		} finally {
 			removeSyncWithRetries(dir);
 		}
@@ -569,10 +583,14 @@ describe("denyOverrideSuggestion (spec §5.2)", () => {
 				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
 				"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * | head *' }\n    action: allow\n",
 			);
-			const override = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
-			expect(override?.rule.match.command).toBe("git branch * | head *");
-			expect(override?.matchClass).toBe("exact-structure");
-			expect(override?.specificity).toBe(4);
+			const result = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
+			expect(result.status).toBe("override");
+			if (result.status === "override") {
+				expect(result.deny.id).toBe("deny-pipe");
+				expect(result.allow.rule.match.command).toBe("git branch * | head *");
+				expect(result.allow.matchClass).toBe("exact-structure");
+				expect(result.allow.specificity).toBe(4);
+			}
 		} finally {
 			removeSyncWithRetries(dir);
 		}
@@ -587,7 +605,36 @@ describe("denyOverrideSuggestion (spec §5.2)", () => {
 				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
 				"rules:\n  - id: deny-git-pipe\n    tool: bash\n    match: { command: 'git * | head *' }\n    action: deny\n  - id: allow-git\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
 			);
-			expect(denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir))).toBeUndefined();
+			const result = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
+			expect(result.status).toBe("dead-end");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("legacy bash.patterns denies join the suggestion's deny pool", () => {
+		// settings bash.patterns deny "* | head *" + dynamic file allow
+		// "git branch * | head *": the override must name the legacy deny.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * | head *' }\n    action: allow\n",
+			);
+			const c = {
+				settings: Settings.isolated({
+					"permissions.default": "prompt",
+					"bash.patterns": [{ match: "* | head *", approval: "deny" }],
+				}),
+				cwd: "/tmp/perm-test",
+				home: dir,
+			};
+			const result = denyOverrideSuggestion("git branch -a | head -20", c);
+			expect(result.status).toBe("override");
+			if (result.status === "override") {
+				expect(result.deny.id).toBe("legacy-0");
+				expect(result.allow.rule.match.command).toBe("git branch * | head *");
+			}
 		} finally {
 			removeSyncWithRetries(dir);
 		}

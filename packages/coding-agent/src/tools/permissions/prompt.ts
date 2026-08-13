@@ -27,15 +27,15 @@ import type {
 import { CURATED_ALLOW_TOOLS, isSafeConsumerStage } from "./curated";
 import {
 	denyOverrideSuggestion,
+	denySuggestion,
 	type EngineContext,
 	type EngineDecision,
 	evaluateBashCommand,
 	hasBashApprovalShellControl,
 	nearMissLine,
 	type PieceEvaluation,
-	resolveWholeCommandRule,
 } from "./engine";
-import { loadRuleLayers, type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
+import { type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
 import { extractSubCommands } from "./split";
 import type { Suggestion } from "./suggest";
 
@@ -265,44 +265,42 @@ export function buildCandidates(toolName: string, args: unknown, pieces?: PieceE
 }
 
 /**
- * The model-visible allow suggestion for a denied call (spec §5.2). Bash
- * commands first ask the engine for the best allow that strictly beats the
- * deciding deny (class, then specificity): when one exists the suggestion
- * names the deny and renders the exact YAML to add; otherwise it explains
- * the dead end instead of emitting a rule that cannot win. Non-bash calls
- * keep the mechanical first-candidate YAML; shell-control commands have no
- * allow candidates, so the fallback says no rule can suppress them.
+ * The model-visible allow suggestion for a denied call (spec §5.2). Shell-
+ * control bash commands can never be unblocked by a rule (R1 degrades allow
+ * winners to a prompt), so they get the accurate message BEFORE any override
+ * consultation. Otherwise the engine's suggestion decides: an allow that
+ * strictly beats the deciding deny renders its exact YAML and why; a deny
+ * nothing beats renders the dead end; a posture-source deny (no deny rule
+ * matched — a dynamic allow beats the posture) suggests the mechanical first
+ * candidate. Non-bash calls go through the same dead-end/override gate so a
+ * tying or losing candidate is never suggested.
  */
 export function renderAllowSuggestion(toolName: string, args: unknown, ctx: EngineContext): string {
 	const command = argString(args, "command");
-	if (toolName === "bash" && command !== undefined && command.length > 0) {
-		const override = denyOverrideSuggestion(command, ctx);
-		if (override !== undefined) {
-			const rule = { ...override.rule } as Omit<PermissionRule, "layer">;
-			return (
-				`This call is denied by ${overrideRuleId(command, ctx)}. To permit it, add this rule ` +
-				`(more specific than the deny, class ${override.matchClass}):\n${renderCandidateYaml(rule)}`
-			);
-		}
+	if (toolName === "bash" && command !== undefined && hasBashApprovalShellControl(command)) {
+		return "No rule can allow this call: the command uses shell control, which no remembered allow rule can suppress.";
+	}
+	const suggestion =
+		toolName === "bash" && command !== undefined && command.length > 0
+			? denyOverrideSuggestion(command, ctx)
+			: denySuggestion(toolName, args, ctx);
+	if (suggestion.status === "override") {
+		const rule = { ...suggestion.allow.rule } as Omit<PermissionRule, "layer">;
+		return (
+			`This call is denied by ${suggestion.deny.id}. To permit it, add this rule ` +
+			`(more specific than the deny, class ${suggestion.allow.matchClass}):\n${renderCandidateYaml(rule)}`
+		);
+	}
+	if (suggestion.status === "dead-end") {
 		return "This call is denied, and no allow rule can override the matching deny. Add a more specific allow rule (same command shape, more literal tokens) via /permissions add, or change the deny.";
 	}
+	// No deny rule matched (posture-source deny): a dynamic allow beats the
+	// posture, so the mechanical first candidate is exactly what unblocks it.
 	const first = buildCandidates(toolName, args)[0];
 	if (first === undefined) {
 		return "No rule can allow this call: the command uses shell control, which no remembered allow rule can suppress.";
 	}
 	return `To allow this call, add rule:\n${first.yaml}`;
-}
-
-/** The deciding deny's id for the suggestion message (spec §5.2); falls back to a generic label. */
-function overrideRuleId(command: string, ctx: EngineContext): string {
-	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
-	return (
-		resolveWholeCommandRule(
-			rules.filter(rule => rule.action === "deny"),
-			"bash",
-			{ command },
-		)?.rule.id ?? "a deny rule"
-	);
 }
 
 function defaultTitle(toolName: string, decision: EngineDecision): string {

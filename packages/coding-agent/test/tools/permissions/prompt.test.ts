@@ -881,7 +881,20 @@ describe("promptForDecision with a suggestionsProvider", () => {
 });
 
 describe("renderAllowSuggestion", () => {
-	it("renders the exact allow-rule YAML after the instruction line (non-bash fallback)", () => {
+	it("a posture-source deny suggests the first allow candidate (no deny rule to beat)", () => {
+		const text = renderAllowSuggestion("bash", { command: "git push" }, fakeCtx(tempHome()));
+		expect(text).toContain("To allow this call, add rule:");
+		const yaml = text.slice(
+			text.indexOf("To allow this call, add rule:\n") + "To allow this call, add rule:\n".length,
+		);
+		const rule = normalizeRule(YAML.parse(yaml), "dynamic");
+		expect(rule).not.toBeNull();
+		expect(rule!.tool).toBe("bash");
+		expect(rule!.action).toBe("allow");
+		expect((rule!.match as Record<string, unknown>).command).toBe("git push");
+	});
+
+	it("non-bash posture keeps the first-candidate fallback", () => {
 		const text = renderAllowSuggestion("read", { path: "src/x.ts" }, fakeCtx(tempHome()));
 		expect(text).toContain("To allow this call, add rule:");
 		const yaml = text.slice(
@@ -894,9 +907,17 @@ describe("renderAllowSuggestion", () => {
 		expect((rule!.match as Record<string, unknown>).path).toBe("src/x.ts");
 	});
 
-	it("explains the dead end instead of suggesting a rule for a shell-control bash command", () => {
-		const text = renderAllowSuggestion("bash", { command: "python3 -c'x'" }, fakeCtx(tempHome()));
-		expect(text).toContain("no allow rule can override");
+	it("a shell-control bash command is never given a rule suggestion, even with a deny", () => {
+		// dynamic file: deny bash "python3 *". R1 degrades allow winners on
+		// shell-control commands, so no rule could unblock this call.
+		const home = tempHome();
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: deny-py\n    tool: bash\n    match: { command: 'python3 *' }\n    action: deny\n",
+		);
+		const text = renderAllowSuggestion("bash", { command: "python3 -c'x'" }, fakeCtx(home));
+		expect(text).toContain("No rule can allow this call");
+		expect(text).toContain("shell control");
 		expect(text).not.toContain("To allow this call, add rule:");
 	});
 
@@ -923,6 +944,33 @@ describe("renderAllowSuggestion", () => {
 		);
 		const text = renderAllowSuggestion("bash", { command: "git branch -a | head -20" }, fakeCtx(home));
 		expect(text).toContain("no allow rule can override");
+	});
+
+	it("a non-bash deny tie never suggests a rule that cannot win", () => {
+		// dynamic files: deny read { path: 'src/x.ts' } + allow read { path: 'src/x.ts' } —
+		// equal class and specificity, so deny wins ties.
+		const home = tempHome();
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: deny-read\n    tool: read\n    match: { path: 'src/x.ts' }\n    action: deny\n  - id: allow-read\n    tool: read\n    match: { path: 'src/x.ts' }\n    action: allow\n",
+		);
+		const text = renderAllowSuggestion("read", { path: "src/x.ts" }, fakeCtx(home));
+		expect(text).toContain("no allow rule can override");
+		expect(text).not.toContain("To allow this call, add rule:");
+	});
+
+	it("a non-bash allow that strictly beats the deny is suggested", () => {
+		// dynamic files: deny read { path: 'src/**' } + allow read { path: 'src/x.ts' } —
+		// the exact allow is more specific than the glob deny.
+		const home = tempHome();
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: deny-read-glob\n    tool: read\n    match: { path: 'src/**' }\n    action: deny\n  - id: allow-read-exact\n    tool: read\n    match: { path: 'src/x.ts' }\n    action: allow\n",
+		);
+		const text = renderAllowSuggestion("read", { path: "src/x.ts" }, fakeCtx(home));
+		expect(text).toContain("more specific than");
+		expect(text).toContain("action: allow");
+		expect(text).toContain("deny-read-glob"); // names the deciding deny
 	});
 });
 

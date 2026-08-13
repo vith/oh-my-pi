@@ -93,7 +93,7 @@ export function resolvePosture(settings: Pick<Settings, "get" | "isConfigured">)
 }
 
 /** Legacy `bash.patterns` settings entries as a `legacy`-layer rule list (last in layer tie-break order). */
-function legacyBashPatterns(settings: Pick<Settings, "get" | "isConfigured">): PermissionRule[] {
+export function legacyBashPatterns(settings: Pick<Settings, "get" | "isConfigured">): PermissionRule[] {
 	const raw: unknown = settings.get("bash.patterns");
 	if (!Array.isArray(raw)) return [];
 	const rules: PermissionRule[] = [];
@@ -773,49 +773,66 @@ export interface DenyOverride {
 	specificity: number;
 }
 
+/**
+ * Deny-error suggestion outcome (spec §5.2): whether a deny rule decided, and
+ * the best allow that would strictly beat it.
+ * - `no-deny`: no deny rule matched — a posture-source deny. A dynamic allow
+ *   beats the posture, so callers suggest the mechanical first candidate.
+ * - `dead-end`: a deny decided and no allow strictly beats it (deny wins ties
+ *   at equal class/specificity).
+ * - `override`: the best strictly-beating allow, with the deciding deny.
+ */
+export type DenySuggestion =
+	| { status: "no-deny" }
+	| { status: "dead-end"; deny: PermissionRule }
+	| { status: "override"; deny: PermissionRule; allow: DenyOverride };
+
 const BASH_COMMAND_ARGS = (command: string): Record<string, unknown> => ({ command });
 
+/** Deny-error suggestion for a bash command (spec §5.2): {@link denySuggestion} over the command argument. */
+export function denyOverrideSuggestion(command: string, ctx: EngineContext): DenySuggestion {
+	return denySuggestion("bash", BASH_COMMAND_ARGS(command), ctx);
+}
+
 /**
- * Deny-error override suggestion (spec §5.2): when a deny decides, the best
- * allow-only whole-command rule that strictly beats the best matching deny by
- * class then specificity — the exact rule the user can add to permit this
- * call. Undefined when no allow can win (nothing matches, or every matching
- * allow ties or loses to the deny).
+ * Deny-error suggestion (spec §5.2): when a deny decides, the best allow-only
+ * whole-command match that strictly beats the best matching deny by class then
+ * specificity — the exact rule the user can add to permit this call. See
+ * {@link DenySuggestion} for the three outcomes.
  *
- * The deny to beat is the best match over the deny-only pool, not the overall
- * best match: a more specific allow can win whole-command resolution while a
- * (piece-level) deny still decides the call, and the suggestion must name the
- * allow that would beat that deny.
+ * The rule pool mirrors the runtime decision pool (evaluatePermissionCore):
+ * the legacy `bash.patterns` pool joins the file-backed rules for bash, so the
+ * suggestion judges against the ACTUAL deciding deny, including legacy denies.
+ * Whole-command matching only — a deny that decided a pipeline stage rather
+ * than the whole command is not surfaced here.
  */
-export function denyOverrideSuggestion(command: string, ctx: EngineContext): DenyOverride | undefined {
+export function denySuggestion(toolName: string, args: unknown, ctx: EngineContext): DenySuggestion {
 	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
-	const args = BASH_COMMAND_ARGS(command);
+	const legacy = legacyBashPatterns(ctx.settings);
+	const command = bashCommandArg(args);
+	const legacyAllowActive = toolName === "bash" && command !== undefined && isSinglePiece(command);
+	const pool = [...legacy.filter(rule => rule.action !== "allow" || legacyAllowActive), ...rules];
 	const bestDeny = resolveWholeCommandRule(
-		rules.filter(rule => rule.action === "deny"),
-		"bash",
+		pool.filter(rule => rule.action === "deny"),
+		toolName,
 		args,
 	);
-	if (bestDeny === undefined) return undefined;
+	if (bestDeny === undefined) return { status: "no-deny" };
+	const bestAllow = resolveWholeCommandRule(
+		pool.filter(rule => rule.action === "allow"),
+		toolName,
+		args,
+	);
+	if (bestAllow === undefined) return { status: "dead-end", deny: bestDeny.rule };
 	const classRank = (matchClass: MatchClass): number => (matchClass === "exact-structure" ? 1 : 0);
-	let bestAllow: DenyOverride | undefined;
-	for (const rule of rules) {
-		if (rule.action !== "allow" || !matchRule(rule, "bash", args)) continue;
-		const commandPattern = rule.match.command;
-		if (typeof commandPattern !== "string") continue;
-		const matchClass = matchClassOf(commandPattern, command);
-		const specificity = patternSpecificity("command", commandPattern);
-		const beats =
-			classRank(matchClass) !== classRank(bestDeny.matchClass)
-				? classRank(matchClass) > classRank(bestDeny.matchClass)
-				: specificity > bestDeny.specificity;
-		if (!beats) continue;
-		if (
-			bestAllow === undefined ||
-			classRank(matchClass) > classRank(bestAllow.matchClass) ||
-			(classRank(matchClass) === classRank(bestAllow.matchClass) && specificity > bestAllow.specificity)
-		) {
-			bestAllow = { rule, matchClass, specificity };
-		}
-	}
-	return bestAllow;
+	const beats =
+		classRank(bestAllow.matchClass) !== classRank(bestDeny.matchClass)
+			? classRank(bestAllow.matchClass) > classRank(bestDeny.matchClass)
+			: bestAllow.specificity > bestDeny.specificity;
+	if (!beats) return { status: "dead-end", deny: bestDeny.rule };
+	return {
+		status: "override",
+		deny: bestDeny.rule,
+		allow: { rule: bestAllow.rule, matchClass: bestAllow.matchClass, specificity: bestAllow.specificity },
+	};
 }

@@ -163,11 +163,11 @@ function autoApproveSettings(base: Settings): Pick<Settings, "get" | "isConfigur
  * declarations, curated critical patterns, file rules) names the engine's
  * reason so the blocker is actionable (plan ruling, round 2). Rule-source
  * denies (spec §5.2) and posture-source denies (permissions.default: deny)
- * also carry the allow suggestion: a more-specific whole-command allow beats
- * a general deny rule by class then specificity, and a dynamic allow rule
- * beats the default posture — the model sees the exact YAML to add, or the
- * dead-end text when nothing can win. Tool/curated denies stay
- * suggestion-free: they are absolute.
+ * also carry the allow suggestion: an allow that strictly beats the deciding
+ * deny by class then specificity (deny wins ties) renders its exact YAML, a
+ * deny nothing beats renders the dead end, and a posture deny suggests the
+ * first allow candidate (a dynamic allow beats the default posture). Tool/
+ * curated denies stay suggestion-free: they are absolute.
  */
 function blockedByPolicyError(
 	toolName: string,
