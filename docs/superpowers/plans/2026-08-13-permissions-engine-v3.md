@@ -787,9 +787,17 @@ Constructor `opts`:
 
 Sentinels: `-1` = plain cancel; `-(index + 2)` = edit request for checklist row `index`. `chooseLabel` returns the raw index; `prompt.ts` maps them (Task 6).
 
-- [ ] **Step 6: Parked-approval answer feedback (user UX finding, 2026-08-13)**
+- [ ] **Step 6: Parked-approval UX feedback (user UX findings, 2026-08-13)**
 
-After `promptForDecision` resolves a parked approval in the focused view, the user gets no visible confirmation (the pending entry keeps its "waiting" heading). Add to `permission-controller.ts` `#presentFor`, after `answer(...)`:
+Two gaps in the focused-view answering flow, both fixed in `permission-controller.ts`:
+
+(a) **Waiting notice is not noticeable** — the root notification fires as a default gray info notice and the user missed it for ~25 minutes. Change `#handleParked`'s notify call to pass the `"warning"` type (same mechanism as the migration notices):
+
+```ts
+		this.#deps.ui()?.notify(`Subagent ${agentLabel} is waiting for approval: ${command}`, "warning");
+```
+
+(b) **No answer feedback** — after `promptForDecision` resolves a parked approval, the pending entry keeps its "waiting" heading. Add to `#presentFor`, after `answer(...)`:
 
 ```ts
 			this.#deps.ui()?.notify(
@@ -797,7 +805,7 @@ After `promptForDecision` resolves a parked approval in the focused view, the us
 			);
 ```
 
-Test in `bubble.test.ts` (the "notifies the root … routes the focused-view answer" test): after the parked promise resolves, assert `h.notify` was called with a message containing `Approval answered` and the resolved policy.
+Tests in `bubble.test.ts`: (a) the "notifies the root …" test asserts `h.notify` was called with the waiting message and `"warning"` as the type; (b) after the parked promise resolves, assert `h.notify` was called with a message containing `Approval answered` and the resolved policy.
 
 - [ ] **Step 7: No-default-selection mode (user UX finding, 2026-08-13, controller-ruled)**
 
