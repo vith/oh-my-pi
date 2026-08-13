@@ -255,6 +255,13 @@ describe("evaluatePermission", () => {
 describe("sub-command evaluation", () => {
 	const allow = (match: string) =>
 		ctx({ "permissions.default": "allow", "bash.patterns": [{ match, approval: "allow" }] });
+	// EngineContext with a temp home so the dynamic layer file
+	// (<home>/.omp/agent/permissions.dynamic.yml) stays hermetic per test.
+	const dynamicCtx = (dir: string) => ({
+		settings: Settings.isolated({ "permissions.default": "prompt" }),
+		cwd: "/tmp/perm-test",
+		home: dir,
+	});
 
 	it("an allow rule stands when every substitution sub-command is allowed", () => {
 		// The user's model: `echo *` is allowed, so `echo pre-$(date +%s)` is
@@ -332,6 +339,57 @@ describe("sub-command evaluation", () => {
 		for (let i = 0; i < 9; i++) deep = `echo $(${deep})`;
 		const nested = evaluateBashCommand(deep, allow("echo *"));
 		expect(nested.policy).toBe("prompt");
+	});
+
+	test("git log * rule covers git log | head via safe-consumer exemption", () => {
+		// dynamic rule file: allow bash "git log *" (layer dynamic)
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: allow-git\n    tool: bash\n    match: { command: 'git log *' }\n    action: allow\n",
+			);
+			const d = evaluateBashCommand("git log -n 5 | head -1", dynamicCtx(dir));
+			expect(d.policy).toBe("allow");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("safe-consumer exemption never beats a matching deny", () => {
+		// dynamic rule file: deny bash "* | head *". The piece tokenizer
+		// collapses the space after `|` ("git log -n 5 |head -1"), so the
+		// pattern must use the normalized spacing to match a real pipeline.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: deny-head\n    tool: bash\n    match: { command: '* |head *' }\n    action: deny\n",
+			);
+			const d = evaluateBashCommand("git log -n 5 | head -1", dynamicCtx(dir));
+			expect(d.policy).toBe("deny");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("rule-allowed stage piped to sh still prompts: sh is neither safe nor matched", () => {
+		// dynamic rule file: allow bash "echo *". NOT `curl … | sh`: the
+		// curated critical set hard-denies remote-fetch-then-execute on the raw
+		// command, so that shape can never reach the stage loop. `echo data |
+		// sh` exercises the same §4.3 case — allowed first stage, `sh` stage
+		// neither safe nor matched — without tripping a curated deny.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: allow-echo\n    tool: bash\n    match: { command: 'echo *' }\n    action: allow\n",
+			);
+			const d = evaluateBashCommand("echo data | sh", dynamicCtx(dir));
+			expect(d.policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
 	});
 });
 

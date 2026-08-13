@@ -3,7 +3,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import { type ApprovalPolicy, getToolDecision, normalizePolicy, type ResolvedApproval } from "../approval";
 import { bashApprovalPatternToRegExp, normalizeBashApprovalPattern } from "../bash";
-import { CURATED_ALLOW_TOOLS, matchCuratedDeny } from "./curated";
+import { CURATED_ALLOW_TOOLS, isSafeConsumerStage, matchCuratedDeny } from "./curated";
 import { loadRuleLayers, type PermissionRule, type RuleLayer } from "./rules";
 import { extractSubCommands, isPipeline, isSinglePiece, parseCommand, type ShellPiece } from "./split";
 
@@ -617,6 +617,11 @@ function evaluateBashPiece(
 				},
 				source: subDecision.source,
 			};
+		}
+		if (subDecision.policy === "prompt" && subDecision.source === "posture" && isSafeConsumerStage(sub)) {
+			// §4.3 safe-consumer exemption: no rule touched this stage, and it is a
+			// curated pure filter — treat it as allowed.
+			continue;
 		}
 		if (subDecision.policy === "prompt" && sawPrompt === undefined) {
 			sawPrompt = {
