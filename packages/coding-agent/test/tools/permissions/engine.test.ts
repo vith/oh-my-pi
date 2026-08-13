@@ -388,6 +388,17 @@ describe("match classes and specificity (spec §3.1)", () => {
 		expect(resolveWholeCommandRule([project, dynamic], "bash", args)?.rule.id).toBe("dyn");
 	});
 
+	test("layer order also breaks prompt-vs-allow ties (dynamic allow beats legacy prompt)", () => {
+		// Spec §3.1: ties resolve deny-wins, then higher layer — regardless of
+		// action. A legacy prompt pattern must not beat a dynamic allow of the
+		// same shape merely because the legacy pool is listed first.
+		const legacyPrompt = rule({ id: "lp", layer: "legacy", action: "prompt", match: { command: "git log *" } });
+		const dynamicAllow = rule({ id: "da", layer: "dynamic", match: { command: "git log *" } });
+		const args = { command: "git log -n 5" };
+		expect(resolveWholeCommandRule([legacyPrompt, dynamicAllow], "bash", args)?.rule.id).toBe("da");
+		expect(resolveWholeCommandRule([dynamicAllow, legacyPrompt], "bash", args)?.rule.id).toBe("da");
+	});
+
 	test("covering allow matches piped command; unrelated command has no match", () => {
 		const allow = rule({ id: "a", match: { command: "git log *" } });
 		expect(resolveWholeCommandRule([allow], "bash", { command: "git log -n 5 | head -1" })?.rule.id).toBe("a");

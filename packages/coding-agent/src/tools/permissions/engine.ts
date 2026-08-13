@@ -268,7 +268,9 @@ export function resolveWholeCommandRule(
 					? candidate.specificity > best.specificity
 					: candidate.rule.action === best.rule.action
 						? layerRank(candidate.rule) < layerRank(best.rule)
-						: candidate.rule.action === "deny"; // deny wins ties
+						: candidate.rule.action === "deny" || best.rule.action === "deny"
+							? candidate.rule.action === "deny" // deny wins ties
+							: layerRank(candidate.rule) < layerRank(best.rule); // layer wins non-deny ties
 		if (better) best = candidate;
 	}
 	return best;
