@@ -787,12 +787,24 @@ Constructor `opts`:
 
 Sentinels: `-1` = plain cancel; `-(index + 2)` = edit request for checklist row `index`. `chooseLabel` returns the raw index; `prompt.ts` maps them (Task 6).
 
-- [ ] **Step 6: Run tests and `bun check`**
+- [ ] **Step 6: Parked-approval answer feedback (user UX finding, 2026-08-13)**
 
-Run: `bun test test/modes/components/permission-dialog.test.ts` and `bun check`
+After `promptForDecision` resolves a parked approval in the focused view, the user gets no visible confirmation (the pending entry keeps its "waiting" heading). Add to `permission-controller.ts` `#presentFor`, after `answer(...)`:
+
+```ts
+			this.#deps.ui()?.notify(
+				`Approval answered: ${resolution.policy === "allow" ? "allowed" : "denied"} — ${agentLabel} resumed`,
+			);
+```
+
+Test in `bubble.test.ts` (the "notifies the root … routes the focused-view answer" test): after the parked promise resolves, assert `h.notify` was called with a message containing `Approval answered` and the resolved policy.
+
+- [ ] **Step 7: Run tests and `bun check`**
+
+Run: `bun test test/modes/components/permission-dialog.test.ts test/tools/permissions/bubble.test.ts` and `bun check`
 Expected: PASS, no type errors. Reconcile existing component tests whose assertions depended on the old plain-string line rendering (they should still pass — old strings are a subset of the new union).
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add src/modes/components/permission-dialog.ts src/modes/controllers/extension-ui-controller.ts src/extensibility/extensions/types.ts test/modes/components/permission-dialog.test.ts
