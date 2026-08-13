@@ -843,7 +843,7 @@ Spec §5.1: `promptForDecision` shows ONE dialog for the whole call. Actions: `A
 - Consumes: `promptUnit`, `chooseLabel`, `buildDialogLines` (Task 3), `buildCandidates`, `PromptResolution`, `evaluateBashCommand`.
 - Produces:
   - `const ALLOW_ALL_ONCE = "Allow all pending once"` / `ALLOW_ALL_REMEMBER = "Allow all & remember…"` / `DENY_ALL = "Deny all pending"` / `DRILL_DOWN = "Decide per piece →"`
-  - `export async function rememberCompound(ui, toolName, pendingPieces: PieceEvaluation[], action: "allow" | "deny", ctx): Promise<Omit<PermissionRule, "layer"> | undefined>` — Task 6; Task 5 calls it (defined next task — implement a stub returning `undefined` that Task 6 replaces, or implement Task 5 and 6 in one task; the plan keeps them separate: Task 5's remember branches call `rememberCompound` and Task 6 implements it).
+  - `export async function rememberCompound(ui: ExtensionUIContext, pendingPieces: PieceEvaluation[], action: "allow" | "deny", ctx: EngineContext): Promise<Omit<PermissionRule, "layer"> | undefined>` — Task 6; Task 5 calls it with this exact 4-arg shape (defined next task — implement a minimal exported version in Task 5 so the flow is testable; Task 6 replaces it with the full checklist).
   - `function drillDownPieces(ui, toolName, pendingPieces, decision, ctx, opts): Promise<PromptResolution>` (piece selector → per-piece `promptUnit`)
 
 - [ ] **Step 1: Write the failing tests**
