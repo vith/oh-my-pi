@@ -357,19 +357,55 @@ describe("sub-command evaluation", () => {
 	});
 
 	test("safe-consumer exemption never beats a matching deny", () => {
-		// dynamic rule file: deny bash "* | head *". The piece tokenizer
-		// collapses the space after `|` ("git log -n 5 |head -1"), so the
-		// pattern must use the normalized spacing to match a real pipeline.
+		// dynamic rule file: allow bash "git log *" + deny bash "head *". The
+		// piece is rule-allowed, so the sub-command loop runs; the loop's deny
+		// branch must beat the safe-consumer exemption for the `head -1` stage.
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
 		try {
 			write(
 				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
-				"rules:\n  - id: deny-head\n    tool: bash\n    match: { command: '* |head *' }\n    action: deny\n",
+				"rules:\n  - id: allow-git\n    tool: bash\n    match: { command: 'git log *' }\n    action: allow\n  - id: deny-head\n    tool: bash\n    match: { command: 'head *' }\n    action: deny\n",
 			);
 			const d = evaluateBashCommand("git log -n 5 | head -1", dynamicCtx(dir));
 			expect(d.policy).toBe("deny");
 		} finally {
 			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("safe-consumer exemption only covers stages no rule touched", () => {
+		// dynamic rule file: allow bash "git log *" + prompt bash "head *". A
+		// prompt-action rule touches the stage (source "rule"), so the
+		// exemption — which requires source "posture" — must not apply.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: allow-git\n    tool: bash\n    match: { command: 'git log *' }\n    action: allow\n  - id: prompt-head\n    tool: bash\n    match: { command: 'head *' }\n    action: prompt\n",
+			);
+			const d = evaluateBashCommand("git log -n 5 | head -1", dynamicCtx(dir));
+			expect(d.policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("exemption never carries redirections or command substitutions", () => {
+		// dynamic rule file: allow bash "git log *". A `head` stage with a
+		// redirect or substitution is not a pure filter — the exemption must
+		// not let unanalyzed write/exec content through (review round 1).
+		for (const command of ["git log -n 5 | head -1 > /tmp/out", "git log -n 5 | head -1 $(touch /tmp/x)"]) {
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+			try {
+				write(
+					path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+					"rules:\n  - id: allow-git\n    tool: bash\n    match: { command: 'git log *' }\n    action: allow\n",
+				);
+				const d = evaluateBashCommand(command, dynamicCtx(dir));
+				expect(d.policy).toBe("prompt");
+			} finally {
+				removeSyncWithRetries(dir);
+			}
 		}
 	});
 

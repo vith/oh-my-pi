@@ -47,4 +47,20 @@ describe("safe-consumer stages (spec §3.4/§4.3)", () => {
 		expect(isSafeConsumerStage("awk '{print}'")).toBe(false);
 		expect(isSafeConsumerStage("python3 -c 'x'")).toBe(false);
 	});
+
+	test("shell control and write flags disqualify the exemption", () => {
+		// Redirections, substitutions, and control operators would smuggle
+		// unanalyzed write/exec content past the exemption (review round 1).
+		expect(isSafeConsumerStage("head -1 > /tmp/out")).toBe(false);
+		expect(isSafeConsumerStage("head -1 < seed")).toBe(false);
+		expect(isSafeConsumerStage("head -1 $(touch /tmp/x)")).toBe(false);
+		expect(isSafeConsumerStage("head -1 `touch /tmp/x`")).toBe(false);
+		expect(isSafeConsumerStage("head -1; echo hi")).toBe(false);
+		expect(isSafeConsumerStage("head -1 & echo hi")).toBe(false);
+		// Per-command write flags: sort -o / --output= write output.
+		expect(isSafeConsumerStage("sort -o /tmp/out")).toBe(false);
+		expect(isSafeConsumerStage("sort --output=/tmp/out")).toBe(false);
+		// grep -o is read-only and must stay exempt.
+		expect(isSafeConsumerStage("grep -o foo")).toBe(true);
+	});
 });

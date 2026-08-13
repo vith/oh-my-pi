@@ -65,5 +65,23 @@ export const SAFE_CONSUMER_COMMANDS: ReadonlySet<string> = new Set([
 export function isSafeConsumerStage(stage: string): boolean {
 	const token = stage.trim().split(/\s+/u)[0] ?? "";
 	const base = token.includes("/") ? token.slice(token.lastIndexOf("/") + 1) : token;
-	return SAFE_CONSUMER_COMMANDS.has(base);
+	if (!SAFE_CONSUMER_COMMANDS.has(base)) return false;
+	// §3.4 conservative scan: redirections, command substitutions, and shell
+	// control would smuggle unanalyzed write/exec content past the exemption,
+	// so any marker disqualifies the stage. Over-rejection only over-prompts,
+	// which is safe. (Inlined here rather than importing the engine's shell-
+	// control helper — curated.ts is imported by engine.ts, so that would be
+	// a circular import.)
+	if (UNSAFE_STAGE_MARKERS.some(marker => stage.includes(marker))) return false;
+	// Per-command write flags: sort -o / --output= write their output.
+	if ((STAGE_WRITE_FLAGS[base] ?? []).some(flag => stage.includes(flag))) return false;
+	return true;
 }
+
+/** Markers that make a stage unsafe to exempt: redirections, substitutions, control. */
+const UNSAFE_STAGE_MARKERS: readonly string[] = [">", "<", "$(", "`", ";", "&"];
+
+/** Per-command write flags that disqualify an otherwise-safe consumer (`grep -o` is read-only and stays allowed). */
+const STAGE_WRITE_FLAGS: Readonly<Record<string, readonly string[]>> = {
+	sort: ["-o", "--output="],
+};
