@@ -77,7 +77,6 @@ const APPROVE = "Approve";
 const ALLOW_ALL_ONCE = "Allow all pending once";
 const ALLOW_ALL_REMEMBER = "Allow all & remember…";
 const DENY_ALL = "Deny all pending";
-const DENY_ALL_REMEMBER = "Deny all & remember…";
 const DRILL_DOWN = "Decide per piece →";
 
 /**
@@ -575,16 +574,23 @@ async function drillDownPieces(
 	const remaining = [...pendingPieces];
 	while (remaining.length > 0) {
 		const picked = await chooseLabel(ui, "Decide per piece", ["Back", ...remaining.map(piece => piece.text)]);
-		if (picked === undefined || picked === "Back") break; // remaining pieces stay denied
+		if (picked === undefined || picked === "Back") break; // cancel — undecided pieces stay denied
 		const index = remaining.findIndex(piece => piece.text === picked);
 		if (index < 0) break;
 		const [piece] = remaining.splice(index, 1);
 		const resolution = await promptUnit(ui, "bash", { command: piece.text }, decision, ctx, opts, [piece]);
-		if (resolution.policy === "deny" && resolution.remembered === undefined) {
-			// fail closed: a denied piece denies the whole call
-			return { policy: "deny" };
+		if (resolution.policy === "deny") {
+			// fail closed: a denied piece denies the whole call, carrying any
+			// rule remembered for it
+			return resolution.remembered !== undefined
+				? { policy: "deny", remembered: resolution.remembered }
+				: { policy: "deny" };
 		}
 		if (resolution.remembered !== undefined) remembered = resolution.remembered;
+	}
+	if (remaining.length > 0) {
+		// Back/esc left pieces undecided — cancel denies the whole call (§4.3).
+		return { policy: "deny" };
 	}
 	return remembered !== undefined ? { policy: "allow", remembered } : { policy: "allow" };
 }
@@ -618,8 +624,13 @@ export async function promptForDecision(
 	}
 	const pendingPieces = (pieces ?? []).filter(piece => piece.policy === "prompt");
 
-	// Single-unit flows: PTY, non-bash, forced prompts, or nothing pending.
-	if (ptyCall || pieces === undefined || pieces.length <= 1 || pendingPieces.length === 0) {
+	// Every piece is already decided — nothing to prompt for.
+	if (pendingPieces.length === 0) {
+		return { policy: "allow" };
+	}
+
+	// Single-unit flows: PTY, non-bash, forced prompts, or one piece.
+	if (ptyCall || opts.includeCandidates === false || pieces === undefined || pieces.length <= 1) {
 		return promptUnit(ui, toolName, args, decision, ctx, opts, pieces);
 	}
 
@@ -652,10 +663,6 @@ export async function promptForDecision(
 		case ALLOW_ALL_REMEMBER: {
 			const rule = await rememberCompound(ui, pendingPieces, "allow", ctx);
 			return rule === undefined ? { policy: "deny" } : { policy: "allow", remembered: rule };
-		}
-		case DENY_ALL_REMEMBER: {
-			const rule = await rememberCompound(ui, pendingPieces, "deny", ctx);
-			return rule === undefined ? { policy: "deny" } : { policy: "deny", remembered: rule };
 		}
 		case DRILL_DOWN:
 			return drillDownPieces(ui, pendingPieces, decision, ctx, opts);

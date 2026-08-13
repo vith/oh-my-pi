@@ -467,6 +467,65 @@ describe("promptForDecision", () => {
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toContain("git *");
 	});
+
+	it("drill-down Back with pieces left undecided denies the call", async () => {
+		const ctx = fakeCtx(tempHome());
+		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([3, 0], requests); // drill-down → Back (index 0)
+		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
+		expect(res.policy).toBe("deny");
+		expect(res.remembered).toBeUndefined();
+		expect(requests).toHaveLength(2);
+		expect(requests[1]?.title).toBe("Decide per piece");
+	});
+
+	it("Deny & remember… on a piece denies the whole call and still writes the rule", async () => {
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s"), pendingPiece("echo hi")] });
+		// Compound (3 = drill-down) → piece selector (1 = "git status -s";
+		// 0 = Back) → per-piece dialog (3 = "Deny & remember…") → deny
+		// candidate scope (0 = "Deny exact: git status -s").
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([3, 1, 3, 0], requests);
+		const res = await promptForDecision(ui, "bash", { command: "git status -s && echo hi" }, decision, ctx);
+		expect(res.policy).toBe("deny");
+		expect(res.remembered?.match).toEqual({ command: "git status -s" });
+		expect(res.remembered?.action).toBe("deny");
+		expect(requests).toHaveLength(4);
+		expect(requests[3]?.options.map(option => option.label)).toContain("Deny exact: git status -s");
+		const file = ruleFiles(ctx.cwd, home).dynamic;
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		expect(doc.rules.some(rule => (rule.match as Record<string, unknown>).command === "git status -s")).toBe(true);
+	});
+
+	it("forced prompts with multiple pieces stay a single-unit binary dialog", async () => {
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Approve
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
+			includeCandidates: false,
+		});
+		expect(res.policy).toBe("allow");
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.options.map(option => option.label)).toEqual(["Approve", "Deny"]);
+		expect(requests[0]?.suggestions).toBeUndefined();
+	});
+
+	it("all pieces already decided allow without a dialog", async () => {
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests);
+		const decision = fakeDecision({
+			pieces: [
+				{ text: "echo a", policy: "allow" },
+				{ text: "echo b", policy: "allow" },
+			],
+		});
+		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()));
+		expect(res.policy).toBe("allow");
+		expect(requests).toHaveLength(0);
+	});
 });
 
 describe("promptForDecision with a suggestionsProvider", () => {
