@@ -881,23 +881,48 @@ describe("promptForDecision with a suggestionsProvider", () => {
 });
 
 describe("renderAllowSuggestion", () => {
-	it("renders the exact allow-rule YAML after the instruction line", () => {
-		const text = renderAllowSuggestion("bash", { command: "git push" });
+	it("renders the exact allow-rule YAML after the instruction line (non-bash fallback)", () => {
+		const text = renderAllowSuggestion("read", { path: "src/x.ts" }, fakeCtx(tempHome()));
 		expect(text).toContain("To allow this call, add rule:");
 		const yaml = text.slice(
 			text.indexOf("To allow this call, add rule:\n") + "To allow this call, add rule:\n".length,
 		);
 		const rule = normalizeRule(YAML.parse(yaml), "dynamic");
 		expect(rule).not.toBeNull();
-		expect(rule!.tool).toBe("bash");
+		expect(rule!.tool).toBe("read");
 		expect(rule!.action).toBe("allow");
-		expect((rule!.match as Record<string, unknown>).command).toBe("git push");
+		expect((rule!.match as Record<string, unknown>).path).toBe("src/x.ts");
 	});
 
-	it("explains that no rule can allow a shell-control command", () => {
-		const text = renderAllowSuggestion("bash", { command: "python3 -c'x'" });
-		expect(text).toContain("No rule can allow this call");
-		expect(text).toContain("shell control");
+	it("explains the dead end instead of suggesting a rule for a shell-control bash command", () => {
+		const text = renderAllowSuggestion("bash", { command: "python3 -c'x'" }, fakeCtx(tempHome()));
+		expect(text).toContain("no allow rule can override");
+		expect(text).not.toContain("To allow this call, add rule:");
+	});
+
+	it("includes the beating rule YAML and why", () => {
+		// dynamic files: deny bash "* | head *" + allow bash "git branch * | head *"
+		const home = tempHome();
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * | head *' }\n    action: allow\n",
+		);
+		const text = renderAllowSuggestion("bash", { command: "git branch -a | head -20" }, fakeCtx(home));
+		expect(text).toContain("git branch * | head *");
+		expect(text).toContain("more specific than");
+		expect(text).toContain("action: allow");
+		expect(text).toContain("deny-pipe"); // names the deciding deny
+	});
+
+	it("with no override explains the dead end", () => {
+		// dynamic file: deny bash "* | head *" only
+		const home = tempHome();
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n",
+		);
+		const text = renderAllowSuggestion("bash", { command: "git branch -a | head -20" }, fakeCtx(home));
+		expect(text).toContain("no allow rule can override");
 	});
 });
 

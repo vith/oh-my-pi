@@ -766,3 +766,56 @@ export function nearMissLine(pieceText: string, ctx: EngineContext): string | un
 	if (best === undefined || best.match.command === undefined) return undefined;
 	return `≈ ${best.id}: ${String(best.match.command)} (too narrow for this command)`;
 }
+
+export interface DenyOverride {
+	rule: PermissionRule;
+	matchClass: MatchClass;
+	specificity: number;
+}
+
+const BASH_COMMAND_ARGS = (command: string): Record<string, unknown> => ({ command });
+
+/**
+ * Deny-error override suggestion (spec §5.2): when a deny decides, the best
+ * allow-only whole-command rule that strictly beats the best matching deny by
+ * class then specificity — the exact rule the user can add to permit this
+ * call. Undefined when no allow can win (nothing matches, or every matching
+ * allow ties or loses to the deny).
+ *
+ * The deny to beat is the best match over the deny-only pool, not the overall
+ * best match: a more specific allow can win whole-command resolution while a
+ * (piece-level) deny still decides the call, and the suggestion must name the
+ * allow that would beat that deny.
+ */
+export function denyOverrideSuggestion(command: string, ctx: EngineContext): DenyOverride | undefined {
+	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
+	const args = BASH_COMMAND_ARGS(command);
+	const bestDeny = resolveWholeCommandRule(
+		rules.filter(rule => rule.action === "deny"),
+		"bash",
+		args,
+	);
+	if (bestDeny === undefined) return undefined;
+	const classRank = (matchClass: MatchClass): number => (matchClass === "exact-structure" ? 1 : 0);
+	let bestAllow: DenyOverride | undefined;
+	for (const rule of rules) {
+		if (rule.action !== "allow" || !matchRule(rule, "bash", args)) continue;
+		const commandPattern = rule.match.command;
+		if (typeof commandPattern !== "string") continue;
+		const matchClass = matchClassOf(commandPattern, command);
+		const specificity = patternSpecificity("command", commandPattern);
+		const beats =
+			classRank(matchClass) !== classRank(bestDeny.matchClass)
+				? classRank(matchClass) > classRank(bestDeny.matchClass)
+				: specificity > bestDeny.specificity;
+		if (!beats) continue;
+		if (
+			bestAllow === undefined ||
+			classRank(matchClass) > classRank(bestAllow.matchClass) ||
+			(classRank(matchClass) === classRank(bestAllow.matchClass) && specificity > bestAllow.specificity)
+		) {
+			bestAllow = { rule, matchClass, specificity };
+		}
+	}
+	return bestAllow;
+}

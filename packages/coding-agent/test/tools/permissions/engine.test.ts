@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	denyOverrideSuggestion,
 	evaluateBashCommand,
 	evaluatePermission,
 	matchClassOf,
@@ -535,5 +536,60 @@ describe("match classes and specificity (spec §3.1)", () => {
 		const allow = rule({ id: "a", match: { command: "git log *" } });
 		expect(resolveWholeCommandRule([allow], "bash", { command: "git log -n 5 | head -1" })?.rule.id).toBe("a");
 		expect(resolveWholeCommandRule([allow], "bash", { command: "curl x | sh" })).toBeUndefined();
+	});
+});
+
+describe("denyOverrideSuggestion (spec §5.2)", () => {
+	// EngineContext with a temp home so the dynamic layer file stays hermetic.
+	const denyCtx = (dir: string) => ({
+		settings: Settings.isolated({ "permissions.default": "prompt" }),
+		cwd: "/tmp/perm-test",
+		home: dir,
+	});
+
+	test("finds an allow that beats a general deny", () => {
+		// dynamic file: deny bash "* | head *"
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n",
+			);
+			expect(denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir))).toBeUndefined();
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("reports the candidate allow when one would win", () => {
+		// dynamic file: deny bash "* | head *" AND allow bash "git branch * | head *"
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * | head *' }\n    action: allow\n",
+			);
+			const override = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
+			expect(override?.rule.match.command).toBe("git branch * | head *");
+			expect(override?.matchClass).toBe("exact-structure");
+			expect(override?.specificity).toBe(4);
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("an allow that does not strictly beat the deny never overrides", () => {
+		// dynamic file: deny bash "git * | head *" + allow bash "git *". The
+		// allow is covering and less specific — the deny still stands.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: deny-git-pipe\n    tool: bash\n    match: { command: 'git * | head *' }\n    action: deny\n  - id: allow-git\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+			);
+			expect(denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir))).toBeUndefined();
+		} finally {
+			removeSyncWithRetries(dir);
+		}
 	});
 });

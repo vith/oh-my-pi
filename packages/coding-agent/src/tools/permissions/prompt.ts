@@ -26,14 +26,16 @@ import type {
 } from "../../extensibility/extensions/types";
 import { CURATED_ALLOW_TOOLS, isSafeConsumerStage } from "./curated";
 import {
+	denyOverrideSuggestion,
 	type EngineContext,
 	type EngineDecision,
 	evaluateBashCommand,
 	hasBashApprovalShellControl,
 	nearMissLine,
 	type PieceEvaluation,
+	resolveWholeCommandRule,
 } from "./engine";
-import { type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
+import { loadRuleLayers, type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
 import { extractSubCommands } from "./split";
 import type { Suggestion } from "./suggest";
 
@@ -263,17 +265,44 @@ export function buildCandidates(toolName: string, args: unknown, pieces?: PieceE
 }
 
 /**
- * The model-visible allow suggestion for a denied call (spec §5.2): the exact
- * YAML of the first allow candidate, so the model can negotiate in chat.
- * Shell-control bash commands have no allow candidates — no rule can suppress
- * their prompt — so the suggestion says so instead of emitting a broken rule.
+ * The model-visible allow suggestion for a denied call (spec §5.2). Bash
+ * commands first ask the engine for the best allow that strictly beats the
+ * deciding deny (class, then specificity): when one exists the suggestion
+ * names the deny and renders the exact YAML to add; otherwise it explains
+ * the dead end instead of emitting a rule that cannot win. Non-bash calls
+ * keep the mechanical first-candidate YAML; shell-control commands have no
+ * allow candidates, so the fallback says no rule can suppress them.
  */
-export function renderAllowSuggestion(toolName: string, args: unknown): string {
+export function renderAllowSuggestion(toolName: string, args: unknown, ctx: EngineContext): string {
+	const command = argString(args, "command");
+	if (toolName === "bash" && command !== undefined && command.length > 0) {
+		const override = denyOverrideSuggestion(command, ctx);
+		if (override !== undefined) {
+			const rule = { ...override.rule } as Omit<PermissionRule, "layer">;
+			return (
+				`This call is denied by ${overrideRuleId(command, ctx)}. To permit it, add this rule ` +
+				`(more specific than the deny, class ${override.matchClass}):\n${renderCandidateYaml(rule)}`
+			);
+		}
+		return "This call is denied, and no allow rule can override the matching deny. Add a more specific allow rule (same command shape, more literal tokens) via /permissions add, or change the deny.";
+	}
 	const first = buildCandidates(toolName, args)[0];
 	if (first === undefined) {
 		return "No rule can allow this call: the command uses shell control, which no remembered allow rule can suppress.";
 	}
 	return `To allow this call, add rule:\n${first.yaml}`;
+}
+
+/** The deciding deny's id for the suggestion message (spec §5.2); falls back to a generic label. */
+function overrideRuleId(command: string, ctx: EngineContext): string {
+	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
+	return (
+		resolveWholeCommandRule(
+			rules.filter(rule => rule.action === "deny"),
+			"bash",
+			{ command },
+		)?.rule.id ?? "a deny rule"
+	);
 }
 
 function defaultTitle(toolName: string, decision: EngineDecision): string {
