@@ -283,7 +283,12 @@ export class PermissionDialogComponent extends Container {
 			const style = line.style ?? "muted";
 			const styleColor =
 				style === "accent" ? "accent" : style === "text" ? "text" : style === "allowed" ? "muted" : "dim";
-			const segments = this.#expanded ? line.segments : truncateSegments(line.segments, available);
+			// Reserve the status (plus its mandatory one-space gap) inside
+			// `available` so a truncated line plus status stays on ONE row,
+			// right-aligned at the ellipsis.
+			const statusLength = line.status?.text.length ?? 0;
+			const budget = statusLength > 0 ? Math.max(0, available - statusLength - 1) : available;
+			const segments = this.#expanded ? line.segments : truncateSegments(line.segments, budget);
 			const plain = segments.map(segment => segment.text).join("");
 			let text = "";
 			for (const segment of segments) {

@@ -266,6 +266,23 @@ describe("PermissionDialogComponent", () => {
 		expect(options[0]?.checked).toBe(false);
 	});
 
+	it("keeps a truncated line with a status on one row (status after the ellipsis)", () => {
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[{ segments: [{ text: "y".repeat(200) }], status: { text: "no rule" } }],
+			[{ label: "Allow once" }],
+			() => {},
+			() => {},
+		);
+		const rows = render(component).split("\n");
+		const ellipsisRow = rows.find(row => row.includes("…"));
+		expect(ellipsisRow).toBeDefined();
+		expect(ellipsisRow!.trimEnd().endsWith("… no rule")).toBe(true);
+		// The status is not wrapped onto its own second row (the help line also
+		// contains "no rule"; only the line row ends with the status).
+		expect(rows.filter(row => row.trimEnd().endsWith("no rule"))).toHaveLength(1);
+	});
+
 	it("l toggles line truncation; truncated lines end with …", () => {
 		const longLine = "x".repeat(200);
 		const component = new PermissionDialogComponent(
@@ -317,6 +334,20 @@ describe("PermissionDialogComponent", () => {
 		);
 		plain.handleInput("e");
 		expect(unedited).toEqual([]);
+
+		// No selection (no initialIndex): e must not fire — an edit sentinel
+		// for row -1 would collide with the plain-cancel sentinel.
+		const noSelectionEdited: number[] = [];
+		const noSelection = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }, { label: "Deny" }],
+			() => {},
+			() => {},
+			{ checklist: true, allowEdit: true, onEdit: index => noSelectionEdited.push(index) },
+		);
+		noSelection.handleInput("e");
+		expect(noSelectionEdited).toEqual([]);
 	});
 
 	it("has no selected row by default: no highlight and enter is a no-op until navigation", () => {
