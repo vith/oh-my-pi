@@ -526,6 +526,24 @@ describe("promptForDecision", () => {
 		expect(res.policy).toBe("allow");
 		expect(requests).toHaveLength(0);
 	});
+
+	it("non-bash tools without pieces still show the dialog", async () => {
+		// Non-bash decisions carry no pieces; the zero-pending early return
+		// must not swallow them (provider-safety gates and parked approvals
+		// rely on the dialog appearing).
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Allow once
+		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
+		const res = await promptForDecision(ui, "write", { path: "src/x.ts" }, decision, fakeCtx(tempHome()));
+		expect(res.policy).toBe("allow");
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.options.map(option => option.label)).toEqual([
+			"Allow once",
+			"Allow & remember…",
+			"Deny",
+			"Deny & remember…",
+		]);
+	});
 });
 
 describe("promptForDecision with a suggestionsProvider", () => {

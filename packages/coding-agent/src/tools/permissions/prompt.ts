@@ -624,8 +624,10 @@ export async function promptForDecision(
 	}
 	const pendingPieces = (pieces ?? []).filter(piece => piece.policy === "prompt");
 
-	// Every piece is already decided — nothing to prompt for.
-	if (pendingPieces.length === 0) {
+	// Every piece is already decided — nothing to prompt for. Only bash
+	// decisions carry pieces; non-bash tools (pieces undefined) must still
+	// dialog below.
+	if (pieces !== undefined && pendingPieces.length === 0) {
 		return { policy: "allow" };
 	}
 
