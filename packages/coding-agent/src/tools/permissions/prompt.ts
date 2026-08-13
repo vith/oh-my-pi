@@ -1,11 +1,17 @@
 /**
  * Approval prompt flow with rule candidates (spec §5).
  *
- * Replaces the binary Approve/Deny prompt: per pending piece (sequential, in
- * command order) the user picks from Allow once / Allow & remember… / Deny /
- * Deny & remember…, then a scope-level choice of candidate rules (exact,
- * pattern, tool-wide) that preview the exact YAML they write. Remembering
- * writes a dynamic rule (`writeDynamicRule` into the dynamic layer file).
+ * Replaces the binary Approve/Deny prompt: bash calls with several pieces show
+ * ONE compound dialog for the whole call — Allow all pending once / Allow all
+ * & remember… / Deny all pending / Decide per piece → — with a per-piece
+ * drill-down (piece selector, then the single-unit prompt for that piece; a
+ * Deny once on a piece denies the whole call, undecided remainders fail
+ * closed to deny). PTY calls, non-bash calls, forced prompts, and single-piece
+ * calls keep the single-unit flow: per pending piece the user picks from
+ * Allow once / Allow & remember… / Deny / Deny & remember…, then a scope-level
+ * choice of candidate rules (exact, pattern, tool-wide) that preview the exact
+ * YAML they write. Remembering writes a dynamic rule (`writeDynamicRule` into
+ * the dynamic layer file).
  *
  * PTY calls (spec §4.3) cannot be execution-split: they prompt once for the
  * whole command, with candidates scoped to the whole command text.
@@ -66,6 +72,13 @@ const ALLOW_REMEMBER = "Allow & remember…";
 const DENY = "Deny";
 const DENY_REMEMBER = "Deny & remember…";
 const APPROVE = "Approve";
+
+/** v3 compound-dialog actions (spec §5.1): one dialog for the whole call. */
+const ALLOW_ALL_ONCE = "Allow all pending once";
+const ALLOW_ALL_REMEMBER = "Allow all & remember…";
+const DENY_ALL = "Deny all pending";
+const DENY_ALL_REMEMBER = "Deny all & remember…";
+const DRILL_DOWN = "Decide per piece →";
 
 /**
  * Dialog note shown when a bash command's remember options are suppressed:
@@ -498,13 +511,93 @@ async function promptUnit(
 }
 
 /**
+ * Compound remember dialog (spec §5.1): per-piece first-token glob checklist.
+ *
+ * Task 5 ships a minimal working version (checklist with the write option, no
+ * `e`-edit/`Custom…` rows) so the compound flow is testable end-to-end; Task 6
+ * replaces it with the full dialog (edit sentinels, custom globs, preselected
+ * write option).
+ */
+export async function rememberCompound(
+	ui: ExtensionUIContext,
+	pendingPieces: PieceEvaluation[],
+	action: "allow" | "deny",
+	ctx: EngineContext,
+): Promise<Omit<PermissionRule, "layer"> | undefined> {
+	const toRule = (piece: PieceEvaluation): CandidateRule => {
+		const firstToken = piece.text.trim().split(/\s+/u)[0] ?? "";
+		const pattern = `${firstToken} *`;
+		return candidate("bash", action, "pattern", { command: pattern }, pattern);
+	};
+	const verb = action === "allow" ? "allow" : "deny";
+	const options: PermissionDialogOption[] = pendingPieces.map(piece => {
+		const rule = toRule(piece);
+		return {
+			label: rule.rule.match.command as string,
+			description: piece.text,
+			checked: true,
+			toggleable: true,
+		};
+	});
+	options.push({
+		label: `Write checked ${verb} rules (${pendingPieces.length})`,
+		labelFor: checked => `Write checked ${verb} rules (${checked.filter(Boolean).length})`,
+	});
+	const request: PermissionDialogRequest = {
+		title: `Remember ${verb} — what rule?`,
+		options,
+		checklist: true,
+	};
+	const index = await ui.showPermissionDialog?.(request);
+	if (index === undefined || index === -1) return undefined; // plain cancel
+	const picked = request.options[index];
+	if (picked === undefined || picked.labelFor === undefined) return undefined; // piece row — nothing to write
+	const written: Array<Omit<PermissionRule, "layer">> = [];
+	for (const [pieceIndex, option] of request.options.entries()) {
+		if (option.checked && pieceIndex < pendingPieces.length) {
+			const rule = toRule(pendingPieces[pieceIndex]!);
+			await writeRememberedRule(rule.rule, ctx);
+			written.push(rule.rule);
+		}
+	}
+	return written[0];
+}
+
+/** Per-piece drill-down (spec §5.1): pick a pending piece, decide it, repeat; Back leaves the rest denied. */
+async function drillDownPieces(
+	ui: ExtensionUIContext,
+	pendingPieces: PieceEvaluation[],
+	decision: EngineDecision,
+	ctx: EngineContext,
+	opts: PromptForDecisionOptions,
+): Promise<PromptResolution> {
+	let remembered: Omit<PermissionRule, "layer"> | undefined;
+	const remaining = [...pendingPieces];
+	while (remaining.length > 0) {
+		const picked = await chooseLabel(ui, "Decide per piece", ["Back", ...remaining.map(piece => piece.text)]);
+		if (picked === undefined || picked === "Back") break; // remaining pieces stay denied
+		const index = remaining.findIndex(piece => piece.text === picked);
+		if (index < 0) break;
+		const [piece] = remaining.splice(index, 1);
+		const resolution = await promptUnit(ui, "bash", { command: piece.text }, decision, ctx, opts, [piece]);
+		if (resolution.policy === "deny" && resolution.remembered === undefined) {
+			// fail closed: a denied piece denies the whole call
+			return { policy: "deny" };
+		}
+		if (resolution.remembered !== undefined) remembered = resolution.remembered;
+	}
+	return remembered !== undefined ? { policy: "allow", remembered } : { policy: "allow" };
+}
+
+/**
  * Resolve a pending engine decision through the approval dialog.
  *
- * Bash calls prompt per pending piece in command order (spec §4.3); the
- * pieces come from `decision.pieces`, recomputed through the engine when the
- * decision carries none. PTY calls and non-bash calls prompt once for the
- * whole call, with candidates scoped to the whole command text. Any cancel
- * (`select`/dialog → undefined) denies. Denying any unit denies the call.
+ * Bash calls with more than one piece show ONE compound dialog for the whole
+ * call (spec §5.1): allow/deny all pending at once, remember a rule for all
+ * pending pieces, or drill down per piece. PTY calls, non-bash calls, forced
+ * prompts, and single-piece calls keep the single-unit flow (`promptUnit`).
+ * Any cancel (`select`/dialog → undefined) denies. Denying any unit denies the
+ * call.
  */
 export async function promptForDecision(
 	ui: ExtensionUIContext,
@@ -523,28 +616,58 @@ export async function promptForDecision(
 			pieces = evaluateBashCommand(command, ctx).pieces;
 		}
 	}
+	const pendingPieces = (pieces ?? []).filter(piece => piece.policy === "prompt");
 
-	const units: unknown[] = [];
-	if (ptyCall || pieces === undefined) {
-		units.push(args);
-	} else {
-		for (const piece of pieces) {
-			if (piece.policy === "prompt") {
-				units.push(toolName === "bash" ? { command: piece.text } : args);
+	// Single-unit flows: PTY, non-bash, forced prompts, or nothing pending.
+	if (ptyCall || pieces === undefined || pieces.length <= 1 || pendingPieces.length === 0) {
+		return promptUnit(ui, toolName, args, decision, ctx, opts, pieces);
+	}
+
+	// v3 compound flow: one dialog for the whole call (spec §5.1).
+	const title = opts.title ?? defaultTitle(toolName, decision);
+	const lines = buildDialogLines(decision, pieces, ctx);
+	const suggestionsPromise =
+		opts.suggestionsProvider !== undefined
+			? opts
+					.suggestionsProvider(unitPieceText(toolName, args))
+					.then(resolveSuggestions)
+					.catch(() => ({ options: [], byLabel: new Map<string, Suggestion>() }))
+			: undefined;
+	const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));
+	const baseOptions = rememberDisabled
+		? [ALLOW_ALL_ONCE, DENY_ALL]
+		: [ALLOW_ALL_ONCE, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
+	const chosen = await chooseLabel(
+		ui,
+		title,
+		baseOptions,
+		lines,
+		suggestionsPromise?.then(result => result.options),
+	);
+	switch (chosen) {
+		case ALLOW_ALL_ONCE:
+			return { policy: "allow" };
+		case DENY_ALL:
+			return { policy: "deny" };
+		case ALLOW_ALL_REMEMBER: {
+			const rule = await rememberCompound(ui, pendingPieces, "allow", ctx);
+			return rule === undefined ? { policy: "deny" } : { policy: "allow", remembered: rule };
+		}
+		case DENY_ALL_REMEMBER: {
+			const rule = await rememberCompound(ui, pendingPieces, "deny", ctx);
+			return rule === undefined ? { policy: "deny" } : { policy: "deny", remembered: rule };
+		}
+		case DRILL_DOWN:
+			return drillDownPieces(ui, pendingPieces, decision, ctx, opts);
+		default:
+			// Suggestion option picked from the dialog (appended options).
+			if (chosen !== undefined && suggestionsPromise !== undefined) {
+				const picked = (await suggestionsPromise).byLabel.get(chosen);
+				if (picked !== undefined) {
+					await writeRememberedRule(picked.rule, ctx);
+					return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
+				}
 			}
-		}
+			return { policy: "deny" };
 	}
-
-	let remembered: Omit<PermissionRule, "layer"> | undefined;
-	for (const unitArgs of units) {
-		const resolution = await promptUnit(ui, toolName, unitArgs, decision, ctx, opts, pieces);
-		if (resolution.policy === "deny") {
-			return resolution.remembered !== undefined
-				? { policy: "deny", remembered: resolution.remembered }
-				: { policy: "deny" };
-		}
-		if (resolution.remembered !== undefined) remembered = resolution.remembered;
-	}
-
-	return remembered !== undefined ? { policy: "allow", remembered } : { policy: "allow" };
 }
