@@ -163,6 +163,25 @@ describe("runPermissionCommand test", () => {
 		const output = await runPermissionCommand('test "git status"', await ctx());
 		expect(output).toContain("decision: prompt");
 	});
+
+	it("test output includes match class and specificity winner", async () => {
+		// temp dynamic file: deny bash "* | head *", allow bash "git branch * | head *".
+		// The git stage must be rule-allowed too: git is not a safe-consumer
+		// stage, so an unruled stage would degrade the pipeline allow to a prompt.
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * | head *' }\n    action: allow\n  - id: allow-git-branch\n    tool: bash\n    match: { command: 'git branch *' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand('test "git branch -a | head -20"', await ctx());
+
+		// The exact-structure allow (specificity 4) beats the general pipe deny
+		// (specificity 2) and the covering stage allow, so it decides.
+		expect(output).toContain("decision: allow");
+		expect(output).toContain("class: exact-structure (specificity 4)");
+		expect(output).toContain("allow-git-pipe");
+		expect(output).toContain("resolved: allow-git-pipe beats 2 other matches");
+	});
 });
 
 describe("runPermissionCommand status/log/migrate", () => {
