@@ -72,10 +72,10 @@ describe("match classes and specificity (spec §3.1)", () => {
 	});
 
 	test("specificity counts literal whitespace tokens; regex scores literal prefix", () => {
-		expect(patternSpecificity("command", "* | head *")).toBe(1);
-		expect(patternSpecificity("command", "git branch * | head *")).toBe(3);
+		expect(patternSpecificity("command", "* | head *")).toBe(2); // "|" is a literal token
+		expect(patternSpecificity("command", "git branch * | head *")).toBe(4);
 		expect(patternSpecificity("command", "git log *")).toBe(2);
-		expect(patternSpecificity("command", "/git branch/")).toBe(11); // literal prefix "git branch"
+		expect(patternSpecificity("command", "/git branch/")).toBe(10); // literal prefix "git branch" (10 chars)
 		expect(patternSpecificity("path", "packages/coding-agent/**")).toBe(2);
 	});
 
