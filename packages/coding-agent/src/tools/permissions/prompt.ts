@@ -446,8 +446,12 @@ async function chooseCandidate(
 		};
 		const index = await ui.showPermissionDialog(request);
 		if (index === undefined || index === -1) return undefined; // cancel
-		if (options[index]?.label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
-		return candidates[index];
+		// The option list inserts Custom… between candidates, so the picked
+		// index does not map onto the candidates array — resolve by label.
+		const label = options[index]?.label;
+		if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
+		const found = candidates.find(candidateItem => candidateItem.label === label);
+		return found;
 	}
 	const labels = [
 		...candidates.map(candidateItem => candidateItem.label),

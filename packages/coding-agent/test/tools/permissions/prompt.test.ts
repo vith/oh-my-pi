@@ -653,6 +653,27 @@ describe("promptForDecision", () => {
 		expect(labels).toContain("Tool: read always"); // read is in CURATED_ALLOW_TOOLS
 	});
 
+	it("picking the last scope option (Tool always) for a read-only tool writes the tool rule", async () => {
+		// The dialog options include the inserted Custom… row, so the last
+		// option is NOT candidates[last]: picking it must still resolve to the
+		// tool-wide candidate (regression: label lookup, not raw index).
+		const home = tempHome();
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([1, 3], requests); // Allow & remember… → last option (Tool: read always)
+		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
+		const res = await promptForDecision(ui, "read", { path: "src/x.ts" }, decision, fakeCtx(home));
+		expect(res.policy).toBe("allow");
+		expect(res.remembered?.tool).toBe("read");
+		expect(res.remembered?.match).toEqual({ arg: "*" });
+		const labels = requests[1]!.options.map(option => option.label);
+		expect(labels[3]).toBe("Tool: read always"); // [Exact, Pattern, Custom…, Tool always]
+		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		expect(doc.rules.some(rule => rule.tool === "read" && (rule.match as Record<string, unknown>).arg === "*")).toBe(
+			true,
+		);
+	});
+
 	it("drill-down Back with pieces left undecided denies the call", async () => {
 		const ctx = fakeCtx(tempHome());
 		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
