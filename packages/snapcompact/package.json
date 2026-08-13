@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/snapcompact",
-  "version": "17.2.15+vith-fork.97.55c3316632",
+  "version": "17.3.1+vith-fork.100.63c61a2480",
   "description": "Bitmap-frame context compression for vision-capable LLMs",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
