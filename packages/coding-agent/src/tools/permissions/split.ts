@@ -128,6 +128,15 @@ export function isSinglePiece(command: string): boolean {
 }
 
 /**
+ * True when the command parses as a top-level pipeline node. Fail-closed:
+ * parse errors or non-pipeline kinds return false.
+ */
+export function isPipeline(command: string): boolean {
+	const node = parseCommandNode(command);
+	return node !== null && node.kind === "pipeline";
+}
+
+/**
  * Maximum nesting depth for sub-command evaluation; deeper structures are
  * treated as unanalyzable and the caller degrades to a prompt.
  */

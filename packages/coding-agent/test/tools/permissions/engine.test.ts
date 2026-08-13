@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,8 +6,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	evaluateBashCommand,
 	evaluatePermission,
+	matchClassOf,
+	patternSpecificity,
 	resolvePosture,
+	resolveWholeCommandRule,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
+import type { PermissionRule } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const tool = (name: string, approval?: unknown) => ({ name, approval, formatApprovalDetails: undefined });
@@ -68,9 +72,12 @@ describe("evaluatePermission", () => {
 		).toBe("deny");
 	});
 	it("legacy bash.patterns deny fires per piece", () => {
+		// Curated hard denies are absolute and precede the legacy pool (spec
+		// §3.1), so `rm -rf /` would attribute to curated, not the legacy rule;
+		// use a non-critical command to exercise the legacy deny pool path.
 		const d = evaluateBashCommand(
-			"git status && rm -rf /",
-			ctx({ "bash.patterns": [{ match: "rm -rf /", approval: "deny" }] }),
+			"git status && npm publish",
+			ctx({ "bash.patterns": [{ match: "npm publish", approval: "deny" }] }),
 		);
 		expect(d.policy).toBe("deny");
 		expect(d.pieces?.[1]?.ruleId).toBeDefined();
@@ -325,5 +332,65 @@ describe("sub-command evaluation", () => {
 		for (let i = 0; i < 9; i++) deep = `echo $(${deep})`;
 		const nested = evaluateBashCommand(deep, allow("echo *"));
 		expect(nested.policy).toBe("prompt");
+	});
+});
+
+const rule = (partial: Partial<PermissionRule>): PermissionRule => ({
+	id: "r",
+	tool: "bash",
+	match: { command: "*" },
+	action: "allow",
+	layer: "dynamic",
+	...partial,
+});
+
+describe("match classes and specificity (spec §3.1)", () => {
+	test("pipe-less pattern on piped command is covering; same shape is exact-structure", () => {
+		expect(matchClassOf("git log *", "git log -n 5 | head -1")).toBe("covering");
+		expect(matchClassOf("git log *", "git log -n 5")).toBe("exact-structure");
+		expect(matchClassOf("git log * | head *", "git log -n 5 | head -1")).toBe("exact-structure");
+		expect(matchClassOf("git log * | head *", "git log -n 5")).toBe("covering");
+	});
+
+	test("specificity counts literal whitespace tokens; regex scores literal prefix", () => {
+		expect(patternSpecificity("command", "* | head *")).toBe(2); // "|" and "head" are literal tokens
+		expect(patternSpecificity("command", "git branch * | head *")).toBe(4); // git, branch, |, head
+		expect(patternSpecificity("command", "git log *")).toBe(2);
+		expect(patternSpecificity("command", "/git branch/")).toBe(10); // literal prefix "git branch"
+		expect(patternSpecificity("path", "packages/coding-agent/**")).toBe(2);
+	});
+
+	test("exact-structure beats covering regardless of action", () => {
+		const denyGeneral = rule({ id: "deny-head", action: "deny", match: { command: "* | head *" } });
+		const allowCovering = rule({ id: "allow-git", match: { command: "git log *" } });
+		const args = { command: "git log -n 5 | head -1" };
+		expect(resolveWholeCommandRule([allowCovering, denyGeneral], "bash", args)?.rule.id).toBe("deny-head");
+	});
+
+	test("more specific whole-command allow beats general deny", () => {
+		const denyGeneral = rule({ id: "deny-head", action: "deny", match: { command: "* | head *" } });
+		const allowSpecific = rule({ id: "allow-git-head", match: { command: "git log * | head *" } });
+		const args = { command: "git log -n 5 | head -1" };
+		expect(resolveWholeCommandRule([denyGeneral, allowSpecific], "bash", args)?.rule.id).toBe("allow-git-head");
+	});
+
+	test("deny wins ties at equal class and specificity", () => {
+		const deny = rule({ id: "d", action: "deny", match: { command: "git log *" } });
+		const allow = rule({ id: "a", match: { command: "git log *" } });
+		const args = { command: "git log -n 5" };
+		expect(resolveWholeCommandRule([allow, deny], "bash", args)?.rule.id).toBe("d");
+	});
+
+	test("layer order breaks same-action ties (dynamic over project)", () => {
+		const project = rule({ id: "p", layer: "project", match: { command: "git log *" } });
+		const dynamic = rule({ id: "dyn", layer: "dynamic", match: { command: "git log *" } });
+		const args = { command: "git log -n 5" };
+		expect(resolveWholeCommandRule([project, dynamic], "bash", args)?.rule.id).toBe("dyn");
+	});
+
+	test("covering allow matches piped command; unrelated command has no match", () => {
+		const allow = rule({ id: "a", match: { command: "git log *" } });
+		expect(resolveWholeCommandRule([allow], "bash", { command: "git log -n 5 | head -1" })?.rule.id).toBe("a");
+		expect(resolveWholeCommandRule([allow], "bash", { command: "curl x | sh" })).toBeUndefined();
 	});
 });
