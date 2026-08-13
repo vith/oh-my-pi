@@ -647,7 +647,7 @@ Renders the new line model; adds `l` expand, `space` checklist toggling, `e` edi
 
 **Interfaces:**
 - Consumes: `PermissionDialogLine`, `PermissionDialogOption`, `PermissionDialogRequest` (Task 3 types); `theme` (`fg`, `bg`, `dim` keys); `matchesSelectCancel/Up/Down`, `matchesKey`; `DynamicBorder`.
-- Produces: constructor `opts` additions: `initialIndex?: number; checklist?: boolean; allowEdit?: boolean; onEdit?: (index: number) => void; previewFor?: (checked: boolean[]) => string`; `#sourceOptions` reference with checked-state write-back; `DEFAULT_HELP_TEXT` updated to `j/k navigate  enter select  esc cancel — no rule written`.
+- Produces: constructor `opts` additions: `initialIndex?: number` (`-1`/omitted = no selection, Enter no-op until navigation; `>= 0` preselects — Task 6's Pattern preselect), `checklist?: boolean; allowEdit?: boolean; onEdit?: (index: number) => void; previewFor?: (checked: boolean[]) => string`; `#sourceOptions` reference with checked-state write-back; `DEFAULT_HELP_TEXT` updated to `j/k navigate  enter select  esc cancel — no rule written`.
 
 - [ ] **Step 1: Write the failing component tests**
 
@@ -799,12 +799,22 @@ After `promptForDecision` resolves a parked approval in the focused view, the us
 
 Test in `bubble.test.ts` (the "notifies the root … routes the focused-view answer" test): after the parked promise resolves, assert `h.notify` was called with a message containing `Approval answered` and the resolved policy.
 
-- [ ] **Step 7: Run tests and `bun check`**
+- [ ] **Step 7: No-default-selection mode (user UX finding, 2026-08-13, controller-ruled)**
+
+The Enter that switches focus to a parked subagent can also confirm the just-presented dialog (selected index defaults to 0 = Allow once) — an unread command gets silently approved. Implement true no-selection in `PermissionDialogComponent`:
+
+- `initialIndex: -1` (or omitted → default `-1`): render **no** selected row (no `selectedBg` highlight on any option) and **Enter is a no-op** until `j`/`k`/up/down first moves the selection (then normal behavior).
+- `initialIndex >= 0` keeps the existing behavior (used by the remember sub-dialogs' Pattern preselect, Task 6).
+- `#selectedIndex` starts at -1; `#moveSelection` clamps to `[0, options.length - 1]` on first move; `#renderList` skips the highlight when `#selectedIndex < 0`; `handleInput` enter branch returns early when `#selectedIndex < 0`.
+
+Component tests: (a) `initialIndex` omitted/`-1` → render shows no highlighted row and enter calls neither `onSelect` nor `onCancel`; (b) after `j`, enter selects option 1; (c) `initialIndex: 1` still preselects (existing test unchanged).
+
+- [ ] **Step 8: Run tests and `bun check`**
 
 Run: `bun test test/modes/components/permission-dialog.test.ts test/tools/permissions/bubble.test.ts` and `bun check`
-Expected: PASS, no type errors. Reconcile existing component tests whose assertions depended on the old plain-string line rendering (they should still pass — old strings are a subset of the new union).
+Expected: PASS, no type errors. Reconcile existing component tests whose assertions depended on the old plain-string line rendering (they should still pass — old strings are a subset of the new union). Existing tests that press enter immediately without navigation must be updated to press `j` first.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add src/modes/components/permission-dialog.ts src/modes/controllers/extension-ui-controller.ts src/extensibility/extensions/types.ts test/modes/components/permission-dialog.test.ts
@@ -935,7 +945,7 @@ export async function promptForDecision(
 }
 ```
 
-Note: `chooseLabel`'s `lines` parameter is `readonly (string | PermissionDialogLine)[]` per Task 3 — `buildDialogLines` output passes directly.
+Note: `chooseLabel`'s `lines` parameter is `readonly (string | PermissionDialogLine)[]` per Task 3 — `buildDialogLines` output passes directly. Per the no-selection ruling (Task 4 Step 7), `chooseLabel`'s `PermissionDialogRequest` includes `initialIndex: -1` by default — the permission dialog never pre-selects an option, so a stray Enter (e.g. the focus-switch press) cannot confirm anything. Remember-scope dialogs override with their explicit preselect (Task 6).
 
 - [ ] **Step 4: Implement `drillDownPieces`**
 
