@@ -155,6 +155,12 @@ export interface DeferredDiagnosticsEntry {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
+	/**
+	 * Home directory for permission-rule resolution (user/dynamic layers).
+	 * Defaults to `os.homedir()` when unset; tests and headless contexts pass
+	 * an isolated home so developer rules never leak into evaluations.
+	 */
+	home?: string;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
 	additionalDirectories?: string[];
 	/** Whether UI is available */

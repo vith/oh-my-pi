@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import { LSP_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/lsp";
 import {
@@ -21,7 +24,17 @@ function tool(
 	return { name, approval, formatApprovalDetails };
 }
 
+/**
+ * Isolated home for engine rule resolution: the engine reads the user and
+ * dynamic rule layers from `<home>/.omp/agent/permissions*.yml`, falling back
+ * to `os.homedir()` when no home is supplied. An empty temp home keeps
+ * developer-remembered rules out of these assertions (hermetic, deterministic).
+ */
+const HERMETIC_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "pi-approval-test-"));
+const HERMETIC_CWD = path.join(HERMETIC_HOME, "cwd");
+
 function createBashTool(settingsOverrides: Record<string, unknown> = {}): BashTool {
+	fs.mkdirSync(HERMETIC_CWD, { recursive: true });
 	const settings = {
 		get(key: string): unknown {
 			if (Object.hasOwn(settingsOverrides, key)) return settingsOverrides[key];
@@ -43,7 +56,11 @@ function createBashTool(settingsOverrides: Record<string, unknown> = {}): BashTo
 			return Object.hasOwn(settingsOverrides, key);
 		},
 	};
-	return new BashTool({ settings } as unknown as ConstructorParameters<typeof BashTool>[0]);
+	return new BashTool({
+		settings,
+		cwd: HERMETIC_CWD,
+		home: HERMETIC_HOME,
+	} as unknown as ConstructorParameters<typeof BashTool>[0]);
 }
 
 function bashApproval(command: string, settingsOverrides: Record<string, unknown> = {}) {

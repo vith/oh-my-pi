@@ -383,6 +383,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const decision = evaluateBashCommand(command, {
 			settings: this.session.settings,
 			cwd: this.session.cwd ?? process.cwd(),
+			home: this.session.home,
 		});
 		let result: ToolApprovalDecision;
 		switch (decision.policy) {

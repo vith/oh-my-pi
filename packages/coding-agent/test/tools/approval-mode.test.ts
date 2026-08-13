@@ -94,6 +94,7 @@ describe("tools.approvalMode setting", () => {
 		const settings = approvalSettings({ "tools.approvalMode": "yolo" });
 		const result = await bashTool().execute("yolo", { command: "echo ok" }, undefined, undefined, {
 			settings,
+			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("ok");
 	});
@@ -103,6 +104,7 @@ describe("tools.approvalMode setting", () => {
 		await expect(
 			bashTool().execute("always-ask", { command: "echo blocked" }, undefined, undefined, {
 				settings,
+				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
@@ -114,6 +116,7 @@ describe("tools.approvalMode setting", () => {
 		});
 		const result = await bashTool().execute("always-ask-allow", { command: "echo allowed" }, undefined, undefined, {
 			settings,
+			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("allowed");
 	});
@@ -126,6 +129,7 @@ describe("tools.approvalMode setting", () => {
 		await expect(
 			bashTool().execute("yolo-prompt", { command: "echo blocked" }, undefined, undefined, {
 				settings,
+				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
@@ -138,6 +142,7 @@ describe("tools.approvalMode setting", () => {
 		await expect(
 			bashTool().execute("write-mode", { command: "echo unconfigured" }, undefined, undefined, {
 				settings,
+				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
@@ -153,6 +158,7 @@ describe("tools.approvalMode setting", () => {
 		await expect(
 			bashTool().execute("critical", { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" }, undefined, undefined, {
 				settings,
+				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/is blocked: Denied: piece/);
 	});
@@ -180,6 +186,7 @@ describe("tools.approvalMode setting", () => {
 				{
 					settings,
 					autoApprove: true,
+					home: tempDir,
 				} as AgentToolContext,
 			),
 		).rejects.toThrow(/is blocked: Denied: piece/);
@@ -192,6 +199,7 @@ describe("tools.approvalMode setting", () => {
 		const result = await bashTool().execute("xdev-tier", { command: "echo dispatched" }, undefined, undefined, {
 			settings,
 			xdevApproved: true,
+			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("dispatched");
 	});
@@ -205,6 +213,7 @@ describe("tools.approvalMode setting", () => {
 			bashTool().execute("xdev-explicit-prompt", { command: "echo blocked" }, undefined, undefined, {
 				settings: promptSettings,
 				xdevApproved: true,
+				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 
@@ -216,6 +225,7 @@ describe("tools.approvalMode setting", () => {
 			bashTool().execute("xdev-denied", { command: "echo blocked" }, undefined, undefined, {
 				settings: denySettings,
 				xdevApproved: true,
+				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/blocked by user policy/);
 	});
