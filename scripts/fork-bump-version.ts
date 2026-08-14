@@ -243,6 +243,11 @@ async function main(): Promise<void> {
 	await $`rm -f bun.lock`;
 	await $`bun install`;
 	await $`cargo generate-lockfile`;
+	// The fork version bump changes Cargo.toml/Cargo.lock, whose content
+	// hashes MODULE.bazel.lock embeds — refresh it so the bump commit stays
+	// in sync. A stale bazel lock otherwise dirties the tree on the next
+	// bazel/bazelisk invocation (observed repeatedly after fork releases).
+	await $`bazelisk mod deps`;
 
 	// 9. Checks (mirrors release.ts).
 	console.log("Running checks...");
