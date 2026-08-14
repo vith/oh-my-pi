@@ -3706,14 +3706,51 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// LLM-generated permission rule suggestions (interaction tab).
+	// LLM-generated permission rule suggestions (interaction tab). Defaults
+	// off: the one-shot side-request path is opt-in.
 	"permissions.llmSuggestions": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "interaction",
 			group: "Permissions",
 			label: "LLM Rule Suggestions",
+			description:
+				"Ask the session model to propose allow/deny rules for each pending approval. Off by default; when enabled, suggestions appear as extra dialog options.",
+		},
+	},
+
+	// Default posture for write tools targeting the project directory
+	// (interaction tab). Overrides permissions.default for write tools whose
+	// target path resolves inside the nearest project root; paths outside it
+	// keep the general posture.
+	"permissions.projectWrites": {
+		type: "enum",
+		values: ["allow", "prompt", "deny"] as const,
+		default: "prompt",
+		ui: {
+			tab: "interaction",
+			group: "Permissions",
+			label: "Project Directory Writes",
+			description:
+				"Posture for write tools (edit, write) targeting paths inside the project directory, instead of the default posture. 'Allow' auto-approves project-scoped writes; 'prompt' asks; 'deny' blocks.",
+			options: [
+				{
+					value: "allow",
+					label: "Allow",
+					description: "Auto-approve writes to files inside the project directory.",
+				},
+				{
+					value: "prompt",
+					label: "Prompt",
+					description: "Ask before executing writes inside the project directory.",
+				},
+				{
+					value: "deny",
+					label: "Deny",
+					description: "Block writes inside the project directory.",
+				},
+			],
 		},
 	},
 

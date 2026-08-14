@@ -289,6 +289,43 @@ describe("PermissionDialogComponent", () => {
 		expect(options[0]?.checked).toBe(false);
 	});
 
+	it("checklist mode: enter on a toggleable row toggles it instead of settling", () => {
+		const selected: number[] = [];
+		const options: PermissionDialogOption[] = [
+			{ label: "git log *", toggleable: true, checked: true },
+			{ label: "Write checked (1)", labelFor: checked => `Write checked (${checked.filter(Boolean).length})` },
+		];
+		const component = new PermissionDialogComponent(
+			"Remember allow — what rule?",
+			[],
+			options,
+			index => selected.push(index),
+			() => {},
+			{ checklist: true, initialIndex: 0 },
+		);
+		component.handleInput(ENTER);
+		// A row Enter must never settle the dialog (that used to deny the call).
+		expect(selected).toEqual([]);
+		expect(options[0]?.checked).toBe(false);
+		expect(render(component)).toContain("[ ] git log *");
+		// Only the write button (non-toggleable) commits.
+		component.handleInput("j");
+		component.handleInput(ENTER);
+		expect(selected).toEqual([1]);
+	});
+
+	it("renders a custom help line when helpText is provided", () => {
+		const component = new PermissionDialogComponent(
+			"Remember allow — what rule?",
+			[],
+			[{ label: "x" }],
+			() => {},
+			() => {},
+			{ checklist: true, helpText: "j/k navigate  space/enter toggle  esc back" },
+		);
+		expect(render(component)).toContain("j/k navigate  space/enter toggle  esc back");
+	});
+
 	it("keeps a truncated line with a status on one row (status after the ellipsis)", () => {
 		const component = new PermissionDialogComponent(
 			"Allow tool: bash",

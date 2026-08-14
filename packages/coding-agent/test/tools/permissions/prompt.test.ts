@@ -331,12 +331,12 @@ describe("rememberCompound", () => {
 		expect((await writtenCommands(ctx)).map(match => match.command)).toEqual(["git log -5 *"]);
 	});
 
-	it("plain cancel (-1) writes nothing", async () => {
+	it("esc on the checklist writes nothing and signals back to the decision page", async () => {
 		const home = tempHome();
 		const ctx = fakeCtx(home);
 		const { ui } = queuedDialogUi([-1]);
 		const remembered = await rememberCompound(ui, twoPieces, "allow", ctx);
-		expect(remembered).toBeUndefined();
+		expect(remembered).toBe("back");
 		expect(await writtenCommands(ctx)).toEqual([]);
 	});
 
@@ -1174,5 +1174,74 @@ describe("pieceStatusText", () => {
 			text: "allowed · project rule proj-echo",
 			style: "muted",
 		});
+	});
+});
+
+describe("dialog preselection and back navigation", () => {
+	it("the decision page preselects Allow once", async () => {
+		const home = tempHome();
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests);
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(home));
+		expect(res.policy).toBe("allow");
+		expect(requests[0]?.initialIndex).toBe(0);
+		expect(requests[0]?.options[0]?.label).toBe("Allow once");
+	});
+	it("esc on the scope page returns to the decision page instead of denying", async () => {
+		const home = tempHome();
+		const requests: PermissionDialogRequest[] = [];
+		// Allow & remember… → esc on the scope page → Allow once
+		const { ui } = queuedDialogUi([1, undefined, 0], requests);
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(home));
+		expect(res.policy).toBe("allow");
+		expect(res.remembered).toBeUndefined();
+		expect(requests).toHaveLength(3);
+		expect(requests[1]?.helpText).toContain("esc back");
+	});
+	it("esc on the deny-remember scope page also returns to the decision page", async () => {
+		const home = tempHome();
+		const requests: PermissionDialogRequest[] = [];
+		// Deny & remember… → esc on scope → esc on the decision page → deny
+		const { ui } = queuedDialogUi([3, undefined, undefined], requests);
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(home));
+		expect(res.policy).toBe("deny");
+		expect(res.remembered).toBeUndefined();
+		expect(requests).toHaveLength(3);
+	});
+	it("exact-only candidates drop the remember options with a note", async () => {
+		const home = tempHome();
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests);
+		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
+		const res = await promptForDecision(ui, "eval", { code: "console.log(1)" }, decision, fakeCtx(home));
+		expect(res.policy).toBe("allow");
+		const request = requests[0]!;
+		expect(request.options.map(option => option.label)).toEqual(["Allow once", "Deny"]);
+		expect(JSON.stringify(request.lines)).toContain("only match an identical call");
+	});
+	it("compound decision page preselects allow-all-once", async () => {
+		const ctx = fakeCtx(tempHome());
+		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests);
+		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
+		expect(res.policy).toBe("allow");
+		expect(requests[0]?.initialIndex).toBe(0);
+	});
+	it("esc on the compound checklist returns to the compound decision page", async () => {
+		const ctx = fakeCtx(tempHome());
+		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
+		const requests: PermissionDialogRequest[] = [];
+		// Allow all & remember… → esc on the checklist (back to the compound
+		// page) → esc on the compound page → deny
+		const { ui } = queuedDialogUi([1, undefined, undefined], requests);
+		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
+		expect(res.policy).toBe("deny");
+		expect(requests).toHaveLength(3);
+		expect(requests[1]?.helpText).toContain("space/enter toggle");
+		expect(JSON.stringify(requests[1]?.lines)).toContain("[x] rows are written as rules");
 	});
 });

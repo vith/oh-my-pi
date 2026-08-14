@@ -333,14 +333,26 @@ describe("sub-command evaluation", () => {
 		expect(cmdExe.policy).toBe("prompt");
 	});
 
-	it("malformed substitutions and excessive nesting degrade to a prompt", () => {
-		const unclosed = evaluateBashCommand("echo $(date", allow("echo *"));
-		expect(unclosed.policy).toBe("prompt");
-		// depth 9 > SUB_COMMAND_MAX_DEPTH (8)
-		let deep = "date";
-		for (let i = 0; i < 9; i++) deep = `echo $(${deep})`;
-		const nested = evaluateBashCommand(deep, allow("echo *"));
-		expect(nested.policy).toBe("prompt");
+	it("malformed substitutions and excessive nesting degrade rule allows to a prompt", () => {
+		// R1 for rule-backed allows: a file rule matching `echo *` must not
+		// vouch for unanalyzable residue, so both cases still prompt. (Posture
+		// allows skip this degradation — see the posture-vs-R1 describe.)
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "permissions.yml"),
+				"rules:\n  - id: echo-all\n    tool: bash\n    match: { command: 'echo *' }\n    action: allow\n",
+			);
+			const unclosed = evaluateBashCommand("echo $(date", ctx({}, dir));
+			expect(unclosed.policy).toBe("prompt");
+			// depth 9 > SUB_COMMAND_MAX_DEPTH (8)
+			let deep = "date";
+			for (let i = 0; i < 9; i++) deep = `echo $(${deep})`;
+			const nested = evaluateBashCommand(deep, ctx({}, dir));
+			expect(nested.policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
 	});
 
 	test("git log * rule covers git log | head via safe-consumer exemption", () => {
@@ -691,5 +703,96 @@ describe("denyOverrideSuggestion (spec §5.2)", () => {
 		} finally {
 			removeSyncWithRetries(dir);
 		}
+	});
+});
+
+describe("project-writes posture (permissions.projectWrites)", () => {
+	const makeDir = () => fs.mkdtempSync(path.join(os.tmpdir(), `perm-projectwrites-${Snowflake.next()}-`));
+	const projectCwd = (base: string) => path.join(base, "proj");
+	const insidePath = (base: string) => path.join(projectCwd(base), "src", "a.ts");
+
+	it("configured allow auto-approves write tools inside the project root", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: insidePath(base) }, c).policy).toBe("allow");
+			expect(evaluatePermission(tool("write"), { path: insidePath(base) }, c).policy).toBe("allow");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("configured deny blocks writes inside the project root", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "deny" }, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: insidePath(base) }, c).policy).toBe("deny");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("paths outside the project root keep the general posture", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: path.join(base, "outside", "a.ts") }, c).policy).toBe(
+				"prompt",
+			);
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("relative and ~-prefixed paths resolve against cwd/home", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: "src/a.ts" }, c).policy).toBe("allow");
+			// ~/… resolves into the home dir (a sibling of proj) → outside the
+			// project root → general posture.
+			expect(evaluatePermission(tool("edit"), { path: "~/x.ts" }, c).policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("unconfigured falls back to the general posture", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({}, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: insidePath(base) }, c).policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("non-write tools are unaffected by the project-writes posture", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("bash"), { command: "echo hi" }, c).policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("ast_edit paths array is contained like a single path", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("ast_edit"), { ops: [], paths: [insidePath(base)] }, c).policy).toBe("allow");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+});
+
+describe("posture allow vs unanalyzable residue (R1)", () => {
+	// Nesting deeper than SUB_COMMAND_MAX_DEPTH makes extractSubCommands return
+	// null — the "unanalyzable construct" prompt path.
+	const deep = "echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo x))))))))";
+
+	it("allow-all posture does not prompt on unanalyzable nesting", () => {
+		const d = evaluateBashCommand(deep, ctx({ "permissions.default": "allow" }));
+		expect(d.policy).toBe("allow");
+	});
+	it("allow-all posture still denies curated patterns inside substitutions", () => {
+		const d = evaluateBashCommand("echo $(rm -rf /)", ctx({ "permissions.default": "allow" }));
+		expect(d.policy).toBe("deny");
 	});
 });

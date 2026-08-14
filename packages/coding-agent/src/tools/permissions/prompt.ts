@@ -103,6 +103,14 @@ const DRILL_DOWN = "Decide per piece →";
 const BASH_SHELL_CONTROL_NOTE =
 	"Remembered rules cannot suppress this prompt: the command uses shell control that rules cannot analyze (redirect, -c/-e/-Command//c reinterpretation, or an unanalyzable construct).";
 
+/**
+ * Dialog note shown when a tool's remember options are suppressed because
+ * every candidate scope is exact (one-shot code tools like eval): a
+ * remembered rule would only ever match an identical call.
+ */
+const EXACT_ONLY_REMEMBER_NOTE =
+	"Remembering this call would only match an identical call — no pattern scope applies to this tool.";
+
 /** Whether the prompt unit's bash command carries unanalyzable shell control (remember rules cannot suppress it). */
 function bashRememberDisabled(args: unknown): boolean {
 	const command = argString(args, "command");
@@ -506,6 +514,14 @@ function resolveSuggestions(suggestions: Suggestion[]): {
 	return { options, byLabel };
 }
 
+/** Dialog presentation options for {@link chooseLabel}. */
+interface ChooseLabelDialogOpts {
+	/** Row to preselect; omitted = no selection. */
+	initialIndex?: number;
+	/** Help line shown at the bottom of the dialog. */
+	helpText?: string;
+}
+
 /** Present an option list, mapping the choice back to its label. Cancel → undefined. */
 async function chooseLabel(
 	ui: ExtensionUIContext,
@@ -513,6 +529,7 @@ async function chooseLabel(
 	options: string[],
 	lines?: readonly (string | PermissionDialogLine)[],
 	suggestions?: Promise<PermissionDialogOption[]>,
+	dialogOpts?: ChooseLabelDialogOpts,
 ): Promise<string | undefined> {
 	if (ui.showPermissionDialog) {
 		const request: PermissionDialogRequest = {
@@ -520,6 +537,8 @@ async function chooseLabel(
 			...((lines?.length ?? 0) > 0 ? { lines } : {}),
 			options: options.map(label => ({ label })),
 			...(suggestions !== undefined ? { suggestions } : {}),
+			...(dialogOpts?.initialIndex !== undefined ? { initialIndex: dialogOpts.initialIndex } : {}),
+			...(dialogOpts?.helpText !== undefined ? { helpText: dialogOpts.helpText } : {}),
 		};
 		const index = await ui.showPermissionDialog(request);
 		if (index === undefined) return undefined;
@@ -536,13 +555,16 @@ async function chooseLabel(
 /** The single-piece scope dialog's glob-edit option (spec §5.1). */
 const CUSTOM_LABEL = "Custom…";
 
-/** Level-2 scope choice: pick one candidate (with its YAML preview) or cancel. */
+/** The scope dialog's back-to-decision-page signal (esc / cancel). */
+const SCOPE_BACK = "back" as const;
+
+/** Level-2 scope choice: pick a candidate (with its YAML preview), edit via Custom…, or go back. */
 async function chooseCandidate(
 	ui: ExtensionUIContext,
 	title: string,
 	candidates: CandidateRule[],
-): Promise<CandidateRule | undefined> {
-	if (candidates.length === 0) return undefined;
+): Promise<CandidateRule | typeof SCOPE_BACK | undefined> {
+	if (candidates.length === 0) return SCOPE_BACK;
 	if (ui.showPermissionDialog) {
 		const options: PermissionDialogOption[] = [];
 		for (const candidateItem of candidates) {
@@ -554,13 +576,16 @@ async function chooseCandidate(
 		const request: PermissionDialogRequest = {
 			title,
 			options,
+			// The Pattern candidate (the one that will fire again) is
+			// preselected; exact-only candidate lists preselect the exact rule.
 			initialIndex: Math.max(
 				0,
 				candidates.findIndex(candidateItem => candidateItem.scope === "pattern"),
 			),
+			helpText: "j/k navigate  enter select  esc back",
 		};
 		const index = await ui.showPermissionDialog(request);
-		if (index === undefined || index === -1) return undefined; // cancel
+		if (index === undefined || index === -1) return SCOPE_BACK; // esc — back to the decision page
 		// The option list inserts Custom… between candidates, so the picked
 		// index does not map onto the candidates array — resolve by label.
 		const label = options[index]?.label;
@@ -573,7 +598,7 @@ async function chooseCandidate(
 		...(candidates.some(candidateItem => candidateItem.scope === "pattern") ? [CUSTOM_LABEL] : []),
 	];
 	const label = await ui.select(title, labels);
-	if (label === undefined) return undefined;
+	if (label === undefined) return SCOPE_BACK;
 	if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
 	const index = candidates.findIndex(candidateItem => candidateItem.label === label);
 	return index >= 0 ? candidates[index] : undefined;
@@ -648,8 +673,11 @@ async function promptUnit(
 	const title = opts.title ?? defaultTitle(toolName);
 
 	if (opts.includeCandidates === false) {
-		// Provider safety-check forced prompt: no candidates, binary choice only.
-		const chosen = await chooseLabel(ui, title, [APPROVE, DENY], buildDialogLines(decision, pieces, ctx));
+		// Provider safety-check forced prompt: no candidates, binary choice
+		// only; Approve is preselected (auto-mode-with-confirmation).
+		const chosen = await chooseLabel(ui, title, [APPROVE, DENY], buildDialogLines(decision, pieces, ctx), undefined, {
+			initialIndex: 0,
+		});
 		const approved = chosen === APPROVE || chosen === ALLOW_ONCE;
 		return { policy: approved ? "allow" : "deny" };
 	}
@@ -664,60 +692,77 @@ async function promptUnit(
 					.then(resolveSuggestions)
 					.catch(() => ({ options: [], byLabel: new Map<string, Suggestion>() }))
 			: undefined;
-	// Shell-control bash commands cannot be suppressed by a remembered rule:
-	// drop both remember options and say why.
+	// Shell-control bash commands cannot be suppressed by a remembered rule,
+	// and tools whose candidates are exact-only (one-shot code tools like
+	// eval) can only remember an identical call — drop the remember options
+	// for both and say why.
 	const rememberDisabled = bashRememberDisabled(unitArgs);
+	const exactOnlyRemember =
+		candidates.length > 0 && candidates.every(candidateItem => candidateItem.scope === "exact");
+	const rememberUseless = rememberDisabled || exactOnlyRemember;
 	const metaLines = dialogMetadataLines(toolName, opts);
 	const lines: (string | PermissionDialogLine)[] = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
-	if (rememberDisabled) lines.push("", BASH_SHELL_CONTROL_NOTE);
-	const baseOptions = rememberDisabled ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER];
+	if (rememberDisabled) {
+		lines.push("", BASH_SHELL_CONTROL_NOTE);
+	} else if (exactOnlyRemember) {
+		lines.push("", EXACT_ONLY_REMEMBER_NOTE);
+	}
+	const baseOptions = rememberUseless ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER];
 	const options = backLabel !== undefined ? [...baseOptions, backLabel] : baseOptions;
-	const chosen = await chooseLabel(
-		ui,
-		dialogTitle(ui, title, metaLines),
-		options,
-		lines,
-		suggestionsPromise?.then(result => result.options),
-	);
-	switch (chosen) {
-		case ALLOW_ONCE:
-		case LEGACY_APPROVE: // pre-dialog fake UI / older callers
-			return { policy: "allow" };
-		case DENY:
-			return { policy: "deny" };
-		case ALLOW_REMEMBER: {
-			const rule = await chooseCandidate(
-				ui,
-				`Remember an allow rule for ${toolName}`,
-				candidates.filter(candidateItem => candidateItem.rule.action === "allow"),
-			);
-			if (rule === undefined) return { policy: "deny" }; // cancelled at scope level
-			await writeRememberedRule(rule.rule, ctx);
-			return { policy: "allow", remembered: rule.rule };
-		}
-		case DENY_REMEMBER: {
-			const rule = await chooseCandidate(
-				ui,
-				`Remember a deny rule for ${toolName}`,
-				candidates.filter(candidateItem => candidateItem.rule.action === "deny"),
-			);
-			if (rule === undefined) return { policy: "deny" }; // cancelled at scope level
-			await writeRememberedRule(rule.rule, ctx);
-			return { policy: "deny", remembered: rule.rule };
-		}
-		default: {
-			// Drill-down navigation: return to the piece selector, undecided.
-			if (backLabel !== undefined && chosen === backLabel) return { policy: "back" };
-			// A suggestion option picked from the dialog: remember its rule and
-			// resolve with its action. Unknown labels still fail closed.
-			if (chosen !== undefined && suggestionsPromise !== undefined) {
-				const picked = (await suggestionsPromise).byLabel.get(chosen);
-				if (picked !== undefined) {
-					await writeRememberedRule(picked.rule, ctx);
-					return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
-				}
+	// The decision page preselects "Allow once": the least-commitment action
+	// is the recommended default (auto-mode-with-confirmation).
+	while (true) {
+		const chosen = await chooseLabel(
+			ui,
+			dialogTitle(ui, title, metaLines),
+			options,
+			lines,
+			suggestionsPromise?.then(result => result.options),
+			{ initialIndex: 0 },
+		);
+		switch (chosen) {
+			case ALLOW_ONCE:
+			case LEGACY_APPROVE: // pre-dialog fake UI / older callers
+				return { policy: "allow" };
+			case DENY:
+				return { policy: "deny" };
+			case ALLOW_REMEMBER: {
+				const rule = await chooseCandidate(
+					ui,
+					`Remember an allow rule for ${toolName}`,
+					candidates.filter(candidateItem => candidateItem.rule.action === "allow"),
+				);
+				// Esc on the scope page returns to the decision page; a
+				// cancelled Custom… glob edit does the same.
+				if (rule === SCOPE_BACK || rule === undefined) continue;
+				await writeRememberedRule(rule.rule, ctx);
+				return { policy: "allow", remembered: rule.rule };
 			}
-			return { policy: "deny" };
+			case DENY_REMEMBER: {
+				const rule = await chooseCandidate(
+					ui,
+					`Remember a deny rule for ${toolName}`,
+					candidates.filter(candidateItem => candidateItem.rule.action === "deny"),
+				);
+				if (rule === SCOPE_BACK || rule === undefined) continue;
+				await writeRememberedRule(rule.rule, ctx);
+				return { policy: "deny", remembered: rule.rule };
+			}
+			default: {
+				// Drill-down navigation: return to the piece selector, undecided.
+				if (backLabel !== undefined && chosen === backLabel) return { policy: "back" };
+				// A suggestion option picked from the dialog: remember its rule
+				// and resolve with its action. Unknown labels (incl. esc) still
+				// fail closed.
+				if (chosen !== undefined && suggestionsPromise !== undefined) {
+					const picked = (await suggestionsPromise).byLabel.get(chosen);
+					if (picked !== undefined) {
+						await writeRememberedRule(picked.rule, ctx);
+						return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
+					}
+				}
+				return { policy: "deny" };
+			}
 		}
 	}
 }
@@ -728,7 +773,7 @@ export async function rememberCompound(
 	pendingPieces: PieceEvaluation[],
 	action: "allow" | "deny",
 	ctx: EngineContext,
-): Promise<Omit<PermissionRule, "layer"> | undefined> {
+): Promise<Omit<PermissionRule, "layer"> | typeof SCOPE_BACK | undefined> {
 	const toRule = (piece: PieceEvaluation): CandidateRule => {
 		const pattern = firstTokenPattern(piece.text);
 		return candidate("bash", action, "pattern", { command: pattern }, `${pattern}`);
@@ -763,17 +808,22 @@ export async function rememberCompound(
 				segments: [{ text: `${pendingPieces.length} pending pieces — an exact match would never fire again, so:` }],
 				style: "muted",
 			},
+			{
+				segments: [{ text: "[x] rows are written as rules; uncheck the ones you don't want" }],
+				style: "muted",
+			},
 		],
 		options: buildOptions(pendingPieces),
 		checklist: true,
 		allowEdit: true,
 		previewFor,
+		helpText: "j/k navigate  space/enter toggle  enter write checked  esc back",
 		// The write button is preselected: all rows start checked, so Enter
 		// writes immediately (spec §5.1). Row = pieces.length (last option).
 		initialIndex: pendingPieces.length,
 	};
 	const index = await ui.showPermissionDialog?.(request);
-	if (index === -1 || index === undefined) return undefined; // plain cancel
+	if (index === -1 || index === undefined) return SCOPE_BACK; // esc — back to the compound decision page
 	if (index < -1) {
 		// e: edit the selected piece's glob, then write the edited rule directly.
 		const pieceIndex = -index - 2;
@@ -905,33 +955,40 @@ export async function promptForDecision(
 	const baseOptions = rememberDisabled
 		? [ALLOW_ALL_ONCE, DENY_ALL]
 		: [ALLOW_ALL_ONCE, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
-	const chosen = await chooseLabel(
-		ui,
-		dialogTitle(ui, title, metaLines),
-		baseOptions,
-		lines,
-		suggestionsPromise?.then(result => result.options),
-	);
-	switch (chosen) {
-		case ALLOW_ALL_ONCE:
-			return { policy: "allow" };
-		case DENY_ALL:
-			return { policy: "deny" };
-		case ALLOW_ALL_REMEMBER: {
-			const rule = await rememberCompound(ui, pendingPieces, "allow", ctx);
-			return rule === undefined ? { policy: "deny" } : { policy: "allow", remembered: rule };
-		}
-		case DRILL_DOWN:
-			return drillDownPieces(ui, pendingPieces, decision, ctx, opts);
-		default:
-			// Suggestion option picked from the dialog (appended options).
-			if (chosen !== undefined && suggestionsPromise !== undefined) {
-				const picked = (await suggestionsPromise).byLabel.get(chosen);
-				if (picked !== undefined) {
-					await writeRememberedRule(picked.rule, ctx);
-					return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
-				}
+	// "Allow all pending once" is preselected: the least-commitment action is
+	// the recommended default (auto-mode-with-confirmation). Esc on the
+	// remember checklist returns here (auto-mode-with-confirmation back nav).
+	while (true) {
+		const chosen = await chooseLabel(
+			ui,
+			dialogTitle(ui, title, metaLines),
+			baseOptions,
+			lines,
+			suggestionsPromise?.then(result => result.options),
+			{ initialIndex: 0 },
+		);
+		switch (chosen) {
+			case ALLOW_ALL_ONCE:
+				return { policy: "allow" };
+			case DENY_ALL:
+				return { policy: "deny" };
+			case ALLOW_ALL_REMEMBER: {
+				const rule = await rememberCompound(ui, pendingPieces, "allow", ctx);
+				if (rule === SCOPE_BACK) continue; // back to the compound decision page
+				return rule === undefined ? { policy: "deny" } : { policy: "allow", remembered: rule };
 			}
-			return { policy: "deny" };
+			case DRILL_DOWN:
+				return drillDownPieces(ui, pendingPieces, decision, ctx, opts);
+			default:
+				// Suggestion option picked from the dialog (appended options).
+				if (chosen !== undefined && suggestionsPromise !== undefined) {
+					const picked = (await suggestionsPromise).byLabel.get(chosen);
+					if (picked !== undefined) {
+						await writeRememberedRule(picked.rule, ctx);
+						return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
+					}
+				}
+				return { policy: "deny" };
+		}
 	}
 }

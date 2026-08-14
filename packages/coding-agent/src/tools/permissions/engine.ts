@@ -1,10 +1,11 @@
+import * as path from "node:path";
 import type { AgentTool, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import { type ApprovalPolicy, getToolDecision, normalizePolicy, type ResolvedApproval } from "../approval";
 import { bashApprovalPatternToRegExp, normalizeBashApprovalPattern } from "../bash";
 import { CURATED_ALLOW_TOOLS, isSafeConsumerStage, matchCuratedDeny } from "./curated";
-import { loadRuleLayers, type PermissionRule, type RuleLayer } from "./rules";
+import { findNearestProjectRoot, loadRuleLayers, type PermissionRule, type RuleLayer } from "./rules";
 import { extractSubCommands, isPipeline, isSinglePiece, parseCommand, type ShellPiece } from "./split";
 
 export type PermissionPolicy = "allow" | "deny" | "prompt";
@@ -45,6 +46,17 @@ const BASH_TOOL = { name: "bash", approval: undefined, formatApprovalDetails: un
 
 /** `permissions.default` is read through the settings schema (added with the engine; Task 6 extends the group). */
 export const POSTURE_KEY = "permissions.default";
+
+/**
+ * Write tools whose target path can be attributed and contained: `edit` and
+ * `write` carry a single `path`, `ast_edit` a `paths` array. Bash redirects
+ * and MCP tools are intentionally excluded — their writes cannot be attributed
+ * to a project path.
+ */
+const PROJECT_WRITE_TOOLS: ReadonlySet<string> = new Set(["edit", "write", "ast_edit"]);
+
+/** `permissions.projectWrites` is read through the settings schema. */
+export const PROJECT_WRITES_KEY = "permissions.projectWrites";
 
 let invalidRegexWarned = false;
 
@@ -90,6 +102,63 @@ export function resolvePosture(settings: Pick<Settings, "get" | "isConfigured">)
 		}
 	}
 	return "prompt";
+}
+
+/**
+ * Resolve the project-writes posture: an explicitly configured
+ * `permissions.projectWrites` wins; otherwise the general posture applies.
+ * The schema default (`prompt`) is inert until configured, mirroring
+ * {@link resolvePosture}.
+ */
+export function resolveProjectWritesPosture(settings: Pick<Settings, "get" | "isConfigured">): Posture {
+	if (settings.isConfigured(PROJECT_WRITES_KEY)) {
+		const raw = settings.get(PROJECT_WRITES_KEY);
+		return raw === "allow" || raw === "deny" ? raw : "prompt";
+	}
+	return resolvePosture(settings);
+}
+
+/**
+ * The target path of a write tool call, resolved against cwd (and `~` when
+ * home is known). `edit`/`write` carry `path`; `ast_edit` carries `paths`.
+ */
+function writeTargetPath(args: unknown, cwd: string, home: string | undefined): string | undefined {
+	if (args === null || typeof args !== "object" || Array.isArray(args)) return undefined;
+	const record = args as Record<string, unknown>;
+	let target: string | undefined;
+	if (typeof record.path === "string" && record.path.length > 0) {
+		target = record.path;
+	} else if (Array.isArray(record.paths)) {
+		target = record.paths.find((value): value is string => typeof value === "string" && value.length > 0);
+	}
+	if (target === undefined) return undefined;
+	if (target === "~" || target.startsWith("~/")) {
+		const homeDir = home ?? "";
+		if (homeDir.length > 0) return path.join(homeDir, target.slice(target === "~" ? 1 : 2));
+	}
+	return path.resolve(cwd, target);
+}
+
+/** True when the (possibly relative) target path resolves inside the nearest project root. */
+function isInsideProjectDir(target: string, cwd: string): boolean {
+	const root = findNearestProjectRoot(cwd);
+	const relative = path.relative(root, target);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/**
+ * The posture that applies to this call: write tools targeting the project
+ * directory use `permissions.projectWrites` when configured, everything else
+ * uses the general posture.
+ */
+function resolveEffectivePosture(ctx: EngineContext, toolName: string, args: unknown): Posture {
+	if (PROJECT_WRITE_TOOLS.has(toolName)) {
+		const target = writeTargetPath(args, ctx.cwd, ctx.home);
+		if (target !== undefined && isInsideProjectDir(target, ctx.cwd)) {
+			return resolveProjectWritesPosture(ctx.settings);
+		}
+	}
+	return resolvePosture(ctx.settings);
 }
 
 /** Legacy `bash.patterns` settings entries as a `legacy`-layer rule list (last in layer tie-break order). */
@@ -527,7 +596,12 @@ function evaluatePermissionCore(
 		return { policy: "allow", tier: decision.tier, source: "curated", override: false };
 	}
 
-	return { policy: resolvePosture(ctx.settings), tier: decision.tier, source: "posture", override: false };
+	return {
+		policy: resolveEffectivePosture(ctx, tool.name, args),
+		tier: decision.tier,
+		source: "posture",
+		override: false,
+	};
 }
 
 export function evaluatePermission(
@@ -610,8 +684,26 @@ function evaluateBashPiece(
 	// and the piece allow only stands when every sub-command is allowed.
 	// Unanalyzable residue (malformed constructs, non-simple pipeline stages,
 	// excessive nesting) degrades the allow to a prompt (R1 — over-prompt).
+	// Posture allows (`permissions.default: allow` / legacy yolo) skip the
+	// degradation: the user opted into auto-approving everything not denied
+	// and no rule is vouching, so prompting on parser limits under allow-all
+	// is noise. Sub-commands are still recursed below, so curated/rule denies
+	// inside substitutions keep denying.
 	const subs = extractSubCommands(piece.text, depth);
 	if (subs === null) {
+		if (decision.source === "posture") {
+			return {
+				evaluation: {
+					text: piece.text,
+					operator: piece.operator,
+					policy: "allow",
+					ruleId: decision.ruleId,
+					layer: decision.layer,
+					reason: decision.reason,
+				},
+				source: decision.source,
+			};
+		}
 		return {
 			evaluation: {
 				text: piece.text,

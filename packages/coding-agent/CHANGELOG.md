@@ -6,8 +6,18 @@
 
 ### Added
 
+- New global posture `permissions.projectWrites` (settings UI, Permissions group): overrides the default posture for write tools (`edit`, `write`, `ast_edit`) whose target path resolves inside the project directory. `allow` auto-approves project-scoped writes; `prompt`/`deny` behave like the general posture. Unconfigured, it falls back to `permissions.default`.
 - Merged the dynamic layer into the user layer: remembered approval-dialog rules now write to `~/.omp/agent/permissions.yml` like hand-added rules, with two file-backed layers (project, user) total. Rules left in the legacy `permissions.dynamic.yml` still load (folded into the user layer) and `/permissions migrate` physically merges and removes the file.
 - `/permissions remove` removes rules from any file-backed layer (user, or — with `--project` — repo-committed project rules); tab completion after `remove` covers the removable layers and labels each id with its layer.
+
+### Changed
+
+- `permissions.llmSuggestions` now defaults to **off**: the one-shot model rule-suggestion side request is opt-in (`permissions.llmSuggestions: true`).
+- The allow-all posture (`permissions.default: allow`, legacy yolo) no longer prompts on unanalyzable bash residue (malformed substitutions, nesting past the analysis depth): the R1 degradation now applies to rule-backed allows only, while curated/rule denies inside substitutions still deny.
+- Approval dialogs preselect the recommended action: the decision page preselects "Allow once" (compound: "Allow all pending once", forced prompts: "Approve"), and the scope page keeps preselecting the Pattern candidate — auto-mode-with-confirmation.
+- Esc on the remember scope page (and the compound remember checklist) now returns to the decision page instead of denying the call; esc on the decision page is the only cancel.
+- Remember options are dropped (with an explanatory note) when every candidate scope is exact — one-shot code tools like eval can only remember an identical call.
+- The compound remember checklist no longer denies the call when Enter is pressed on a piece row: rows toggle (space or enter), only the "Write checked rules" button commits, and the help line documents the keys plus the `[x]` meaning.
 
 ## [17.3.1+vith-fork.142.d1177a301b] - 2026-08-14
 
