@@ -75,6 +75,11 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		description: "Show or switch the overall permission mode (allow, prompt, deny)",
 		acpDescription: "Show or switch the permission mode",
 		acpInputHint: "[allow|prompt|deny]",
+		subcommands: [
+			{ name: "allow", description: "Allow commands not covered by rules without prompting" },
+			{ name: "prompt", description: "Prompt for commands not covered by rules" },
+			{ name: "deny", description: "Deny commands not covered by rules" },
+		],
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			await runtime.output(

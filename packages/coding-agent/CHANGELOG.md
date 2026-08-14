@@ -4,7 +4,7 @@
 
 ### Added
 
-- `/mode [allow|prompt|deny]` slash command: shows the current permission posture, or switches it persistently via `permissions.default`.
+- `/mode [allow|prompt|deny]` slash command: shows the current permission posture, or switches it persistently via `permissions.default` (the three postures tab-complete).
 - `app.permissions.cycleMode` keybinding (default `ctrl+shift+m`): cycles the permission posture allow → prompt → deny and writes it persistently.
 
 ### Fixed
