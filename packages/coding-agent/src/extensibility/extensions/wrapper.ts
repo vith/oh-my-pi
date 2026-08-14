@@ -161,20 +161,39 @@ function autoApproveSettings(base: Settings): Pick<Settings, "get" | "isConfigur
  * Deny error for the approval gate. True user-policy denies keep the
  * remediation hint naming the legacy settings key; every other deny (tool
  * declarations, curated critical patterns, file rules) names the engine's
- * reason so the blocker is actionable (plan ruling, round 2). Only
- * posture-source denies (permissions.default: deny) also carry the exact
- * allow-rule YAML (spec §5.2) — a dynamic allow rule can unblock a posture
- * deny, but deny is absolute against curated/rule/tool/user layers, so a
- * suggestion there would tell the model a rule that cannot work.
+ * reason so the blocker is actionable (plan ruling, round 2). Rule-source
+ * denies (spec §5.2) and posture-source denies (permissions.default: deny)
+ * also carry the allow suggestion: an allow that strictly beats the deciding
+ * deny by class then specificity (deny wins ties) renders its exact YAML, a
+ * deny nothing beats renders the dead end, and a posture deny suggests the
+ * first allow candidate (a dynamic allow beats the default posture). Tool/
+ * curated denies stay suggestion-free: they are absolute.
  */
-function blockedByPolicyError(toolName: string, decision: EngineDecision, args?: unknown): Error {
+function blockedByPolicyError(
+	toolName: string,
+	decision: EngineDecision,
+	args: unknown,
+	engineCtx: EngineContext,
+): Error {
 	const base =
 		decision.source === "user"
 			? `Tool "${toolName}" is blocked by user policy.\n` +
 				`To allow: remove "tools.approval.${toolName}: deny" from config.`
 			: `Tool "${toolName}" is blocked: ${decision.reason ?? "denied by permission policy"}`;
-	if (args !== undefined && decision.source === "posture") {
-		return new Error(`${base}\n${renderAllowSuggestion(toolName, args)}`);
+	// Bash tool-declared denies short-circuit the engine walk's source to
+	// "tool" (the tool approval re-emits the engine decision), so a bash rule
+	// deny only re-opens the gate via its ruleId. Curated hard-denies carry no
+	// ruleId and stay suggestion-free, as do tool/user-source denies. The
+	// suggestion judges the DENIED PIECE, not the whole compound command:
+	// piece-level allow overrides only match their own piece text.
+	const deniedPiece = decision.pieces?.find(piece => piece.policy === "deny");
+	const bashRuleDeny = toolName === "bash" && decision.ruleId !== undefined;
+	if (args !== undefined && (decision.source === "posture" || decision.source === "rule" || bashRuleDeny)) {
+		const suggestionArgs =
+			deniedPiece !== undefined && toolName === "bash"
+				? { ...(args as Record<string, unknown>), command: deniedPiece.text }
+				: args;
+		return new Error(`${base}\n${renderAllowSuggestion(toolName, suggestionArgs, engineCtx)}`);
 	}
 	return new Error(base);
 }
@@ -270,7 +289,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		return {
 			settings: context?.autoApprove === true || settings === undefined ? autoApproveSettings(base) : base,
 			cwd: context?.sessionManager?.getCwd() ?? process.cwd(),
-			home: undefined,
+			home: context?.home,
 		};
 	}
 
@@ -359,7 +378,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const shortCircuit = evaluatePermission(this.tool, shortCircuitArgs, engineCtx);
 		if (shortCircuit.policy === "deny") {
 			await this.#recordAudit(shortCircuit, shortCircuitArgs, "blocked", context, engineCtx);
-			throw blockedByPolicyError(this.tool.name, shortCircuit, shortCircuitArgs);
+			throw blockedByPolicyError(this.tool.name, shortCircuit, shortCircuitArgs, engineCtx);
 		}
 
 		// 1. Emit tool_call event first - extensions can block execution or revise the input the tool
@@ -410,7 +429,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		context?.xdevTierResolved?.(decision.tier);
 		if (decision.policy === "deny") {
 			await this.#recordAudit(decision, resolvedArgs, "blocked", context, engineCtx);
-			throw blockedByPolicyError(this.tool.name, decision, resolvedArgs);
+			throw blockedByPolicyError(this.tool.name, decision, resolvedArgs, engineCtx);
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
 		// An xd:// device dispatch already cleared the write tool's outer gate at
@@ -484,7 +503,17 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				let resolution: PromptResolution;
 				try {
 					resolution = await promptForDecision(uiContext, this.tool.name, resolvedArgs, decision, engineCtx, {
-						title: safetyPrompt,
+						// The v3 dialog titles itself ("Approve this command?") and
+						// carries the approval reason and tool details in its
+						// metadata lines; the legacy full-prompt title stays only
+						// for provider-safety forced prompts, whose binary flow
+						// keeps the whole text.
+						...(includeCandidates
+							? {
+									approvalReason: approvalCheck.reason,
+									approvalDetails: this.tool.formatApprovalDetails?.(resolvedArgs),
+								}
+							: { title: safetyPrompt }),
 						// Provider safety checks are stronger than any rule: the dialog
 						// shows without candidates and only offers Approve/Deny.
 						includeCandidates,

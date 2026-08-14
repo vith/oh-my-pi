@@ -3,9 +3,9 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import { type ApprovalPolicy, getToolDecision, normalizePolicy, type ResolvedApproval } from "../approval";
 import { bashApprovalPatternToRegExp, normalizeBashApprovalPattern } from "../bash";
-import { CURATED_ALLOW_TOOLS, matchCuratedDeny } from "./curated";
+import { CURATED_ALLOW_TOOLS, isSafeConsumerStage, matchCuratedDeny } from "./curated";
 import { loadRuleLayers, type PermissionRule, type RuleLayer } from "./rules";
-import { extractSubCommands, isSinglePiece, parseCommand, type ShellPiece } from "./split";
+import { extractSubCommands, isPipeline, isSinglePiece, parseCommand, type ShellPiece } from "./split";
 
 export type PermissionPolicy = "allow" | "deny" | "prompt";
 export type Posture = "allow" | "prompt" | "deny";
@@ -16,6 +16,8 @@ export interface PieceEvaluation {
 	ruleId?: string;
 	layer?: RuleLayer;
 	reason?: string;
+	/** Top-level control operator that preceded this piece (bash compounds only). */
+	operator?: ShellPiece["operator"];
 }
 
 export interface EngineDecision {
@@ -90,8 +92,8 @@ export function resolvePosture(settings: Pick<Settings, "get" | "isConfigured">)
 	return "prompt";
 }
 
-/** Legacy `bash.patterns` settings entries as a `legacy`-layer rule list (highest rule precedence). */
-function legacyBashPatterns(settings: Pick<Settings, "get" | "isConfigured">): PermissionRule[] {
+/** Legacy `bash.patterns` settings entries as a `legacy`-layer rule list (last in layer tie-break order). */
+export function legacyBashPatterns(settings: Pick<Settings, "get" | "isConfigured">): PermissionRule[] {
 	const raw: unknown = settings.get("bash.patterns");
 	if (!Array.isArray(raw)) return [];
 	const rules: PermissionRule[] = [];
@@ -163,6 +165,18 @@ function compileRegex(pattern: string): RegExp | null {
 	}
 }
 
+/**
+ * Normalize a bash command text for rule matching: collapse whitespace runs
+ * (as {@link normalizeBashApprovalPattern}) AND drop whitespace immediately
+ * after `|`, mirroring the tokenizer's glued stage text ("… |head -1").
+ * Applying it to an already-normalized pattern is a no-op (idempotent), so
+ * both spec-canonical spaced patterns and dialog-exact candidates compare
+ * against the same normalized form.
+ */
+function normalizeBashMatchText(value: string): string {
+	return normalizeBashApprovalPattern(value).replace(/\|\s+/gu, "|");
+}
+
 function matchPatternValue(key: string, value: unknown, pattern: unknown): boolean {
 	if (typeof pattern !== "string") return value === pattern;
 	if (isRegexWrapped(pattern)) {
@@ -172,11 +186,113 @@ function matchPatternValue(key: string, value: unknown, pattern: unknown): boole
 	}
 	if (typeof value !== "string") return false;
 	if (key === "command" || pattern.includes("*")) {
-		// Whitespace-normalized glob matching, identical to the bash approval helpers.
-		const candidate = key === "command" ? normalizeBashApprovalPattern(value) : value;
-		return bashApprovalPatternToRegExp(pattern).test(candidate);
+		// Whitespace-normalized glob matching, identical to the bash approval
+		// helpers — with both sides pipe-normalized so spaced and glued pipe
+		// forms are interchangeable.
+		const candidate = key === "command" ? normalizeBashMatchText(value) : value;
+		const normalizedPattern = key === "command" ? normalizeBashMatchText(pattern) : pattern;
+		return bashApprovalPatternToRegExp(normalizedPattern).test(candidate);
 	}
 	return value === pattern;
+}
+
+export type MatchClass = "exact-structure" | "covering";
+
+/**
+ * Whether a command pattern explicitly contains pipeline structure: a literal
+ * `|` in a glob, or an unescaped alternation in a regex-wrapped pattern.
+ */
+export function patternHasPipe(pattern: string): boolean {
+	if (isRegexWrapped(pattern)) {
+		const source = pattern.slice(1, -1);
+		for (let i = 0; i < source.length; i++) {
+			if (source[i] === "|" && (i === 0 || source[i - 1] !== "\\")) return true;
+		}
+		return false;
+	}
+	return pattern.includes("|");
+}
+
+/**
+ * Specificity score (spec §3.1): literal-token count for glob patterns —
+ * `command` patterns split on whitespace, path patterns on `/`; regex-wrapped
+ * patterns score the length of their literal prefix. Higher = more specific.
+ */
+export function patternSpecificity(key: string, pattern: string): number {
+	if (isRegexWrapped(pattern)) {
+		let length = 0;
+		for (const ch of pattern.slice(1, -1)) {
+			if (/[.*+?^${}()|[\]\\]/u.test(ch)) break;
+			length++;
+		}
+		return length;
+	}
+	if (key === "command") {
+		return pattern.split(/\s+/u).filter(token => token.length > 0 && !token.includes("*") && !token.includes("?"))
+			.length;
+	}
+	return pattern.split("/").filter(segment => segment.length > 0 && !segment.includes("*") && !segment.includes("?"))
+		.length;
+}
+
+/** Match class of a pattern against a command (spec §3.1): same pipeline shape = exact-structure, else covering. */
+export function matchClassOf(pattern: string, command: string | undefined): MatchClass {
+	if (command === undefined || command.length === 0) return "exact-structure";
+	return patternHasPipe(pattern) === isPipeline(command) ? "exact-structure" : "covering";
+}
+
+export interface RuleMatch {
+	rule: PermissionRule;
+	matchClass: MatchClass;
+	specificity: number;
+}
+
+const LAYER_RANK: Record<RuleLayer, number> = { dynamic: 0, project: 1, user: 2, legacy: 3, curated: 4 };
+
+/**
+ * Best whole-command rule match (spec §3.1 step 2): match class, then
+ * specificity, then deny-wins-ties, then layer order. Returns undefined when
+ * nothing matches. The caller owns shell-control degradation of allow winners.
+ */
+export function resolveWholeCommandRule(
+	rules: PermissionRule[],
+	toolName: string,
+	args: unknown,
+): RuleMatch | undefined {
+	const command = toolName === "bash" ? bashCommandArg(args) : undefined;
+	let best: RuleMatch | undefined;
+	for (const rule of rules) {
+		if (!matchRule(rule, toolName, args)) continue;
+		const commandPattern = rule.match.command;
+		const matchClass: MatchClass =
+			typeof commandPattern === "string" ? matchClassOf(commandPattern, command) : "exact-structure";
+		// Specificity sums the literal count of EVERY match key (spec §3.1): a
+		// rule matching on command + arg is strictly more specific than the
+		// same command pattern alone.
+		let specificity = 0;
+		for (const [key, pattern] of Object.entries(rule.match)) {
+			if (typeof pattern === "string") specificity += patternSpecificity(key, pattern);
+		}
+		const candidate: RuleMatch = { rule, matchClass, specificity };
+		if (best === undefined) {
+			best = candidate;
+			continue;
+		}
+		const classRank = (match: RuleMatch): number => (match.matchClass === "exact-structure" ? 1 : 0);
+		const layerRank = (r: PermissionRule): number => LAYER_RANK[r.layer] ?? 9;
+		const better =
+			classRank(candidate) !== classRank(best)
+				? classRank(candidate) > classRank(best)
+				: candidate.specificity !== best.specificity
+					? candidate.specificity > best.specificity
+					: candidate.rule.action === best.rule.action
+						? layerRank(candidate.rule) < layerRank(best.rule)
+						: candidate.rule.action === "deny" || best.rule.action === "deny"
+							? candidate.rule.action === "deny" // deny wins ties
+							: layerRank(candidate.rule) < layerRank(best.rule); // layer wins non-deny ties
+		if (better) best = candidate;
+	}
+	return best;
 }
 
 /**
@@ -320,20 +436,20 @@ export function matchRule(rule: PermissionRule, toolName: string, args: unknown)
 }
 
 /**
- * Full decision pipeline (Global Constraints precedence steps 1–11):
+ * Full decision pipeline (Global Constraints precedence steps 1–8):
  *
  * 1. tool-declared deny
  * 2. legacy user-policy deny (`tools.approval.<tool>: deny`)
- * 3. legacy `bash.patterns` deny (top rule layer — evaluated before curated so
- *    user-configured denies surface their own rule ids)
- * 4. curated deny (`CRITICAL_BASH_PATTERNS` for bash)
- * 5. file-backed rule deny (dynamic → project → user)
- * 6. tool-declared `prompt` / `override: true`
- * 7. legacy user-policy prompt
- * 8. legacy user-policy allow
- * 9. first-match non-deny rule (legacy allow gated on a single-piece command → dynamic → project → user)
- * 10. curated read-only allowlist
- * 11. default posture
+ * 3. curated deny (`CRITICAL_BASH_PATTERNS` for bash) — absolute, checked
+ *    before the rule pool so critical patterns always surface their own source
+ * 4. unified whole-command resolution over the legacy `bash.patterns` pool
+ *    joined with the file-backed rules (match class → specificity →
+ *    deny-wins-ties → layer order; legacy allows gated on a single-piece
+ *    command, spec §3.1/§3.3)
+ * 5. tool-declared `prompt` / `override: true`
+ * 6. legacy user-policy prompt
+ * 7. legacy user-policy allow
+ * 8. curated read-only allowlist, then default posture
  */
 function evaluatePermissionCore(
 	tool: { name: string; approval?: unknown; formatApprovalDetails?: unknown },
@@ -357,23 +473,8 @@ function evaluatePermissionCore(
 		return { policy: "deny", tier: decision.tier, source: "user", override: false };
 	}
 
-	const legacy = legacyBashPatterns(ctx.settings);
 	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
 	const command = bashCommandArg(args);
-
-	for (const rule of legacy) {
-		if (rule.action === "deny" && matchRule(rule, tool.name, args)) {
-			return {
-				policy: "deny",
-				tier: decision.tier,
-				ruleId: rule.id,
-				layer: rule.layer,
-				reason: rule.reason,
-				source: "rule",
-				override: false,
-			};
-		}
-	}
 
 	const curated = matchCuratedDeny(tool.name, command);
 	if (curated) {
@@ -387,18 +488,27 @@ function evaluatePermissionCore(
 		};
 	}
 
-	for (const rule of rules) {
-		if (rule.action === "deny" && matchRule(rule, tool.name, args)) {
-			return {
-				policy: "deny",
-				tier: decision.tier,
-				ruleId: rule.id,
-				layer: rule.layer,
-				reason: rule.reason,
-				source: "rule",
-				override: false,
-			};
-		}
+	// Unified whole-command resolution (spec §3.1 step 2): the legacy
+	// `bash.patterns` pool joins the file-backed rules, with its allow gate
+	// (single-piece command) preserved. Deny no longer short-circuits by list
+	// order — match class, specificity, deny-wins-ties, then layer order
+	// decide. `allow` degrades to a prompt when the command carries shell
+	// control (ruling R1); `prompt` rules match any piece text (ruling R2).
+	const legacy = legacyBashPatterns(ctx.settings);
+	const legacyAllowActive = legacyAllowEnabled && command !== undefined && isSinglePiece(command);
+	const pool = [...legacy.filter(rule => rule.action !== "allow" || legacyAllowActive), ...rules];
+	const best = resolveWholeCommandRule(pool, tool.name, args);
+	if (best !== undefined) {
+		const degraded = best.rule.action === "allow" && bashAllowDegradedByShellControl(tool.name, command);
+		return {
+			policy: degraded ? "prompt" : best.rule.action,
+			tier: decision.tier,
+			ruleId: best.rule.id,
+			layer: best.rule.layer,
+			reason: best.rule.reason,
+			source: "rule",
+			override: false,
+		};
 	}
 
 	if (decision.policy === "prompt" || decision.override) {
@@ -411,75 +521,6 @@ function evaluatePermissionCore(
 
 	if (userPolicy === "allow") {
 		return { policy: "allow", tier: decision.tier, source: "user", override: false };
-	}
-
-	// Legacy patterns only vouch for a single-piece command: the gate is
-	// enabled by evaluateBashCommand for whole-command analysis and re-checked
-	// against the command seen here so direct calls never under-analyze.
-	// Non-deny actions honor list order. `allow` degrades to a prompt when the
-	// command carries shell control (ruling R1); `prompt` rules match any piece
-	// text (ruling R2 — they were previously never consulted).
-	const legacyAllowActive = legacyAllowEnabled && command !== undefined && isSinglePiece(command);
-	for (const rule of legacy) {
-		if (rule.action === "allow") {
-			if (!legacyAllowActive || !matchRule(rule, tool.name, args)) continue;
-			if (bashAllowDegradedByShellControl(tool.name, command)) {
-				return {
-					policy: "prompt",
-					tier: decision.tier,
-					ruleId: rule.id,
-					layer: rule.layer,
-					reason: rule.reason,
-					source: "rule",
-					override: false,
-				};
-			}
-			return {
-				policy: "allow",
-				tier: decision.tier,
-				ruleId: rule.id,
-				layer: rule.layer,
-				reason: rule.reason,
-				source: "rule",
-				override: false,
-			};
-		}
-		if (rule.action === "prompt" && matchRule(rule, tool.name, args)) {
-			return {
-				policy: "prompt",
-				tier: decision.tier,
-				ruleId: rule.id,
-				layer: rule.layer,
-				reason: rule.reason,
-				source: "rule",
-				override: false,
-			};
-		}
-	}
-
-	for (const rule of rules) {
-		if (rule.action !== "deny" && matchRule(rule, tool.name, args)) {
-			if (rule.action === "allow" && bashAllowDegradedByShellControl(tool.name, command)) {
-				return {
-					policy: "prompt",
-					tier: decision.tier,
-					ruleId: rule.id,
-					layer: rule.layer,
-					reason: rule.reason,
-					source: "rule",
-					override: false,
-				};
-			}
-			return {
-				policy: rule.action,
-				tier: decision.tier,
-				ruleId: rule.id,
-				layer: rule.layer,
-				reason: rule.reason,
-				source: "rule",
-				override: false,
-			};
-		}
 	}
 
 	if ((CURATED_ALLOW_TOOLS as readonly string[]).includes(tool.name)) {
@@ -553,6 +594,7 @@ function evaluateBashPiece(
 		return {
 			evaluation: {
 				text: piece.text,
+				operator: piece.operator,
 				policy: decision.policy,
 				ruleId: decision.ruleId,
 				layer: decision.layer,
@@ -573,6 +615,7 @@ function evaluateBashPiece(
 		return {
 			evaluation: {
 				text: piece.text,
+				operator: piece.operator,
 				policy: "prompt",
 				ruleId: decision.ruleId,
 				layer: decision.layer,
@@ -588,6 +631,7 @@ function evaluateBashPiece(
 			return {
 				evaluation: {
 					text: piece.text,
+					operator: piece.operator,
 					policy: "deny",
 					ruleId: subDecision.ruleId ?? decision.ruleId,
 					layer: subDecision.layer ?? decision.layer,
@@ -596,10 +640,16 @@ function evaluateBashPiece(
 				source: subDecision.source,
 			};
 		}
+		if (subDecision.policy === "prompt" && subDecision.source === "posture" && isSafeConsumerStage(sub)) {
+			// §4.3 safe-consumer exemption: no rule touched this stage, and it is a
+			// curated pure filter — treat it as allowed.
+			continue;
+		}
 		if (subDecision.policy === "prompt" && sawPrompt === undefined) {
 			sawPrompt = {
 				evaluation: {
 					text: piece.text,
+					operator: piece.operator,
 					policy: "prompt",
 					ruleId: subDecision.ruleId,
 					layer: subDecision.layer,
@@ -613,6 +663,7 @@ function evaluateBashPiece(
 	return {
 		evaluation: {
 			text: piece.text,
+			operator: piece.operator,
 			policy: "allow",
 			ruleId: decision.ruleId,
 			layer: decision.layer,
@@ -702,5 +753,103 @@ export function evaluateBashCommand(command: string, ctx: EngineContext, depth =
 		source: decisive.source,
 		override: false,
 		pieces: evaluations,
+	};
+}
+
+/**
+ * Near-miss line (spec §5.1): the closest rule that shares the piece's first
+ * token with a narrower glob but does not match it. Undefined when nothing is
+ * genuinely close (different command families are never shown).
+ */
+export function nearMissLine(pieceText: string, ctx: EngineContext): string | undefined {
+	const firstToken = pieceText.trim().split(/\s+/u)[0] ?? "";
+	if (firstToken.length === 0) return undefined;
+	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
+	let best: PermissionRule | undefined;
+	let bestSpecificity = 0;
+	for (const rule of rules) {
+		if (rule.tool !== "bash" && rule.tool !== "*") continue;
+		const pattern = rule.match.command;
+		if (typeof pattern !== "string" || isRegexWrapped(pattern)) continue;
+		const patternToken = pattern.split(/\s+/u)[0] ?? "";
+		if (patternToken !== firstToken) continue;
+		if (matchRule(rule, "bash", { command: pieceText })) continue; // matches — not a miss
+		const specificity = patternSpecificity("command", pattern);
+		if (specificity > bestSpecificity) {
+			bestSpecificity = specificity;
+			best = rule;
+		}
+	}
+	if (best === undefined || best.match.command === undefined) return undefined;
+	return `≈ ${best.id}: ${String(best.match.command)} (too narrow for this command)`;
+}
+
+export interface DenyOverride {
+	rule: PermissionRule;
+	matchClass: MatchClass;
+	specificity: number;
+}
+
+/**
+ * Deny-error suggestion outcome (spec §5.2): whether a deny rule decided, and
+ * the best allow that would strictly beat it.
+ * - `no-deny`: no deny rule matched — a posture-source deny. A dynamic allow
+ *   beats the posture, so callers suggest the mechanical first candidate.
+ * - `dead-end`: a deny decided and no allow strictly beats it (deny wins ties
+ *   at equal class/specificity).
+ * - `override`: the best strictly-beating allow, with the deciding deny.
+ */
+export type DenySuggestion =
+	| { status: "no-deny" }
+	| { status: "dead-end"; deny: PermissionRule }
+	| { status: "override"; deny: PermissionRule; allow: DenyOverride };
+
+const BASH_COMMAND_ARGS = (command: string): Record<string, unknown> => ({ command });
+
+/** Deny-error suggestion for a bash command (spec §5.2): {@link denySuggestion} over the command argument. */
+export function denyOverrideSuggestion(command: string, ctx: EngineContext): DenySuggestion {
+	return denySuggestion("bash", BASH_COMMAND_ARGS(command), ctx);
+}
+
+/**
+ * Deny-error suggestion (spec §5.2): when a deny decides, the best allow-only
+ * whole-command match that strictly beats the best matching deny by class then
+ * specificity — the exact rule the user can add to permit this call. See
+ * {@link DenySuggestion} for the three outcomes.
+ *
+ * The rule pool mirrors the runtime decision pool (evaluatePermissionCore):
+ * the legacy `bash.patterns` pool joins the file-backed rules for bash, so the
+ * suggestion judges against the ACTUAL deciding deny, including legacy denies.
+ * Whole-command matching only — a deny that decided a pipeline stage rather
+ * than the whole command is not surfaced here.
+ */
+export function denySuggestion(toolName: string, args: unknown, ctx: EngineContext): DenySuggestion {
+	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
+	const legacy = legacyBashPatterns(ctx.settings);
+	const command = bashCommandArg(args);
+	const legacyAllowActive = toolName === "bash" && command !== undefined && isSinglePiece(command);
+	const pool = [...legacy.filter(rule => rule.action !== "allow" || legacyAllowActive), ...rules];
+	const bestDeny = resolveWholeCommandRule(
+		pool.filter(rule => rule.action === "deny"),
+		toolName,
+		args,
+	);
+	if (bestDeny === undefined) return { status: "no-deny" };
+	const bestAllow = resolveWholeCommandRule(
+		pool.filter(rule => rule.action === "allow"),
+		toolName,
+		args,
+	);
+	if (bestAllow === undefined) return { status: "dead-end", deny: bestDeny.rule };
+	const classRank = (matchClass: MatchClass): number => (matchClass === "exact-structure" ? 1 : 0);
+	const beats =
+		classRank(bestAllow.matchClass) !== classRank(bestDeny.matchClass)
+			? classRank(bestAllow.matchClass) > classRank(bestDeny.matchClass)
+			: bestAllow.specificity > bestDeny.specificity;
+	if (!beats) return { status: "dead-end", deny: bestDeny.rule };
+	return {
+		status: "override",
+		deny: bestDeny.rule,
+		allow: { rule: bestAllow.rule, matchClass: bestAllow.matchClass, specificity: bestAllow.specificity },
 	};
 }

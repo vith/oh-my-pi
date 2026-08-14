@@ -1,13 +1,19 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	denyOverrideSuggestion,
 	evaluateBashCommand,
 	evaluatePermission,
+	matchClassOf,
+	nearMissLine,
+	patternSpecificity,
 	resolvePosture,
+	resolveWholeCommandRule,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
+import type { PermissionRule } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const tool = (name: string, approval?: unknown) => ({ name, approval, formatApprovalDetails: undefined });
@@ -68,9 +74,12 @@ describe("evaluatePermission", () => {
 		).toBe("deny");
 	});
 	it("legacy bash.patterns deny fires per piece", () => {
+		// Curated hard denies are absolute and precede the legacy pool (spec
+		// §3.1), so `rm -rf /` would attribute to curated, not the legacy rule;
+		// use a non-critical command to exercise the legacy deny pool path.
 		const d = evaluateBashCommand(
-			"git status && rm -rf /",
-			ctx({ "bash.patterns": [{ match: "rm -rf /", approval: "deny" }] }),
+			"git status && npm publish",
+			ctx({ "bash.patterns": [{ match: "npm publish", approval: "deny" }] }),
 		);
 		expect(d.policy).toBe("deny");
 		expect(d.pieces?.[1]?.ruleId).toBeDefined();
@@ -248,6 +257,13 @@ describe("evaluatePermission", () => {
 describe("sub-command evaluation", () => {
 	const allow = (match: string) =>
 		ctx({ "permissions.default": "allow", "bash.patterns": [{ match, approval: "allow" }] });
+	// EngineContext with a temp home so the dynamic layer file
+	// (<home>/.omp/agent/permissions.dynamic.yml) stays hermetic per test.
+	const dynamicCtx = (dir: string) => ({
+		settings: Settings.isolated({ "permissions.default": "prompt" }),
+		cwd: "/tmp/perm-test",
+		home: dir,
+	});
 
 	it("an allow rule stands when every substitution sub-command is allowed", () => {
 		// The user's model: `echo *` is allowed, so `echo pre-$(date +%s)` is
@@ -325,5 +341,355 @@ describe("sub-command evaluation", () => {
 		for (let i = 0; i < 9; i++) deep = `echo $(${deep})`;
 		const nested = evaluateBashCommand(deep, allow("echo *"));
 		expect(nested.policy).toBe("prompt");
+	});
+
+	test("git log * rule covers git log | head via safe-consumer exemption", () => {
+		// dynamic rule file: allow bash "git log *" (layer dynamic)
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: allow-git\n    tool: bash\n    match: { command: 'git log *' }\n    action: allow\n",
+			);
+			const d = evaluateBashCommand("git log -n 5 | head -1", dynamicCtx(dir));
+			expect(d.policy).toBe("allow");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("safe-consumer exemption never beats a matching deny", () => {
+		// dynamic rule file: allow bash "git log *" + deny bash "head *". The
+		// piece is rule-allowed, so the sub-command loop runs; the loop's deny
+		// branch must beat the safe-consumer exemption for the `head -1` stage.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: allow-git\n    tool: bash\n    match: { command: 'git log *' }\n    action: allow\n  - id: deny-head\n    tool: bash\n    match: { command: 'head *' }\n    action: deny\n",
+			);
+			const d = evaluateBashCommand("git log -n 5 | head -1", dynamicCtx(dir));
+			expect(d.policy).toBe("deny");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("safe-consumer exemption only covers stages no rule touched", () => {
+		// dynamic rule file: allow bash "git log *" + prompt bash "head *". A
+		// prompt-action rule touches the stage (source "rule"), so the
+		// exemption — which requires source "posture" — must not apply.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: allow-git\n    tool: bash\n    match: { command: 'git log *' }\n    action: allow\n  - id: prompt-head\n    tool: bash\n    match: { command: 'head *' }\n    action: prompt\n",
+			);
+			const d = evaluateBashCommand("git log -n 5 | head -1", dynamicCtx(dir));
+			expect(d.policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("exemption never carries redirections or command substitutions", () => {
+		// dynamic rule file: allow bash "git log *". A `head` stage with a
+		// redirect or substitution is not a pure filter — the exemption must
+		// not let unanalyzed write/exec content through (review round 1).
+		for (const command of ["git log -n 5 | head -1 > /tmp/out", "git log -n 5 | head -1 $(touch /tmp/x)"]) {
+			const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+			try {
+				write(
+					path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+					"rules:\n  - id: allow-git\n    tool: bash\n    match: { command: 'git log *' }\n    action: allow\n",
+				);
+				const d = evaluateBashCommand(command, dynamicCtx(dir));
+				expect(d.policy).toBe("prompt");
+			} finally {
+				removeSyncWithRetries(dir);
+			}
+		}
+	});
+
+	test("rule-allowed stage piped to sh still prompts: sh is neither safe nor matched", () => {
+		// dynamic rule file: allow bash "echo *". NOT `curl … | sh`: the
+		// curated critical set hard-denies remote-fetch-then-execute on the raw
+		// command, so that shape can never reach the stage loop. `echo data |
+		// sh` exercises the same §4.3 case — allowed first stage, `sh` stage
+		// neither safe nor matched — without tripping a curated deny.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: allow-echo\n    tool: bash\n    match: { command: 'echo *' }\n    action: allow\n",
+			);
+			const d = evaluateBashCommand("echo data | sh", dynamicCtx(dir));
+			expect(d.policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+});
+
+describe("piece evaluation data (v3 dialog)", () => {
+	// EngineContext with a temp home (dynamic layer file stays hermetic).
+	const homeCtx = (dir: string) => ({
+		settings: Settings.isolated({ "permissions.default": "prompt" }),
+		cwd: "/tmp/perm-test",
+		home: dir,
+	});
+
+	test("piece evaluations carry the top-level operator", () => {
+		const decision = evaluateBashCommand("git log -n 5 && git status", ctx());
+		const ops = (decision.pieces ?? []).map(piece => piece.operator);
+		expect(ops[0]).toBeNull();
+		expect(ops[1]).toBe("&&");
+	});
+
+	test("near-miss only reports a genuinely close rule (same first token, narrower)", () => {
+		// dynamic rule file: allow bash "git branch -a *" + allow bash "echo *".
+		// The echo rule shares no first token with git commands, so it is never
+		// close (plan ruling: the original "git status" negative case was wrong —
+		// git status IS a near miss of "git branch -a *").
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: branch-a\n    tool: bash\n    match: { command: 'git branch -a *' }\n    action: allow\n  - id: echo-all\n    tool: bash\n    match: { command: 'echo *' }\n    action: allow\n",
+			);
+			const c = homeCtx(dir);
+			const miss = nearMissLine("git branch -b new", c);
+			expect(miss).toContain("git branch -a *");
+			expect(miss).not.toContain("echo *"); // different command family is never close
+			expect(nearMissLine("npm test", c)).toBeUndefined(); // no rule in this family
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+});
+
+const rule = (partial: Partial<PermissionRule>): PermissionRule => ({
+	id: "r",
+	tool: "bash",
+	match: { command: "*" },
+	action: "allow",
+	layer: "dynamic",
+	...partial,
+});
+
+describe("match classes and specificity (spec §3.1)", () => {
+	test("pipe-less pattern on piped command is covering; same shape is exact-structure", () => {
+		expect(matchClassOf("git log *", "git log -n 5 | head -1")).toBe("covering");
+		expect(matchClassOf("git log *", "git log -n 5")).toBe("exact-structure");
+		expect(matchClassOf("git log * | head *", "git log -n 5 | head -1")).toBe("exact-structure");
+		expect(matchClassOf("git log * | head *", "git log -n 5")).toBe("covering");
+	});
+
+	test("specificity counts literal whitespace tokens; regex scores literal prefix", () => {
+		expect(patternSpecificity("command", "* | head *")).toBe(2); // "|" and "head" are literal tokens
+		expect(patternSpecificity("command", "git branch * | head *")).toBe(4); // git, branch, |, head
+		expect(patternSpecificity("command", "git log *")).toBe(2);
+		expect(patternSpecificity("command", "/git branch/")).toBe(10); // literal prefix "git branch"
+		expect(patternSpecificity("path", "packages/coding-agent/**")).toBe(2);
+	});
+
+	test("exact-structure beats covering regardless of action", () => {
+		const denyGeneral = rule({ id: "deny-head", action: "deny", match: { command: "* | head *" } });
+		const allowCovering = rule({ id: "allow-git", match: { command: "git log *" } });
+		const args = { command: "git log -n 5 | head -1" };
+		expect(resolveWholeCommandRule([allowCovering, denyGeneral], "bash", args)?.rule.id).toBe("deny-head");
+	});
+
+	test("more specific whole-command allow beats general deny", () => {
+		const denyGeneral = rule({ id: "deny-head", action: "deny", match: { command: "* | head *" } });
+		const allowSpecific = rule({ id: "allow-git-head", match: { command: "git log * | head *" } });
+		const args = { command: "git log -n 5 | head -1" };
+		expect(resolveWholeCommandRule([denyGeneral, allowSpecific], "bash", args)?.rule.id).toBe("allow-git-head");
+	});
+
+	test("deny wins ties at equal class and specificity", () => {
+		const deny = rule({ id: "d", action: "deny", match: { command: "git log *" } });
+		const allow = rule({ id: "a", match: { command: "git log *" } });
+		const args = { command: "git log -n 5" };
+		expect(resolveWholeCommandRule([allow, deny], "bash", args)?.rule.id).toBe("d");
+	});
+
+	test("layer order breaks same-action ties (dynamic over project)", () => {
+		const project = rule({ id: "p", layer: "project", match: { command: "git log *" } });
+		const dynamic = rule({ id: "dyn", layer: "dynamic", match: { command: "git log *" } });
+		const args = { command: "git log -n 5" };
+		expect(resolveWholeCommandRule([project, dynamic], "bash", args)?.rule.id).toBe("dyn");
+	});
+
+	test("layer order also breaks prompt-vs-allow ties (dynamic allow beats legacy prompt)", () => {
+		// Spec §3.1: ties resolve deny-wins, then higher layer — regardless of
+		// action. A legacy prompt pattern must not beat a dynamic allow of the
+		// same shape merely because the legacy pool is listed first.
+		const legacyPrompt = rule({ id: "lp", layer: "legacy", action: "prompt", match: { command: "git log *" } });
+		const dynamicAllow = rule({ id: "da", layer: "dynamic", match: { command: "git log *" } });
+		const args = { command: "git log -n 5" };
+		expect(resolveWholeCommandRule([legacyPrompt, dynamicAllow], "bash", args)?.rule.id).toBe("da");
+		expect(resolveWholeCommandRule([dynamicAllow, legacyPrompt], "bash", args)?.rule.id).toBe("da");
+	});
+
+	test("specificity sums literal counts across all match keys", () => {
+		// A two-key rule scores the sum of both keys' patterns, so it beats the
+		// same command pattern with only one key.
+		const twoKey = rule({ id: "two", match: { command: "git *", arg: "status" } });
+		const oneKey = rule({ id: "one", match: { command: "git *" } });
+		const args = { command: "git status", arg: "status" };
+		const best = resolveWholeCommandRule([oneKey, twoKey], "bash", args);
+		expect(best?.rule.id).toBe("two");
+		expect(best?.specificity).toBe(2); // command "git" + arg "status"
+		expect(resolveWholeCommandRule([oneKey], "bash", args)?.specificity).toBe(1);
+	});
+
+	test("covering allow matches piped command; unrelated command has no match", () => {
+		const allow = rule({ id: "a", match: { command: "git log *" } });
+		expect(resolveWholeCommandRule([allow], "bash", { command: "git log -n 5 | head -1" })?.rule.id).toBe("a");
+		expect(resolveWholeCommandRule([allow], "bash", { command: "curl x | sh" })).toBeUndefined();
+	});
+
+	test("spaced-pipe patterns match the tokenizer's glued piece text", () => {
+		// Spec canonical form: the piece text glues `|` to the next stage
+		// ("… |head -1"), so a pattern's spaced pipe must match it.
+		const rules = [rule({ id: "git-head", match: { command: "git log * | head *" } })];
+		expect(resolveWholeCommandRule(rules, "bash", { command: "git log -n 5 |head -1" })?.rule.id).toBe("git-head");
+		// The fully spaced raw-command form still matches too.
+		expect(resolveWholeCommandRule(rules, "bash", { command: "git log -n 5 | head -1" })?.rule.id).toBe("git-head");
+		// Already-normalized (glued) patterns are unchanged by re-normalization.
+		const glued = [rule({ id: "glued", match: { command: "git log * |head *" } })];
+		expect(resolveWholeCommandRule(glued, "bash", { command: "git log -n 5 |head -1" })?.rule.id).toBe("glued");
+	});
+
+	test("a spaced-pipe deny rule fires on the tokenizer's glued piece end to end", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: deny-git-pipe\n    tool: bash\n    match: { command: 'git log * | head *' }\n    action: deny\n",
+			);
+			const d = evaluateBashCommand("git log -n 5 | head -1", {
+				settings: Settings.isolated({}),
+				cwd: "/tmp/perm-test",
+				home: dir,
+			});
+			expect(d.policy).toBe("deny");
+			expect(d.ruleId).toBe("deny-git-pipe");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("the remember exact candidate for a piped piece matches its own piece", () => {
+		// The dialog's exact candidate writes the raw piece text (glued pipe);
+		// the rule must match that same piece text when evaluated.
+		const d = evaluateBashCommand("git log -n 5 | head -1", ctx());
+		const pieceText = d.pieces?.[0]?.text;
+		expect(pieceText).toBe("git log -n 5 |head -1");
+		const exact = rule({ id: "exact", match: { command: pieceText ?? "" } });
+		expect(resolveWholeCommandRule([exact], "bash", { command: pieceText ?? "" })?.rule.id).toBe("exact");
+	});
+});
+
+describe("denyOverrideSuggestion (spec §5.2)", () => {
+	// EngineContext with a temp home so the dynamic layer file stays hermetic.
+	const denyCtx = (dir: string) => ({
+		settings: Settings.isolated({ "permissions.default": "prompt" }),
+		cwd: "/tmp/perm-test",
+		home: dir,
+	});
+
+	test("no deny rule means a posture deny — no override can exist", () => {
+		// no rules at all: a dynamic allow beats the posture, so the caller
+		// suggests the first candidate instead of a dead end.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			const result = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
+			expect(result.status).toBe("no-deny");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("a deny with no beating allow is a dead end", () => {
+		// dynamic file: deny bash "* | head *"
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n",
+			);
+			const result = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
+			expect(result.status).toBe("dead-end");
+			if (result.status === "dead-end") expect(result.deny.id).toBe("deny-pipe");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("reports the candidate allow when one would win", () => {
+		// dynamic file: deny bash "* | head *" AND allow bash "git branch * | head *"
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * | head *' }\n    action: allow\n",
+			);
+			const result = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
+			expect(result.status).toBe("override");
+			if (result.status === "override") {
+				expect(result.deny.id).toBe("deny-pipe");
+				expect(result.allow.rule.match.command).toBe("git branch * | head *");
+				expect(result.allow.matchClass).toBe("exact-structure");
+				expect(result.allow.specificity).toBe(4);
+			}
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("an allow that does not strictly beat the deny never overrides", () => {
+		// dynamic file: deny bash "git * | head *" + allow bash "git *". The
+		// allow is covering and less specific — the deny still stands.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: deny-git-pipe\n    tool: bash\n    match: { command: 'git * | head *' }\n    action: deny\n  - id: allow-git\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+			);
+			const result = denyOverrideSuggestion("git branch -a | head -20", denyCtx(dir));
+			expect(result.status).toBe("dead-end");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("legacy bash.patterns denies join the suggestion's deny pool", () => {
+		// settings bash.patterns deny "* | head *" + dynamic file allow
+		// "git branch * | head *": the override must name the legacy deny.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * | head *' }\n    action: allow\n",
+			);
+			const c = {
+				settings: Settings.isolated({
+					"permissions.default": "prompt",
+					"bash.patterns": [{ match: "* | head *", approval: "deny" }],
+				}),
+				cwd: "/tmp/perm-test",
+				home: dir,
+			};
+			const result = denyOverrideSuggestion("git branch -a | head -20", c);
+			expect(result.status).toBe("override");
+			if (result.status === "override") {
+				expect(result.deny.id).toBe("legacy-0");
+				expect(result.allow.rule.match.command).toBe("git branch * | head *");
+			}
+		} finally {
+			removeSyncWithRetries(dir);
+		}
 	});
 });

@@ -9,17 +9,52 @@
  * already shown. Suggestions that resolve after the user chose are dropped.
  */
 import { Container, Loader, Markdown, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
-import type { PermissionDialogOption } from "../../extensibility/extensions";
+import type { PermissionDialogLine, PermissionDialogOption } from "../../extensibility/extensions";
 import { getMarkdownTheme, theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import { DynamicBorder } from "./dynamic-border";
 
-const DEFAULT_HELP_TEXT = "j/k navigate  enter select  esc cancel";
+const DEFAULT_HELP_TEXT = "j/k navigate  enter select  esc cancel — no rule written";
 const SUGGESTING_LABEL = "Suggesting rules…";
+
+/**
+ * Truncate the segments' plain text to `available` columns, cutting per
+ * segment so each keeps its own style; the visible text ends with `…` when
+ * anything was cut. Segments carry plain text (no ANSI), so lengths are safe.
+ */
+function truncateSegments(
+	segments: ReadonlyArray<{ text: string; dim?: boolean }>,
+	available: number,
+): Array<{ text: string; dim?: boolean }> {
+	const result: Array<{ text: string; dim?: boolean }> = [];
+	let remaining = available;
+	for (const segment of segments) {
+		if (remaining <= 0) break;
+		if (segment.text.length > remaining) {
+			result.push({ text: `${segment.text.slice(0, Math.max(0, remaining - 1))}…`, dim: segment.dim });
+			remaining = 0;
+			break;
+		}
+		result.push(segment);
+		remaining -= segment.text.length;
+	}
+	return result;
+}
 
 export class PermissionDialogComponent extends Container {
 	#options: PermissionDialogOption[];
-	#selectedIndex = 0;
+	/** The caller's option array, kept for checklist state write-back (Task 6 reads it). */
+	#sourceOptions: readonly PermissionDialogOption[];
+	#lines: PermissionDialogLine[];
+	#lineContainer: Container;
+	#previewText: Text | undefined;
+	#previewFor: ((checked: boolean[]) => string) | undefined;
+	#onEdit: ((index: number) => void) | undefined;
+	#checklist: boolean;
+	#checked: boolean[];
+	/** -1 = no selection: no highlight, Enter no-op until j/k/arrows move first (spec §5.1). */
+	#selectedIndex: number;
+	#expanded = false;
 	#onSelect: (index: number) => void;
 	#onCancel: () => void;
 	#maxVisible: number;
@@ -31,25 +66,46 @@ export class PermissionDialogComponent extends Container {
 
 	constructor(
 		title: string,
-		lines: readonly string[],
+		lines: readonly (string | PermissionDialogLine)[],
 		options: readonly PermissionDialogOption[],
 		onSelect: (index: number) => void,
 		onCancel: () => void,
-		opts?: { maxVisible?: number; helpText?: string; suggestions?: Promise<PermissionDialogOption[]>; ui?: TUI },
+		opts?: {
+			maxVisible?: number;
+			helpText?: string;
+			/** Row to preselect; -1/omitted = no selection (spec §5.1, Task 6's Pattern preselect). */
+			initialIndex?: number;
+			/** Checklist mode: space toggles toggleable options. */
+			checklist?: boolean;
+			/** Edit mode: `e` on a row settles and reports the row (caller maps the sentinel). */
+			allowEdit?: boolean;
+			onEdit?: (index: number) => void;
+			/** Checklist summary line computed from the current checked array; empty string hides it. */
+			previewFor?: (checked: boolean[]) => string;
+			suggestions?: Promise<PermissionDialogOption[]>;
+			ui?: TUI;
+		},
 	) {
 		super();
 		this.#options = [...options];
+		// Keep the caller's array so toggled state can be written back (Task 6 reads it).
+		this.#sourceOptions = options;
+		this.#lines = lines.map(line => (typeof line === "string" ? { segments: [{ text: line }] } : line));
 		this.#onSelect = onSelect;
 		this.#onCancel = onCancel;
 		this.#maxVisible = Math.max(3, opts?.maxVisible ?? 12);
+		this.#selectedIndex = opts?.initialIndex ?? -1;
+		this.#checklist = opts?.checklist === true;
+		this.#onEdit = opts?.onEdit;
+		this.#previewFor = opts?.previewFor;
+		this.#checked = this.#options.map(option => option.checked ?? false);
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 		this.addChild(new Markdown(title, 1, 0, getMarkdownTheme(), { color: t => theme.fg("accent", t) }));
 		this.addChild(new Spacer(1));
-		for (const line of lines) {
-			this.addChild(new Text(theme.fg("muted", line), 1, 0));
-		}
+		this.#lineContainer = new Container();
+		this.addChild(this.#lineContainer);
 		if (lines.length > 0) {
 			this.addChild(new Spacer(1));
 		}
@@ -59,11 +115,18 @@ export class PermissionDialogComponent extends Container {
 			this.#attachSuggestions(opts.suggestions, opts.ui);
 		}
 		this.addChild(new Spacer(1));
+		if (opts?.previewFor !== undefined) {
+			// Empty text renders zero rows, so an empty preview hides itself.
+			this.#previewText = new Text("", 1, 0);
+			this.addChild(this.#previewText);
+		}
 		this.addChild(new Text(theme.fg("dim", opts?.helpText ?? DEFAULT_HELP_TEXT), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 
 		this.#renderList();
+		this.#renderLines();
+		this.#renderPreview();
 	}
 
 	/** Watch the suggestion promise: spinner row while pending, append on settle, drop after choice. */
@@ -129,8 +192,34 @@ export class PermissionDialogComponent extends Container {
 			this.#moveSelection(1);
 			return;
 		}
+		if (matchesKey(keyData, "l")) {
+			this.#expanded = !this.#expanded;
+			this.#renderLines();
+			return;
+		}
+		if (this.#checklist && (matchesKey(keyData, "space") || keyData === " ")) {
+			const option = this.#options[this.#selectedIndex];
+			if (option?.toggleable === true) {
+				this.#checked[this.#selectedIndex] = !(this.#checked[this.#selectedIndex] ?? false);
+				// Write back onto the source option object so the caller can read final state.
+				const source = this.#sourceOptions[this.#selectedIndex];
+				if (source !== undefined) source.checked = this.#checked[this.#selectedIndex];
+				if (option.labelFor !== undefined) option.label = option.labelFor(this.#checked);
+				this.#renderList();
+				this.#renderPreview();
+			}
+			return;
+		}
+		if (matchesKey(keyData, "e") && this.#onEdit !== undefined && this.#checklist && this.#selectedIndex >= 0) {
+			// `#selectedIndex >= 0` keeps the edit sentinel distinguishable from
+			// plain cancel: an edit for row `index` settles -(index + 2) (Step 5).
+			this.#settled = true;
+			this.#onEdit(this.#selectedIndex);
+			return;
+		}
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
-			if (this.#options.length > 0) {
+			// No-selection mode: Enter stays a no-op until navigation (spec §5.1).
+			if (this.#options.length > 0 && this.#selectedIndex >= 0) {
 				this.#settled = true;
 				this.#onSelect(Math.min(this.#selectedIndex, this.#options.length - 1));
 			}
@@ -148,7 +237,13 @@ export class PermissionDialogComponent extends Container {
 
 	#moveSelection(delta: number): void {
 		if (this.#options.length === 0) return;
-		this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex + delta, this.#options.length - 1));
+		if (this.#selectedIndex < 0) {
+			// No-selection start: j/down lands on the first row; k/up treats -1
+			// as just-before-start and wraps to the last row.
+			this.#selectedIndex = delta < 0 ? this.#options.length - 1 : 0;
+		} else {
+			this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex + delta, this.#options.length - 1));
+		}
 		this.#renderList();
 	}
 
@@ -164,9 +259,16 @@ export class PermissionDialogComponent extends Container {
 			const option = this.#options[i];
 			if (option === undefined) continue;
 			const isSelected = i === this.#selectedIndex;
+			// The label is stored without the checklist prefix; labelFor options
+			// recompute their label from the live checked array each render.
+			let label = option.label;
+			if (option.labelFor !== undefined) label = option.labelFor(this.#checked);
+			if (this.#checklist && option.toggleable === true) {
+				label = `${this.#checked[i] === true ? "[x]" : "[ ]"} ${label}`;
+			}
 			const numberColor = isSelected ? "accent" : "dim";
 			const labelColor = isSelected ? "accent" : "text";
-			const rows = [`${theme.fg(numberColor, `${i + 1}. `)}${theme.fg(labelColor, option.label)}`];
+			const rows = [`${theme.fg(numberColor, `${i + 1}. `)}${theme.fg(labelColor, label)}`];
 			if (option.description !== undefined) {
 				for (const line of option.description.replace(/\n+$/u, "").split("\n")) {
 					rows.push(`    ${theme.fg("muted", line)}`);
@@ -179,11 +281,47 @@ export class PermissionDialogComponent extends Container {
 		}
 	}
 
+	/** Render the context lines: styled segments, collapsed truncation, right-aligned status. */
+	#renderLines(): void {
+		this.#lineContainer.clear();
+		const available = Math.max(20, (this.#lastRenderWidth ?? 80) - 4);
+		for (const line of this.#lines) {
+			const style = line.style ?? "muted";
+			const styleColor =
+				style === "accent" ? "accent" : style === "text" ? "text" : style === "allowed" ? "muted" : "dim";
+			// Reserve the status (plus its mandatory one-space gap) inside
+			// `available` so a truncated line plus status stays on ONE row,
+			// right-aligned at the ellipsis.
+			const statusLength = line.status?.text.length ?? 0;
+			const budget = statusLength > 0 ? Math.max(0, available - statusLength - 1) : available;
+			const segments = this.#expanded ? line.segments : truncateSegments(line.segments, budget);
+			const plain = segments.map(segment => segment.text).join("");
+			let text = "";
+			for (const segment of segments) {
+				text += segment.dim === true ? theme.fg("dim", segment.text) : theme.fg(styleColor, segment.text);
+			}
+			if (line.status !== undefined) {
+				// Pad to `available` including the status text itself so the line
+				// stays right-aligned within the render width (no wrap/cut).
+				const pad = Math.max(1, available - plain.length - line.status.text.length);
+				text += " ".repeat(pad) + theme.fg(line.status.style === "accent" ? "accent" : "muted", line.status.text);
+			}
+			this.#lineContainer.addChild(new Text(text, 1, 0));
+		}
+	}
+
+	/** Update the checklist summary line from previewFor; an empty string hides it. */
+	#renderPreview(): void {
+		if (this.#previewText === undefined) return;
+		this.#previewText.setText(this.#previewFor?.(this.#checked) ?? "");
+	}
+
 	override render(width: number): readonly string[] {
 		const renderWidth = Math.max(1, width);
 		if (this.#lastRenderWidth !== renderWidth) {
 			this.#lastRenderWidth = renderWidth;
 			this.#renderList();
+			this.#renderLines();
 		}
 		return super.render(renderWidth);
 	}

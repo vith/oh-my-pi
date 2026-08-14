@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Permission rules resolve by match class and specificity: exact-structure beats covering, most specific wins, deny wins ties, curated hard-denies absolute (spec §3.1).
+- Curated safe-consumer exemption: `git log *` covers `git log … | head -1`; exec-capable stages still require rules.
+- Approval dialog v3: one compound dialog (piece list = command), per-piece drill-down, remember checklists with glob editing, deny-error override suggestions.
+
+### Changed
+
+- `Tool always` remember scope is offered only for read-only tools, never bash.
+- `/permissions test` reports match class and specificity.
+
+### Fixed
+
+- Bash tool approval now resolves permission rule files from the session's `home` when one is supplied, instead of always falling back to `os.homedir()` — developer-remembered rules no longer leak into embedding/SDK hosts and tests with an isolated home.
+
 ## [17.2.15+vith-fork.87.d419fb9692] - 2026-08-12
 ### Added
 

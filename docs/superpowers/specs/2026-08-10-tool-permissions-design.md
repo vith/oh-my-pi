@@ -1,6 +1,7 @@
 # Tool Permission System for Oh My Pi — Design
 
 Date: 2026-08-10
+Updated: 2026-08-13 — dialog redesign v3 (§5.1) · specificity precedence replacing deny-absolute (§3.1) · safe-consumer exemption (§3.4/§4.3) · deny-error suggestion (§5.2)
 Status: Approved for spec review
 Branch: `permissions-engine` (fork of `can1357/oh-my-pi`, based on `fork-17x`)
 
@@ -37,7 +38,7 @@ Everything below is superseded by the engine (kept only where noted):
 | `bashInterceptor` (route `cat`→`read` etc.) | `src/tools/bash-interceptor.ts` | kept as routing; messages restyled to be distinct from permission denials |
 | Tool tiers (`read`/`write`/`exec`) | `src/tools/approval.ts` | kept as internal annotation for curated defaults; not user-facing |
 
-Behavior preserved as invariants: **deny is absolute** (a deny from any layer beats every allow); unknown/malformed input is treated as the strictest relevant case; handler/gate failures fail closed.
+Behavior preserved as invariants: **deny wins ties** (a deny rule beats an allow rule of equal specificity; curated code-level hard-denies remain absolute — see §3.1); unknown/malformed input is treated as the strictest relevant case; handler/gate failures fail closed.
 
 ## 3. Engine architecture
 
@@ -45,11 +46,17 @@ Behavior preserved as invariants: **deny is absolute** (a deny from any layer be
 
 For each tool call, the engine computes one decision in this order:
 
-1. **Hard denies** — curated critical-pattern rules (bash) and any rule with `action: deny` from any layer. Deny short-circuits with the rule's id + reason.
-2. **Ordered rules, first match wins** — merged list ordered: dynamic → project → user → curated. Only rules that are not deny rules reach this stage (denies already short-circuited).
-3. **Default posture** — `permissions.default: allow | prompt | deny`. Default value: `prompt` (the user's deny-by-default choice). A "pending" decision means *prompt* in interactive contexts and *park* in headless contexts (§6).
+1. **Curated hard denies** — code-level critical patterns for bash (`CRITICAL_BASH_PATTERNS`: `rm -rf /` class, fork bombs, fetch-then-execute, `/etc/passwd`-class writes, shutdown). **Absolute**: no rule from any layer overrides them.
+2. **Whole-command rule matches, resolved by match class then specificity** — merged dynamic → project → user rules evaluated on the piece text:
+   - **Exact-structure match** — the rule's `command` pattern has the same pipeline shape as the piece (both contain a pipe, or neither does). Beats any covering match.
+   - **Covering match** — a pipe-less pattern matching a piped command (the glob spans `| …`). Only stands when every non-safe stage passes (§4.3).
+   - Within a class, **most specific wins** — specificity = literal-token count of the pattern (regex patterns score their literal prefix); ties resolve **deny wins**, then higher layer wins (dynamic → project → user).
+3. **Stage-level rule matches** — rules matching an individual pipeline stage of an otherwise-covered piece (deny beats allow here).
+4. **Curated safe-consumer exemption** — a pipeline stage that matches no rule is allowed when its first token is in the curated safe-consumer set (§4.3). Never beats a matching deny.
+5. **Curated read-only allowlist** (allow, no prompt): read, glob, grep, todo, recall, permissions (management tool), and similar metadata-only tools.
+6. **Default posture** — `permissions.default: allow | prompt | deny`. Default value: `prompt` (the user's deny-by-default choice). A "pending" decision means *prompt* in interactive contexts and *park* in headless contexts (§6).
 
-"Pending" is defined as: not allowed by any rule and not denied by any rule.
+This replaces the v1 invariant "deny is absolute (any layer)": a user-authored **more-specific** whole-command allow can now beat a **general** deny (e.g. `git branch * | head *` beats `* | head *`), which the deny-general/permit-specific workflow requires (§5.2). Curated hard denies stay unconditional. "Pending" is defined as: not allowed by any rule and not denied by any rule.
 
 ### 3.2 Rule model
 
@@ -84,8 +91,7 @@ rules:
 | User | `~/.omp/agent/permissions.yml` | user (hand-edited) | lower |
 | Curated | code constants | engine | lowest |
 
-- Deny rules from *any* layer beat every allow rule (invariant).
-- Among non-denies, first match wins in the order above (dynamic → project → user → curated).
+- Deny and allow rules from all layers participate in the §3.1 resolution: match class first (exact-structure > covering > stage-level), then specificity (literal-token count), then **deny wins ties**, then layer order (dynamic → project → user). Curated code-level hard denies are absolute (step 1, §3.1).
 - All layers merge into one evaluated list; `/permissions list` shows the merged view with layer tags.
 - Dynamic file is app-owned: rewritten atomically on change; deleting it resets remembered rules. Never mutates user/project files.
 
@@ -93,6 +99,7 @@ rules:
 
 - **Read-only allowlist** (allow, no prompt): read, glob, grep, todo, recall, permissions (management tool), and similar metadata-only tools. Reviewed and pinned in code.
 - **Hard-deny prelude** (bash): the existing critical patterns — `rm -rf /` (and `rm` on root/FHS critical paths), fork bombs, remote-fetch-then-execute, writes to `/etc/passwd`-class files, host shutdown commands. Plus the current "allow rules never permit shell-control syntax" behavior becomes unnecessary (§4: per-piece matching means rules match single commands).
+- **Safe-consumer set** (bash pipeline stages): `head`, `tail`, `grep`/`egrep`, `wc`, `sort`, `uniq`, `tr`, `cut`, `cat`, `nl`, `tac`, `rev`, `paste`, `join`, `column`, `fmt`, `fold`, `pr`, `comm`, `diff`, `cmp`, `jq`, `less`, `more`, `md5sum`/`sha*sum` digests. Excluded by design: `sed` (`-i` writes), `awk` (`system()`), `xargs` (executes), `perl`/`python`/`node`-class interpreters, and any `-c`/`-e`/`-Command` reinterpreting option. See §4.3.
 
 ### 3.5 Settings schema
 
@@ -126,34 +133,50 @@ permissions:
 
 - Each piece is evaluated independently against the pipeline (§3.1).
 - **Any piece denied → the whole call is denied.** The model-visible error names the piece, the rule id, and the layer.
-- **Pending pieces → sequential per-piece dialogs**, one at a time, in command order (§5). After all pending pieces are resolved, decisions are final.
+- **Pending pieces → one dialog** showing the full command breakdown (§5.1); a per-piece drill-down is available for granular decisions. After all pending pieces are resolved, decisions are final.
 - **If every piece is allowed → execute the original command unchanged.** No rewriting, no re-issue; `&&`/`||` short-circuit and `&` semantics are preserved by construction, and the result is identical to running the approved pieces separately in the same persistent shell.
+- **Pipeline stages — safe-consumer exemption.** `evaluateBashPiece` recursively evaluates every stage of an allowed pipeline piece (current behavior). A stage that matches **no rule** (no deny, no allow) is allowed when its first token is in the curated safe-consumer set (§3.4). The exemption only fills the "no rule" gap — a matching deny always beats it, and a stage-level allow beats the exemption. Effect: one rule such as `git log *` covers both `git log -n 5` and `git log -n 5 | head -1`; `sh`/`xargs`/`sed`-class stages still require an explicit rule, so `curl * | sh`-style combinations cannot slip through a first-command allow (the `sh` stage is neither safe nor matched → prompt/deny).
 - **PTY carve-out:** `pty: true` calls (interactive sessions) cannot be execution-split or piece-dialoged. Whole-command analysis applies: the strictest piece decision decides the call (deny → deny; pending → one whole-command dialog).
 
 ## 5. Approval prompt UX
 
-### 5.1 Dialog structure (per pending piece, sequential)
+### 5.1 Dialog structure (one dialog per call, v3)
 
-Level 1 — main choice:
+One dialog per compound command, showing the full breakdown. **The piece list is the command**: each top-level unit (split per §4.2) on its own line, prefixed by its operator (`&&`, `||`, `;`) on continuation lines, so reading down reconstructs the original command — no separate elided copy, no duplication. Layout:
 
-- `Allow once`
-- `Allow & remember…`
-- `Deny`
-- `Deny & remember…`
+- **Title**: `Approve this command?` — the question is about the command, not the tool; the tool name is right-aligned metadata. (Never "Allow tool: bash": that reads as a blanket grant and collides with the remember scopes.)
+- **Summary line** (one, highlighted): `N of M pieces need approval — no rule covers this command`. This replaces the old "no rule — default posture" line, which contradicted the per-piece statuses beside it.
+- **Piece rows**: unnumbered (the old 1–5 numbering collided with the action numbering), status right-aligned:
+  - `no rule` — pending, needs the decision (bold row)
+  - `allowed · remembered this session` — covered by a rule (dim green row; "this session" not "dynamic")
+  - Safe-consumer pipe tails render **dimmed** (`git log …` normal, ` |head -60` gray): they are exempt (§4.3) and not the thing being decided.
+- **Near-miss line** under a pending piece only when genuinely close: same first token as the piece and a narrower glob (e.g. rule `git branch -a *` vs piece `git branch -b x`). Unrelated rules (`echo *` vs `git branch`) are never shown.
+- **Suggestion row** (§5.3) with spinner while pending; resolved suggestions append as extra numbered options with YAML previews; late results are dropped.
+- **Actions** (numbered):
+  - `1. Allow all pending once`
+  - `2. Allow all & remember…`
+  - `3. Deny all pending`
+  - `4. Decide per piece →` (drill-down)
+  - Suggested rules append as `5.`+ options.
+  - No preselection on this dialog — the allow/deny choice is deliberate. `esc` = cancel, no rule written.
+- **Per-piece drill-down** (option 4, or Enter on a piece row): piece text + status, then `Allow once` / `Allow & remember…` / `Deny once` / `Deny & remember…` / `Back to all pieces`.
+- Keys: `j/k` navigate, `enter` select, `esc` cancel/back, `l` expand a truncated command, in remember dialogs `space` toggles checklist items and `e` edits a glob.
 
-Level 2 — scope (only when remembering):
+**Remember sub-dialogs** (both `Allow & remember…` and `Deny & remember…`; deny variant writes deny patterns):
 
-- `Exact call` — the precise command/args as executed
-- `Pattern` — bash: first-token glob (`git *`); file tools: path glob of the parent directory (`src/**`)
-- `This tool always`
+- **Compound** — per-piece checklist: one row per pending piece, `[x] <first-token glob>` with the piece text alongside; all checked and **preselected** (Enter writes immediately); `space` toggles a piece, `e` edits its glob. The exact-match scope is not offered and the dialog says why: *an exact match would never fire again for a compound*. The YAML preview updates live; the write button reads `Write checked rules (N)`.
+- **Single piece** — scope options with YAML preview:
+  - `Exact call` — the precise command/args as executed
+  - `Pattern` — bash: first-token glob (`git branch *`); file tools: path glob of the parent directory (`src/**`). **Preselected.**
+  - `Custom…` — edit the glob (the disagreement escape: narrower or wider than the first-token pattern)
+  - `Tool always` — **offered only for read-only tools** (read, glob, grep, …; curated per-tool flag). Never for bash or any exec/write-capable tool: a tool-wide bash allow is the yolo knob and is not offered by the dialog (hand-editable in the permissions file only).
+- Each option previews the exact YAML it writes. Picking a remember option writes the dynamic rule(s) and proceeds.
 
-Each option previews the exact YAML it writes. Picking a remember option writes a dynamic rule and proceeds.
-
-The dialog shows the decision context: matched rule id + layer, or "no rule — default posture", plus the `reason`, and for bash the full piece breakdown with per-piece statuses.
+The dialog shows the decision context per piece: matched rule id + layer, or `no rule`, plus the `reason` when one exists.
 
 ### 5.2 Denied calls
 
-A deny shows the blocking rule and reason only — **no allow candidates** (deny is absolute). The model-visible error includes the exact YAML that would allow the call, so the model can negotiate in chat. The model-facing error also explains how to add the rule (`/permissions add` or ask the user).
+Denied calls **never open a dialog** — that is the point of a deny (no interruption). The model-visible error shows the blocking rule id + layer + reason, and — when a more-specific whole-command allow would beat the denying rule (§3.1) — a **structured suggestion**: the exact YAML and why it wins (e.g. "`git branch * | head *` is more specific than `* | head *`"). The user applies it via `/permissions add` and verifies with `/permissions test "<command>"`, which reports the winning rule and its match class. No interactive override exists; a deny stays fail-closed until policy changes. The model-facing error explains both paths (`/permissions add` or ask the user).
 
 ### 5.3 LLM-suggested rules (async append)
 
@@ -198,7 +221,7 @@ A deny shows the blocking rule and reason only — **no allow candidates** (deny
   - `list` — merged rules by layer with match counts
   - `show <id>` — rule details + last hits
   - `add | remove | edit` — with TTL support here (not in the prompt)
-  - `test "<command or tool call>"` — dry-run: exactly which rule/layer decides and why
+  - `test "<command or tool call>"` — dry-run: exactly which rule/layer decides and why, including the match class (exact-structure / covering / stage-level) and, when specificity resolved a deny-vs-allow conflict, which rule won and why
   - `log` — recent audit entries
   - `status` — posture, layer counts, dynamic-file path
   - `migrate` — §9
@@ -215,7 +238,7 @@ Legacy keys continue to work without rewriting user files, mapped into the engin
 | `tools.approvalMode: yolo` | `permissions.default: allow` |
 | `tools.approvalMode: write` | `permissions.default: prompt` (slightly stricter for write-tier tools; migrate suggests `tool: write → allow` style rules to restore) |
 | `tools.approvalMode: always-ask` | `permissions.default: prompt` |
-| `tools.approval.<tool>: allow\|deny\|prompt` | legacy layer rules (deny still absolute) |
+| `tools.approval.<tool>: allow\|deny\|prompt` | legacy layer rules (deny wins ties under §3.1) |
 | `bash.patterns` (match/approval) | engine rules (deny/prompt/allow per pattern) |
 
 A one-time notice lists the mapping that applies to the current config.
@@ -254,8 +277,8 @@ Branch: `permissions-engine` off `fork-17x`. Build/run from source (the fork alr
 
 ## 11. Testing strategy
 
-- **Unit**: rule parse/validate (bad files skipped, duplicate ids), precedence matrix (deny-absolute vs first-match across layers), split fixtures (compounds, heredocs, `$()`, pipelines, `&`, `if/while`, malformed input → fail-closed), TTL expiry, audit rotation, migrate mapping both ways.
-- **Integration**: engine decision against the wrapper gate (existing tool-test harness); dialog flow via the omp TUI headless test workflow (tmux); subagent park/bubble with a nested two-session fixture; `/permissions` command tests.
+- **Unit**: rule parse/validate (bad files skipped, duplicate ids), precedence matrix (curated hard-deny absolute; exact-structure beats covering; specificity ties → deny; stage-level deny beats covering allow; safe-consumer exemption applies only with no matching rule; safe set excludes `sed`/`awk`/`xargs`/interpreter flags), split fixtures (compounds, heredocs, `$()`, pipelines, `&`, `if/while`, malformed input → fail-closed), TTL expiry, audit rotation, migrate mapping both ways.
+- **Integration**: engine decision against the wrapper gate (existing tool-test harness); dialog flow via the omp TUI headless test workflow (tmux) — checklist toggle/edit, preselect, drill-down, dimmed safe-consumer tails, late-suggestion drop; deny-error structured suggestion rendering; subagent park/bubble with a nested two-session fixture; `/permissions` command tests.
 - **Manual checklist**: no double prompts with `permissions.default: prompt`; legacy `yolo` behaves as `allow`; `write` mode notice appears; subagent pending notice + focused answer round-trip; PTY call gets whole-command analysis.
 
 ## 12. Out of scope (v1)
@@ -273,4 +296,5 @@ Branch: `permissions-engine` off `fork-17x`. Build/run from source (the fork alr
 - **LLM suggestion cost/latency**: bounded by timeout + token budget; degrades to candidates-only; user-toggleable.
 - **Focused-subagent input affordance**: exact key/input mechanics for the dialog in a focused subagent view to be verified during implementation (TUI internals); the Agent Hub roster marker is a small add-on and can slip to a follow-up.
 - **Rebase strategy**: engine is a bounded module + discrete callsites; fork rebases onto upstream stay mechanical.
+- **Specificity scoring**: literal-token counting is a heuristic; regex patterns score their literal prefix. Ambiguous comparisons resolve conservatively (deny wins ties); `/permissions test` reports the winning rule and its class so surprising outcomes are explainable.
 - **`write` mode users**: slightly stricter than before by design (deny-by-default); migrate notice explains restoration rules.

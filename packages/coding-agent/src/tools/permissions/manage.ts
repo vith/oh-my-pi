@@ -6,7 +6,14 @@ import type { Settings } from "../../config/settings";
 import permissionsDescription from "../../prompts/tools/permissions.md" with { type: "text" };
 import type { ToolSession } from "../index";
 import { auditFilePath, readAudit } from "./audit";
-import { evaluateBashCommand, resolvePosture } from "./engine";
+import {
+	evaluateBashCommand,
+	matchClassOf,
+	matchRule,
+	patternSpecificity,
+	resolvePosture,
+	resolveWholeCommandRule,
+} from "./engine";
 import { applyMigration, planMigration } from "./migrate";
 import {
 	loadRuleLayers,
@@ -32,7 +39,8 @@ import {
  * - `remove <id>` — delete from the user file.
  * - `edit <id> <yaml>` — replace a user-file rule by id.
  * - `test "<command>"` — dry-run `evaluateBashCommand`; prints decision,
- *   rule, and layer. Never writes anything.
+ *   rule, layer, and the winning rule's match class (with specificity).
+ *   Never writes anything.
  * - `log` — recent audit entries (newest first).
  * - `status` — posture, per-layer rule counts, rule file paths.
  * - `migrate [--apply]` — Task 9's plan (dry-run by default) or apply.
@@ -81,7 +89,7 @@ function usage(): string {
 		"  add <yaml>           add a rule to the user layer (validated)",
 		"  remove <id>          remove a rule from the user layer",
 		"  edit <id> <yaml>     replace a user-layer rule by id",
-		'  test "<command>"     dry-run a bash command (decision + rule + layer)',
+		'  test "<command>"     dry-run a bash command (decision + rule + layer + class)',
 		"  log                  recent permission audit entries",
 		"  status               posture, rule counts, rule file paths",
 		"  migrate [--apply]    plan (or apply) the legacy settings migration",
@@ -230,6 +238,22 @@ async function testCommand(rest: string, ctx: RunPermissionCommandContext): Prom
 	const command = unquote(rest);
 	if (command.length === 0) return 'Usage: permissions test "<command>"';
 	const decision = evaluateBashCommand(command, { settings: ctx.settings, cwd: ctx.cwd });
+	// Whole-command winner (spec §3.1 step 2): the deciding rule's match class
+	// and specificity explain why it beat the other matches. The engine
+	// evaluates the tokenizer's normalized piece text (the parser glues `|` to
+	// the next stage), so for single-piece commands resolve over that same
+	// text; multi-piece commands fall back to the raw command.
+	const { rules } = loadRuleLayers(ctx.cwd);
+	const bestCommand =
+		decision.pieces !== undefined && decision.pieces.length === 1 ? decision.pieces[0].text : command;
+	const best = resolveWholeCommandRule(rules, "bash", { command: bestCommand });
+	const commandPattern = best?.rule.match.command;
+	const matchClass =
+		best !== undefined && typeof commandPattern === "string" ? matchClassOf(commandPattern, bestCommand) : undefined;
+	const specificity =
+		best !== undefined && typeof commandPattern === "string"
+			? patternSpecificity("command", commandPattern)
+			: undefined;
 
 	const lines = [`Dry-run: bash "${command}"`, `decision: ${decision.policy}`];
 	if (decision.ruleId !== undefined) lines.push(`rule: ${decision.ruleId}`);
@@ -239,6 +263,33 @@ async function testCommand(rest: string, ctx: RunPermissionCommandContext): Prom
 	for (const piece of decision.pieces ?? []) {
 		const attribution = piece.ruleId !== undefined ? ` (${piece.ruleId}, ${piece.layer ?? "?"})` : "";
 		lines.push(`  piece: ${piece.text} -> ${piece.policy}${attribution}`);
+	}
+	// Annotate only when the file-backed whole-command winner actually produced
+	// the decision: a legacy pattern, stage-level override, curated hard-deny,
+	// or R1 degradation decides otherwise, and annotating a non-deciding rule
+	// would contradict `decision:`.
+	if (best !== undefined && decision.ruleId === best.rule.id) {
+		if (matchClass !== undefined && specificity !== undefined) {
+			lines.push(`class: ${matchClass} (specificity ${specificity})`);
+		}
+		const otherMatches = rules.filter(rule => matchRule(rule, "bash", { command: bestCommand })).length - 1;
+		if (otherMatches > 0) {
+			lines.push(`resolved: ${best.rule.id} beats ${otherMatches} other matches`);
+		}
+	}
+	// Piece-level attribution: when the decision came from a piece (a
+	// stage-level deny or a compound piece the deciding rule matched), report
+	// that piece rule's match class and specificity — the whole-command winner
+	// above either did not exist or did not decide.
+	const decidingPiece = decision.pieces?.find(piece => piece.policy === "deny" || piece.ruleId === decision.ruleId);
+	if (decidingPiece !== undefined && decidingPiece.ruleId !== undefined) {
+		const pieceRule = rules.find(rule => rule.id === decidingPiece.ruleId);
+		const piecePattern = pieceRule?.match.command;
+		if (typeof piecePattern === "string") {
+			lines.push(
+				`piece class: ${matchClassOf(piecePattern, decidingPiece.text)} (specificity ${patternSpecificity("command", piecePattern)})`,
+			);
+		}
 	}
 	return lines.join("\n");
 }

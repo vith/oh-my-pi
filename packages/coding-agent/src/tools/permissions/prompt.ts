@@ -1,11 +1,17 @@
 /**
  * Approval prompt flow with rule candidates (spec §5).
  *
- * Replaces the binary Approve/Deny prompt: per pending piece (sequential, in
- * command order) the user picks from Allow once / Allow & remember… / Deny /
- * Deny & remember…, then a scope-level choice of candidate rules (exact,
- * pattern, tool-wide) that preview the exact YAML they write. Remembering
- * writes a dynamic rule (`writeDynamicRule` into the dynamic layer file).
+ * Replaces the binary Approve/Deny prompt: bash calls with several pieces show
+ * ONE compound dialog for the whole call — Allow all pending once / Allow all
+ * & remember… / Deny all pending / Decide per piece → — with a per-piece
+ * drill-down (piece selector, then the single-unit prompt for that piece; a
+ * Deny once on a piece denies the whole call, undecided remainders fail
+ * closed to deny). PTY calls, non-bash calls, forced prompts, and single-piece
+ * calls keep the single-unit flow: per pending piece the user picks from
+ * Allow once / Allow & remember… / Deny / Deny & remember…, then a scope-level
+ * choice of candidate rules (exact, pattern, custom, tool-wide for read-only
+ * tools) that preview the exact YAML they write. Remembering writes a dynamic
+ * rule (`writeDynamicRule` into the dynamic layer file).
  *
  * PTY calls (spec §4.3) cannot be execution-split: they prompt once for the
  * whole command, with candidates scoped to the whole command text.
@@ -14,14 +20,19 @@ import * as path from "node:path";
 import { YAML } from "bun";
 import type {
 	ExtensionUIContext,
+	PermissionDialogLine,
 	PermissionDialogOption,
 	PermissionDialogRequest,
 } from "../../extensibility/extensions/types";
+import { CURATED_ALLOW_TOOLS, isSafeConsumerStage } from "./curated";
 import {
+	denyOverrideSuggestion,
+	denySuggestion,
 	type EngineContext,
 	type EngineDecision,
 	evaluateBashCommand,
 	hasBashApprovalShellControl,
+	nearMissLine,
 	type PieceEvaluation,
 } from "./engine";
 import { type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
@@ -33,6 +44,8 @@ export interface CandidateRule {
 	label: string;
 	yaml: string;
 	rule: Omit<PermissionRule, "layer">;
+	/** The remember scope (spec §5.1) this candidate writes; lets chooseCandidate preselect Pattern. */
+	scope: CandidateScope;
 }
 
 /** Outcome of the whole approval prompt: the policy, plus the rule remembered (if any). */
@@ -44,6 +57,18 @@ export interface PromptResolution {
 export interface PromptForDecisionOptions {
 	/** Formatted approval prompt (tool name, reason, provider safety checks) shown as the dialog title. */
 	title?: string;
+	/**
+	 * Approval reason carried into the v3 dialog lines (metadata, alongside
+	 * the tool line). The wrapper passes the gate's reason here instead of
+	 * overriding the v3 title with the legacy prompt format.
+	 */
+	approvalReason?: string;
+	/**
+	 * The tool's `formatApprovalDetails` lines, appended to the v3 dialog
+	 * metadata (legacy titles showed them; the v3 dialog carries them in its
+	 * lines).
+	 */
+	approvalDetails?: string | readonly string[];
 	/**
 	 * When false the dialog offers only Approve/Deny with no candidates and no
 	 * remember options (provider safety-check forced prompts).
@@ -63,6 +88,12 @@ const ALLOW_REMEMBER = "Allow & remember…";
 const DENY = "Deny";
 const DENY_REMEMBER = "Deny & remember…";
 const APPROVE = "Approve";
+
+/** v3 compound-dialog actions (spec §5.1): one dialog for the whole call. */
+const ALLOW_ALL_ONCE = "Allow all pending once";
+const ALLOW_ALL_REMEMBER = "Allow all & remember…";
+const DENY_ALL = "Deny all pending";
+const DRILL_DOWN = "Decide per piece →";
 
 /**
  * Dialog note shown when a bash command's remember options are suppressed:
@@ -155,34 +186,96 @@ function candidate(
 		match,
 		action,
 	};
-	return { label, yaml: renderCandidateYaml(rule), rule };
+	return { label, yaml: renderCandidateYaml(rule), rule, scope };
 }
 
-/** bash: exact command, first-token pattern (`git *`), tool-wide. */
+/** Tool-always scope is offered only for read-only tools (spec §5.1); never for bash/exec tools. */
+function toolWideAllowed(toolName: string): boolean {
+	return (CURATED_ALLOW_TOOLS as readonly string[]).includes(toolName);
+}
+
+/**
+ * Commands whose first token dispatches to subcommands: a bare first-token
+ * pattern (`git *`) would also cover destructive variants like git push, rm,
+ * reset, or clean, so their remember pattern takes the subcommand verb too
+ * (`git log *`). Everything else keeps the bare first-token pattern
+ * (`echo *`).
+ */
+const SUBCOMMAND_COMMANDS: ReadonlySet<string> = new Set([
+	"git",
+	"npm",
+	"bun",
+	"cargo",
+	"docker",
+	"gh",
+	"pnpm",
+	"yarn",
+	"brew",
+	"apt",
+	"apt-get",
+	"pacman",
+	"dnf",
+	"make",
+	"cmake",
+	"kubectl",
+	"helm",
+	"terraform",
+	"go",
+	"rustup",
+	"pip",
+	"pip3",
+	"uv",
+]);
+
+/**
+ * First-token remember pattern (spec §5.1): `git log *` when the first token
+ * dispatches subcommands (and a subcommand is present), `git *` for a bare
+ * subcommand-verb invocation, `echo *` otherwise.
+ */
+function firstTokenPattern(command: string): string {
+	const tokens = command.trim().split(/\s+/u);
+	const first = tokens[0] ?? "";
+	const second = tokens[1];
+	if (second !== undefined && SUBCOMMAND_COMMANDS.has(first)) {
+		return `${first} ${second} *`;
+	}
+	return `${first} *`;
+}
+
+/** bash: exact command, first-token pattern (`git log *`), tool-wide only for read-only tools (never bash). */
 function bashCandidates(toolName: string, command: string, action: RuleAction): CandidateRule[] {
-	const firstToken = command.trim().split(/\s+/u)[0] ?? "";
-	const pattern = `${firstToken} *`;
+	const pattern = firstTokenPattern(command);
 	const deny = action === "deny";
-	return [
+	const candidates: CandidateRule[] = [
 		candidate(toolName, action, "exact", { command }, `${deny ? "Deny exact" : "Exact"}: ${command}`),
 		candidate(toolName, action, "pattern", { command: pattern }, `${deny ? "Deny pattern" : "Pattern"}: ${pattern}`),
-		candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
 	];
+	if (toolWideAllowed(toolName)) {
+		candidates.push(
+			candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
+		);
+	}
+	return candidates;
 }
 
-/** file tools: exact path, parent-dir glob (`src/**`), tool-wide. */
+/** file tools: exact path, parent-dir glob (`src/**`), tool-wide only for read-only tools. */
 function fileCandidates(toolName: string, key: string, fileArg: string, action: RuleAction): CandidateRule[] {
 	const parent = path.dirname(fileArg);
 	const glob = parent === "." ? "./**" : `${parent}/**`;
 	const deny = action === "deny";
-	return [
+	const candidates: CandidateRule[] = [
 		candidate(toolName, action, "exact", { [key]: fileArg }, `${deny ? "Deny exact" : "Exact"}: ${fileArg}`),
 		candidate(toolName, action, "pattern", { [key]: glob }, `${deny ? "Deny pattern" : "Pattern"}: ${glob}`),
-		candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
 	];
+	if (toolWideAllowed(toolName)) {
+		candidates.push(
+			candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
+		);
+	}
+	return candidates;
 }
 
-/** others: exact args + tool-wide. */
+/** others: exact args + tool-wide only for read-only tools. */
 function genericCandidates(toolName: string, args: unknown, action: RuleAction): CandidateRule[] {
 	const exactArgs = stringEntries(args);
 	const deny = action === "deny";
@@ -190,9 +283,11 @@ function genericCandidates(toolName: string, args: unknown, action: RuleAction):
 	if (Object.keys(exactArgs).length > 0) {
 		candidates.push(candidate(toolName, action, "exact", exactArgs, deny ? "Deny exact call" : "Exact call"));
 	}
-	candidates.push(
-		candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
-	);
+	if (toolWideAllowed(toolName)) {
+		candidates.push(
+			candidate(toolName, action, "tool", { arg: "*" }, `${deny ? "Deny tool" : "Tool"}: ${toolName} always`),
+		);
+	}
 	return candidates;
 }
 
@@ -229,12 +324,37 @@ export function buildCandidates(toolName: string, args: unknown, pieces?: PieceE
 }
 
 /**
- * The model-visible allow suggestion for a denied call (spec §5.2): the exact
- * YAML of the first allow candidate, so the model can negotiate in chat.
- * Shell-control bash commands have no allow candidates — no rule can suppress
- * their prompt — so the suggestion says so instead of emitting a broken rule.
+ * The model-visible allow suggestion for a denied call (spec §5.2). Shell-
+ * control bash commands can never be unblocked by a rule (R1 degrades allow
+ * winners to a prompt), so they get the accurate message BEFORE any override
+ * consultation. Otherwise the engine's suggestion decides: an allow that
+ * strictly beats the deciding deny renders its exact YAML and why; a deny
+ * nothing beats renders the dead end; a posture-source deny (no deny rule
+ * matched — a dynamic allow beats the posture) suggests the mechanical first
+ * candidate. Non-bash calls go through the same dead-end/override gate so a
+ * tying or losing candidate is never suggested.
  */
-export function renderAllowSuggestion(toolName: string, args: unknown): string {
+export function renderAllowSuggestion(toolName: string, args: unknown, ctx: EngineContext): string {
+	const command = argString(args, "command");
+	if (toolName === "bash" && command !== undefined && hasBashApprovalShellControl(command)) {
+		return "No rule can allow this call: the command uses shell control, which no remembered allow rule can suppress.";
+	}
+	const suggestion =
+		toolName === "bash" && command !== undefined && command.length > 0
+			? denyOverrideSuggestion(command, ctx)
+			: denySuggestion(toolName, args, ctx);
+	if (suggestion.status === "override") {
+		const rule = { ...suggestion.allow.rule } as Omit<PermissionRule, "layer">;
+		return (
+			`This call is denied by ${suggestion.deny.id}. To permit it, add this rule ` +
+			`(more specific than the deny, class ${suggestion.allow.matchClass}):\n${renderCandidateYaml(rule)}`
+		);
+	}
+	if (suggestion.status === "dead-end") {
+		return "This call is denied, and no allow rule can override the matching deny. Add a more specific allow rule (same command shape, more literal tokens) via /permissions add, or change the deny.";
+	}
+	// No deny rule matched (posture-source deny): a dynamic allow beats the
+	// posture, so the mechanical first candidate is exactly what unblocks it.
 	const first = buildCandidates(toolName, args)[0];
 	if (first === undefined) {
 		return "No rule can allow this call: the command uses shell control, which no remembered allow rule can suppress.";
@@ -242,44 +362,115 @@ export function renderAllowSuggestion(toolName: string, args: unknown): string {
 	return `To allow this call, add rule:\n${first.yaml}`;
 }
 
-function defaultTitle(toolName: string, decision: EngineDecision): string {
-	const lines = [`Allow tool: ${toolName}`];
-	if (decision.reason !== undefined) lines.push(`Reason: ${decision.reason}`);
-	return lines.join("\n");
+/** v3 dialog title (spec §5.1): the question, not the legacy "Allow tool" format. */
+function defaultTitle(toolName: string): string {
+	return toolName === "bash" ? "Approve this command?" : `Approve ${toolName} call?`;
 }
 
-function pieceStatus(piece: PieceEvaluation): string {
-	switch (piece.policy) {
-		case "allow":
-			return "allowed";
-		case "deny":
-			return "denied";
-		case "prompt":
-			return "pending";
+/** v3 dialog metadata lines: the tool being approved, the approval reason, and the tool's details. */
+function dialogMetadataLines(toolName: string, opts: PromptForDecisionOptions): PermissionDialogLine[] {
+	const lines: PermissionDialogLine[] = [{ segments: [{ text: `tool: ${toolName}` }], style: "muted" }];
+	if (opts.approvalReason !== undefined && opts.approvalReason.length > 0) {
+		lines.push({ segments: [{ text: `reason: ${opts.approvalReason}` }], style: "muted" });
 	}
-}
-
-function pieceStatusLine(piece: PieceEvaluation): string {
-	const rule =
-		piece.ruleId !== undefined ? ` (rule ${piece.ruleId}${piece.layer !== undefined ? `, ${piece.layer}` : ""})` : "";
-	return `${piece.text} — ${pieceStatus(piece)}${rule}`;
-}
-
-/** Decision context + per-piece breakdown shown in the dialog. */
-function dialogLines(decision: EngineDecision, pieces: PieceEvaluation[] | undefined): string[] {
-	const lines: string[] = [];
-	lines.push(
-		decision.ruleId !== undefined
-			? `Rule: ${decision.ruleId}${decision.layer !== undefined ? ` (${decision.layer})` : ""}`
-			: "no rule — default posture",
-	);
-	if (decision.reason !== undefined) lines.push(`Reason: ${decision.reason}`);
-	if (pieces !== undefined && pieces.length > 0) {
-		lines.push("");
-		for (const [index, piece] of pieces.entries()) {
-			lines.push(`${index + 1}. ${pieceStatusLine(piece)}`);
+	const details = opts.approvalDetails;
+	if (typeof details === "string") {
+		if (details.length > 0) lines.push({ segments: [{ text: details }], style: "muted" });
+	} else if (Array.isArray(details)) {
+		for (const detail of details) {
+			if (detail.length > 0) lines.push({ segments: [{ text: detail }], style: "muted" });
 		}
 	}
+	return lines;
+}
+
+/** Plain-text rendering of the metadata block, for legacy select surfaces that only show a title. */
+function metadataText(lines: PermissionDialogLine[]): string {
+	return lines.map(line => line.segments.map(segment => segment.text).join("")).join("\n");
+}
+
+/**
+ * The v3 dialog title; legacy select surfaces (no showPermissionDialog) only
+ * render the title, so the metadata block folds in there to keep the pending
+ * call identifiable.
+ */
+function dialogTitle(ui: ExtensionUIContext, title: string, metaLines: PermissionDialogLine[]): string {
+	if (ui.showPermissionDialog !== undefined || metaLines.length === 0) return title;
+	return `${title}\n${metadataText(metaLines)}`;
+}
+
+export function pieceStatusText(piece: PieceEvaluation): { text: string; style?: "muted" | "text" | "accent" } {
+	if (piece.policy === "allow") {
+		if (piece.ruleId === undefined) return { text: "allowed" };
+		return piece.layer === "dynamic"
+			? { text: "allowed · remembered this session", style: "muted" }
+			: { text: `allowed · ${piece.layer ?? "rule"} rule ${piece.ruleId}`, style: "muted" };
+	}
+	if (piece.policy === "deny") return { text: "denied", style: "accent" };
+	return piece.ruleId !== undefined
+		? { text: `prompt · rule ${piece.ruleId}`, style: "accent" }
+		: { text: "no rule", style: "accent" };
+}
+
+/** Split a piece at its last pipe; the tail is dimmable when it is a safe consumer. */
+export function splitSafeTail(text: string): { prefix: string; tail?: string } {
+	const pipeIndex = text.lastIndexOf("|");
+	if (pipeIndex < 0) return { prefix: text };
+	const tail = text.slice(pipeIndex).trim();
+	// The tokenizer glues the pipe to the stage ("… |head -1"); the consumer
+	// check reads the stage text, so strip the leading pipe (plan ruling).
+	if (tail.length === 0 || !isSafeConsumerStage(tail.replace(/^\|/u, ""))) return { prefix: text };
+	return { prefix: text.slice(0, pipeIndex).trimEnd(), tail: ` ${tail}` };
+}
+
+/** v3 dialog lines (spec §5.1): summary, operator-prefixed piece rows, dim safe tails, near-miss. */
+export function buildDialogLines(
+	decision: EngineDecision,
+	pieces: PieceEvaluation[] | undefined,
+	ctx?: EngineContext,
+): PermissionDialogLine[] {
+	const lines: PermissionDialogLine[] = [];
+	if (pieces !== undefined && pieces.length > 0) {
+		const pending = pieces.filter(piece => piece.policy === "prompt").length;
+		if (pieces.length > 1) {
+			lines.push({
+				segments: [{ text: `${pending} of ${pieces.length} pieces need approval — no rule covers this command` }],
+				style: "accent",
+			});
+		}
+		for (const [index, piece] of pieces.entries()) {
+			const { prefix, tail } = splitSafeTail(piece.text);
+			const segments: Array<{ text: string; dim?: boolean }> = [];
+			const operator =
+				index > 0 && piece.operator !== undefined && piece.operator !== null ? `${piece.operator} ` : "";
+			segments.push({ text: `${operator}${prefix}` });
+			if (tail !== undefined) segments.push({ text: tail, dim: true });
+			const status = pieceStatusText(piece);
+			const line: PermissionDialogLine = {
+				segments,
+				style: piece.policy === "allow" ? "allowed" : piece.policy === "deny" ? "denied" : "text",
+				status,
+			};
+			lines.push(line);
+			if (piece.policy === "prompt" && ctx !== undefined) {
+				const miss = nearMissLine(piece.text, ctx);
+				if (miss !== undefined) lines.push({ segments: [{ text: miss }], style: "muted" });
+			}
+		}
+		return lines;
+	}
+	// Single-unit (non-bash / PTY) context line, v3 wording.
+	lines.push({
+		segments: [
+			{
+				text:
+					decision.ruleId !== undefined
+						? `rule ${decision.ruleId}${decision.layer ? ` (${decision.layer})` : ""}`
+						: "no rule",
+			},
+		],
+		style: decision.ruleId !== undefined ? "muted" : "accent",
+	});
 	return lines;
 }
 
@@ -322,7 +513,7 @@ async function chooseLabel(
 	ui: ExtensionUIContext,
 	title: string,
 	options: string[],
-	lines?: readonly string[],
+	lines?: readonly (string | PermissionDialogLine)[],
 	suggestions?: Promise<PermissionDialogOption[]>,
 ): Promise<string | undefined> {
 	if (ui.showPermissionDialog) {
@@ -344,6 +535,9 @@ async function chooseLabel(
 	return ui.select(title, [...options]);
 }
 
+/** The single-piece scope dialog's glob-edit option (spec §5.1). */
+const CUSTOM_LABEL = "Custom…";
+
 /** Level-2 scope choice: pick one candidate (with its YAML preview) or cancel. */
 async function chooseCandidate(
 	ui: ExtensionUIContext,
@@ -352,25 +546,75 @@ async function chooseCandidate(
 ): Promise<CandidateRule | undefined> {
 	if (candidates.length === 0) return undefined;
 	if (ui.showPermissionDialog) {
+		const options: PermissionDialogOption[] = [];
+		for (const candidateItem of candidates) {
+			options.push({ label: candidateItem.label, description: candidateItem.yaml });
+			// Custom… sits right after Pattern (spec §5.1): the disagreement
+			// escape edits the recommended glob, narrower or wider.
+			if (candidateItem.scope === "pattern") options.push({ label: CUSTOM_LABEL });
+		}
 		const request: PermissionDialogRequest = {
 			title,
-			options: candidates.map(candidateItem => ({ label: candidateItem.label, description: candidateItem.yaml })),
+			options,
+			initialIndex: Math.max(
+				0,
+				candidates.findIndex(candidateItem => candidateItem.scope === "pattern"),
+			),
 		};
 		const index = await ui.showPermissionDialog(request);
-		return index === undefined ? undefined : candidates[index];
+		if (index === undefined || index === -1) return undefined; // cancel
+		// The option list inserts Custom… between candidates, so the picked
+		// index does not map onto the candidates array — resolve by label.
+		const label = options[index]?.label;
+		if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
+		const found = candidates.find(candidateItem => candidateItem.label === label);
+		return found;
 	}
-	const label = await ui.select(
-		title,
-		candidates.map(candidateItem => candidateItem.label),
-	);
+	const labels = [
+		...candidates.map(candidateItem => candidateItem.label),
+		...(candidates.some(candidateItem => candidateItem.scope === "pattern") ? [CUSTOM_LABEL] : []),
+	];
+	const label = await ui.select(title, labels);
 	if (label === undefined) return undefined;
+	if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
 	const index = candidates.findIndex(candidateItem => candidateItem.label === label);
 	return index >= 0 ? candidates[index] : undefined;
+}
+
+/**
+ * Custom… (spec §5.1): edit the recommended pattern glob via `ui.input`,
+ * returning a pattern-scope candidate for the caller to write. Cancel/empty
+ * edits resolve to undefined (no rule).
+ */
+async function editCustomCandidate(
+	ui: ExtensionUIContext,
+	title: string,
+	candidates: CandidateRule[],
+): Promise<CandidateRule | undefined> {
+	if (ui.input === undefined) return undefined;
+	const recommended = candidates.find(candidateItem => candidateItem.scope === "pattern");
+	if (recommended === undefined) return undefined; // Custom… is only offered next to a Pattern
+	const matchKey = Object.keys(recommended.rule.match)[0] ?? "command";
+	const current = String(recommended.rule.match[matchKey] ?? "");
+	const edited = await ui.input(`Edit pattern (${title})`, current);
+	if (edited === undefined || edited.trim().length === 0) return undefined;
+	const value = edited.trim();
+	const deny = recommended.rule.action === "deny";
+	return candidate(
+		recommended.rule.tool,
+		recommended.rule.action,
+		"pattern",
+		{ [matchKey]: value },
+		`${deny ? "Deny pattern" : "Pattern"}: ${value}`,
+	);
 }
 
 async function writeRememberedRule(rule: Omit<PermissionRule, "layer">, ctx: EngineContext): Promise<void> {
 	await writeDynamicRule(ruleFiles(ctx.cwd, ctx.home).dynamic, { ...rule, layer: "dynamic" });
 }
+
+/** PromptUnit outcome: a normal resolution, or the drill-down's back-to-selector signal. */
+type PromptUnitResult = PromptResolution | { policy: "back" };
 
 /** Prompt for one unit (a pending bash piece, the whole call, or a whole PTY command). */
 async function promptUnit(
@@ -381,12 +625,33 @@ async function promptUnit(
 	ctx: EngineContext,
 	opts: PromptForDecisionOptions,
 	pieces: PieceEvaluation[] | undefined,
-): Promise<PromptResolution> {
-	const title = opts.title ?? defaultTitle(toolName, decision);
+): Promise<PromptResolution>;
+/** Drill-down variant: the per-piece dialog also offers the back-to-selector option. */
+async function promptUnit(
+	ui: ExtensionUIContext,
+	toolName: string,
+	unitArgs: unknown,
+	decision: EngineDecision,
+	ctx: EngineContext,
+	opts: PromptForDecisionOptions,
+	pieces: PieceEvaluation[] | undefined,
+	backLabel: string,
+): Promise<PromptUnitResult>;
+async function promptUnit(
+	ui: ExtensionUIContext,
+	toolName: string,
+	unitArgs: unknown,
+	decision: EngineDecision,
+	ctx: EngineContext,
+	opts: PromptForDecisionOptions,
+	pieces: PieceEvaluation[] | undefined,
+	backLabel?: string,
+): Promise<PromptUnitResult> {
+	const title = opts.title ?? defaultTitle(toolName);
 
 	if (opts.includeCandidates === false) {
 		// Provider safety-check forced prompt: no candidates, binary choice only.
-		const chosen = await chooseLabel(ui, title, [APPROVE, DENY], dialogLines(decision, pieces));
+		const chosen = await chooseLabel(ui, title, [APPROVE, DENY], buildDialogLines(decision, pieces, ctx));
 		const approved = chosen === APPROVE || chosen === ALLOW_ONCE;
 		return { policy: approved ? "allow" : "deny" };
 	}
@@ -404,12 +669,15 @@ async function promptUnit(
 	// Shell-control bash commands cannot be suppressed by a remembered rule:
 	// drop both remember options and say why.
 	const rememberDisabled = bashRememberDisabled(unitArgs);
-	const lines = dialogLines(decision, pieces);
+	const metaLines = dialogMetadataLines(toolName, opts);
+	const lines: (string | PermissionDialogLine)[] = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
 	if (rememberDisabled) lines.push("", BASH_SHELL_CONTROL_NOTE);
+	const baseOptions = rememberDisabled ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER];
+	const options = backLabel !== undefined ? [...baseOptions, backLabel] : baseOptions;
 	const chosen = await chooseLabel(
 		ui,
-		title,
-		rememberDisabled ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER],
+		dialogTitle(ui, title, metaLines),
+		options,
 		lines,
 		suggestionsPromise?.then(result => result.options),
 	);
@@ -440,6 +708,8 @@ async function promptUnit(
 			return { policy: "deny", remembered: rule.rule };
 		}
 		default: {
+			// Drill-down navigation: return to the piece selector, undecided.
+			if (backLabel !== undefined && chosen === backLabel) return { policy: "back" };
 			// A suggestion option picked from the dialog: remember its rule and
 			// resolve with its action. Unknown labels still fail closed.
 			if (chosen !== undefined && suggestionsPromise !== undefined) {
@@ -454,14 +724,142 @@ async function promptUnit(
 	}
 }
 
+/** Compound remember dialog (spec §5.1): per-piece first-token glob checklist with live YAML preview. */
+export async function rememberCompound(
+	ui: ExtensionUIContext,
+	pendingPieces: PieceEvaluation[],
+	action: "allow" | "deny",
+	ctx: EngineContext,
+): Promise<Omit<PermissionRule, "layer"> | undefined> {
+	const toRule = (piece: PieceEvaluation): CandidateRule => {
+		const pattern = firstTokenPattern(piece.text);
+		return candidate("bash", action, "pattern", { command: pattern }, `${pattern}`);
+	};
+	const buildOptions = (pieces: PieceEvaluation[]): PermissionDialogOption[] => {
+		const options: PermissionDialogOption[] = pieces.map(piece => {
+			const rule = toRule(piece);
+			return {
+				label: rule.rule.match.command as string,
+				description: piece.text,
+				checked: true,
+				toggleable: true,
+			};
+		});
+		options.push({
+			label: `Write checked ${action === "allow" ? "allow" : "deny"} rules (${pieces.length})`,
+			labelFor: checked =>
+				`Write checked ${action === "allow" ? "allow" : "deny"} rules (${checked.filter(Boolean).length})`,
+		});
+		return options;
+	};
+	const previewFor = (checked: boolean[]): string =>
+		checked
+			.map((on, index) => (on ? renderCandidateYaml(toRule(pendingPieces[index]!).rule) : ""))
+			.filter(Boolean)
+			.join("\n");
+
+	const request: PermissionDialogRequest = {
+		title: `Remember ${action === "allow" ? "allow" : "deny"} — what rule?`,
+		lines: [
+			{
+				segments: [{ text: `${pendingPieces.length} pending pieces — an exact match would never fire again, so:` }],
+				style: "muted",
+			},
+		],
+		options: buildOptions(pendingPieces),
+		checklist: true,
+		allowEdit: true,
+		previewFor,
+		// The write button is preselected: all rows start checked, so Enter
+		// writes immediately (spec §5.1). Row = pieces.length (last option).
+		initialIndex: pendingPieces.length,
+	};
+	const index = await ui.showPermissionDialog?.(request);
+	if (index === -1 || index === undefined) return undefined; // plain cancel
+	if (index < -1) {
+		// e: edit the selected piece's glob, then write the edited rule directly.
+		const pieceIndex = -index - 2;
+		const piece = pendingPieces[pieceIndex];
+		if (piece === undefined || ui.input === undefined) return undefined;
+		const current = toRule(piece).rule.match.command as string;
+		const edited = await ui.input(`Edit glob for ${piece.text}`, current);
+		if (edited === undefined || edited.trim().length === 0) return undefined;
+		const rule = candidate("bash", action, "pattern", { command: edited.trim() }, edited.trim());
+		await writeRememberedRule(rule.rule, ctx);
+		return rule.rule;
+	}
+	const picked = request.options[index];
+	if (picked === undefined || picked.labelFor === undefined) return undefined; // piece row picked — no write
+	// The component wrote checked state back onto the request's option objects
+	// (Task 4 Step 4), so read the final state from the request.
+	const written: Array<Omit<PermissionRule, "layer">> = [];
+	for (const option of request.options) {
+		if (option.toggleable === true && option.checked === true) {
+			written.push(candidate("bash", action, "pattern", { command: option.label }, option.label).rule);
+		}
+	}
+	if (written.length === 0) return undefined;
+	for (const rule of written) await writeRememberedRule(rule, ctx);
+	return written[0];
+}
+
+/** Per-piece drill-down (spec §5.1): pick a pending piece, decide it, repeat; Back leaves the rest denied. */
+async function drillDownPieces(
+	ui: ExtensionUIContext,
+	pendingPieces: PieceEvaluation[],
+	decision: EngineDecision,
+	ctx: EngineContext,
+	opts: PromptForDecisionOptions,
+): Promise<PromptResolution> {
+	const BACK_TO_ALL_PIECES = "Back to all pieces";
+	let remembered: Omit<PermissionRule, "layer"> | undefined;
+	const remaining = [...pendingPieces];
+	while (remaining.length > 0) {
+		const picked = await chooseLabel(ui, "Decide per piece", ["Back", ...remaining.map(piece => piece.text)]);
+		if (picked === undefined || picked === "Back") break; // cancel — undecided pieces stay denied
+		const index = remaining.findIndex(piece => piece.text === picked);
+		if (index < 0) break;
+		const [piece] = remaining.splice(index, 1);
+		const resolution = await promptUnit(
+			ui,
+			"bash",
+			{ command: piece.text },
+			decision,
+			ctx,
+			opts,
+			[piece],
+			BACK_TO_ALL_PIECES,
+		);
+		if (resolution.policy === "back") {
+			// Back to all pieces: return the piece to the selector, undecided.
+			remaining.splice(index, 0, piece);
+			continue;
+		}
+		if (resolution.policy === "deny") {
+			// fail closed: a denied piece denies the whole call, carrying any
+			// rule remembered for it
+			return resolution.remembered !== undefined
+				? { policy: "deny", remembered: resolution.remembered }
+				: { policy: "deny" };
+		}
+		if (resolution.remembered !== undefined) remembered = resolution.remembered;
+	}
+	if (remaining.length > 0) {
+		// Back/esc left pieces undecided — cancel denies the whole call (§4.3).
+		return { policy: "deny" };
+	}
+	return remembered !== undefined ? { policy: "allow", remembered } : { policy: "allow" };
+}
+
 /**
  * Resolve a pending engine decision through the approval dialog.
  *
- * Bash calls prompt per pending piece in command order (spec §4.3); the
- * pieces come from `decision.pieces`, recomputed through the engine when the
- * decision carries none. PTY calls and non-bash calls prompt once for the
- * whole call, with candidates scoped to the whole command text. Any cancel
- * (`select`/dialog → undefined) denies. Denying any unit denies the call.
+ * Bash calls with more than one piece show ONE compound dialog for the whole
+ * call (spec §5.1): allow/deny all pending at once, remember a rule for all
+ * pending pieces, or drill down per piece. PTY calls, non-bash calls, forced
+ * prompts, and single-piece calls keep the single-unit flow (`promptUnit`).
+ * Any cancel (`select`/dialog → undefined) denies. Denying any unit denies the
+ * call.
  */
 export async function promptForDecision(
 	ui: ExtensionUIContext,
@@ -480,28 +878,62 @@ export async function promptForDecision(
 			pieces = evaluateBashCommand(command, ctx).pieces;
 		}
 	}
+	const pendingPieces = (pieces ?? []).filter(piece => piece.policy === "prompt");
 
-	const units: unknown[] = [];
-	if (ptyCall || pieces === undefined) {
-		units.push(args);
-	} else {
-		for (const piece of pieces) {
-			if (piece.policy === "prompt") {
-				units.push(toolName === "bash" ? { command: piece.text } : args);
+	// Every piece is already decided — nothing to prompt for. Only bash
+	// decisions carry pieces; non-bash tools (pieces undefined) must still
+	// dialog below.
+	if (pieces !== undefined && pendingPieces.length === 0) {
+		return { policy: "allow" };
+	}
+
+	// Single-unit flows: PTY, non-bash, forced prompts, or one piece.
+	if (ptyCall || opts.includeCandidates === false || pieces === undefined || pieces.length <= 1) {
+		return promptUnit(ui, toolName, args, decision, ctx, opts, pieces);
+	}
+
+	// v3 compound flow: one dialog for the whole call (spec §5.1).
+	const title = opts.title ?? defaultTitle(toolName);
+	const metaLines = dialogMetadataLines(toolName, opts);
+	const lines = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
+	const suggestionsPromise =
+		opts.suggestionsProvider !== undefined
+			? opts
+					.suggestionsProvider(unitPieceText(toolName, args))
+					.then(resolveSuggestions)
+					.catch(() => ({ options: [], byLabel: new Map<string, Suggestion>() }))
+			: undefined;
+	const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));
+	const baseOptions = rememberDisabled
+		? [ALLOW_ALL_ONCE, DENY_ALL]
+		: [ALLOW_ALL_ONCE, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
+	const chosen = await chooseLabel(
+		ui,
+		dialogTitle(ui, title, metaLines),
+		baseOptions,
+		lines,
+		suggestionsPromise?.then(result => result.options),
+	);
+	switch (chosen) {
+		case ALLOW_ALL_ONCE:
+			return { policy: "allow" };
+		case DENY_ALL:
+			return { policy: "deny" };
+		case ALLOW_ALL_REMEMBER: {
+			const rule = await rememberCompound(ui, pendingPieces, "allow", ctx);
+			return rule === undefined ? { policy: "deny" } : { policy: "allow", remembered: rule };
+		}
+		case DRILL_DOWN:
+			return drillDownPieces(ui, pendingPieces, decision, ctx, opts);
+		default:
+			// Suggestion option picked from the dialog (appended options).
+			if (chosen !== undefined && suggestionsPromise !== undefined) {
+				const picked = (await suggestionsPromise).byLabel.get(chosen);
+				if (picked !== undefined) {
+					await writeRememberedRule(picked.rule, ctx);
+					return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
+				}
 			}
-		}
+			return { policy: "deny" };
 	}
-
-	let remembered: Omit<PermissionRule, "layer"> | undefined;
-	for (const unitArgs of units) {
-		const resolution = await promptUnit(ui, toolName, unitArgs, decision, ctx, opts, pieces);
-		if (resolution.policy === "deny") {
-			return resolution.remembered !== undefined
-				? { policy: "deny", remembered: resolution.remembered }
-				: { policy: "deny" };
-		}
-		if (resolution.remembered !== undefined) remembered = resolution.remembered;
-	}
-
-	return remembered !== undefined ? { policy: "allow", remembered } : { policy: "allow" };
 }

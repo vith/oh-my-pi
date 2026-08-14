@@ -962,7 +962,15 @@ export class ExtensionUiController {
 				index => settle(index),
 				() => settle(undefined),
 				{
+					// Sentinels (prompt.ts maps them, Task 6): a selection settles the
+					// raw option index; `e` on checklist row `index` settles -(index + 2);
+					// cancel settles undefined. -1 is the plain-cancel sentinel.
 					maxVisible,
+					initialIndex: request.initialIndex,
+					checklist: request.checklist,
+					allowEdit: request.allowEdit,
+					previewFor: request.previewFor,
+					...(request.allowEdit === true ? { onEdit: index => settle(-(index + 2)) } : {}),
 					...(request.suggestions !== undefined ? { suggestions: request.suggestions, ui: this.ctx.ui } : {}),
 				},
 			);
