@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/mode [allow|prompt|deny]` slash command: shows the current permission posture, or switches it persistently via `permissions.default`.
+- `app.permissions.cycleMode` keybinding (default `ctrl+shift+m`): cycles the permission posture allow → prompt → deny and writes it persistently.
+
 ### Fixed
 
 - Compound permission dialogs no longer offer remember suggestions that match only the whole `&&`-joined command string — such rules can never fire because the engine evaluates per piece; compound suggestions must match a pending piece.

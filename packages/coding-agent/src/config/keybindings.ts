@@ -26,6 +26,7 @@ interface AppKeybindings {
 	"app.thinking.toggle": true;
 	"app.model.cycleForward": true;
 	"app.model.cycleBackward": true;
+	"app.permissions.cycleMode": true;
 	"app.model.select": true;
 	"app.model.selectTemporary": true;
 	"app.tools.expand": true;
@@ -116,6 +117,10 @@ export const KEYBINDINGS = {
 	"app.model.select": {
 		defaultKeys: "alt+m",
 		description: "Select model",
+	},
+	"app.permissions.cycleMode": {
+		defaultKeys: "ctrl+shift+m",
+		description: "Cycle permission mode (allow, prompt, deny)",
 	},
 	"app.model.selectTemporary": {
 		defaultKeys: "alt+p",

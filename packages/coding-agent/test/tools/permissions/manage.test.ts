@@ -5,7 +5,12 @@ import * as path from "node:path";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { appendAudit, auditFilePath } from "@oh-my-pi/pi-coding-agent/tools/permissions/audit";
-import { permissionsSchema, runPermissionCommand } from "@oh-my-pi/pi-coding-agent/tools/permissions/manage";
+import {
+	cyclePosture,
+	permissionsSchema,
+	runModeCommand,
+	runPermissionCommand,
+} from "@oh-my-pi/pi-coding-agent/tools/permissions/manage";
 import { loadRuleLayers } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
@@ -412,5 +417,38 @@ describe("permissions model tool surface", () => {
 		const output = await runPermissionCommand("frobnicate", await ctx());
 		expect(output).toContain('Unknown subcommand "frobnicate"');
 		expect(output).toContain("Usage: permissions");
+	});
+});
+
+describe("runModeCommand", () => {
+	it("shows the current posture without an argument", async () => {
+		const output = await runModeCommand("", await ctx());
+		expect(output).toBe("Mode: prompt");
+	});
+
+	it("writes each posture to permissions.default", async () => {
+		for (const mode of ["allow", "prompt", "deny"] as const) {
+			const c = await ctx();
+			const output = await runModeCommand(mode, c);
+			expect(output).toBe(`Mode set to ${mode} (permissions.default)`);
+			expect(c.settings.get("permissions.default")).toBe(mode);
+		}
+	});
+
+	it("accepts uppercase input and rejects anything else", async () => {
+		const c = await ctx();
+		expect(await runModeCommand("ALLOW", c)).toContain("Mode set to allow");
+		const output = await runModeCommand("yolo", c);
+		expect(output).toContain('Unknown mode "yolo"');
+		expect(output).toContain("allow, prompt, or deny");
+		expect(c.settings.get("permissions.default")).toBe("allow"); // untouched by the failed call
+	});
+});
+
+describe("cyclePosture", () => {
+	it("cycles allow → prompt → deny → allow", () => {
+		expect(cyclePosture("allow")).toBe("prompt");
+		expect(cyclePosture("prompt")).toBe("deny");
+		expect(cyclePosture("deny")).toBe("allow");
 	});
 });

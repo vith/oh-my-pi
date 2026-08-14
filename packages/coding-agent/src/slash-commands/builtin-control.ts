@@ -1,5 +1,5 @@
 import { runPauseScreen } from "../modes/components/pause-screen";
-import { runPermissionCommand } from "../tools/permissions/manage";
+import { runModeCommand, runPermissionCommand } from "../tools/permissions/manage";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
@@ -68,6 +68,23 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runPauseScreen(runtime.ctx);
+		},
+	},
+	{
+		name: "mode",
+		description: "Show or switch the overall permission mode (allow, prompt, deny)",
+		acpDescription: "Show or switch the permission mode",
+		acpInputHint: "[allow|prompt|deny]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			await runtime.output(
+				await runModeCommand(command.args, {
+					cwd: runtime.cwd,
+					settings: runtime.settings,
+					sessionId: runtime.sessionManager.getSessionId(),
+				}),
+			);
+			return commandConsumed();
 		},
 	},
 	{
