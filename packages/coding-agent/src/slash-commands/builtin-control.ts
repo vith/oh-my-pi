@@ -80,7 +80,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "list", description: "List merged permission rules by layer with audit match counts" },
 			{ name: "show", description: "Show a rule's details and last audit hits", usage: "<id>" },
 			{ name: "add", description: "Add a rule to the user layer", usage: "<yaml>" },
-			{ name: "remove", description: "Remove rule(s) from the user layer", usage: "<id> [<id>...]" },
+			{ name: "remove", description: "Remove rule(s) from file-backed layers", usage: "[--project] <id> [<id>...]" },
 			{ name: "clear", description: "Clear file-backed permission rules", usage: "[--project]" },
 			{ name: "edit", description: "Replace a user-layer rule by id", usage: "<id> <yaml>" },
 			{ name: "test", description: "Dry-run a bash command against the permission engine", usage: '"<command>"' },

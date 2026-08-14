@@ -353,6 +353,14 @@ export async function removeDynamicRule(file: string, id: string): Promise<boole
 }
 
 /**
+ * Remove a rule by `id` from the project rules file.
+ * Returns whether a rule with that id existed.
+ */
+export async function removeProjectRule(file: string, id: string): Promise<boolean> {
+	return removeRuleFromFile(file, id);
+}
+
+/**
  * Remove a rule by `id` from the user rules file (the management surface's
  * remove path). Returns whether a rule with that id existed.
  */

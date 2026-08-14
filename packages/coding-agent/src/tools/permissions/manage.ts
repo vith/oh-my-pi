@@ -20,6 +20,8 @@ import {
 	normalizeRule,
 	type PermissionRule,
 	type RuleLayer,
+	removeDynamicRule,
+	removeProjectRule,
 	removeUserRule,
 	ruleFiles,
 	writeRulesFile,
@@ -37,7 +39,8 @@ import {
  *   with audit match counts when the audit file exists.
  * - `show <id>` — rule details plus its last audit hits.
  * - `add <yaml>` — validate via `normalizeRule` and write to the user file.
- * - `remove <id> [<id>...]` — delete rule(s) from the user file.
+ * - `remove [--project] <id> [<id>...]` — delete rule(s) from whichever
+ *   file-backed layer holds them (project only with `--project`).
  * - `clear [--project]` — wipe the file-backed layers (dynamic + user by
  *   default; the repo-committed project layer only with `--project`).
  * - `edit <id> <yaml>` — replace a user-file rule by id.
@@ -92,7 +95,7 @@ function usage(): string {
 		"  list                 merged rules by layer with audit match counts",
 		"  show <id>            rule details + last audit hits",
 		"  add <yaml>           add a rule to the user layer (validated)",
-		"  remove <id> [<id>...] remove rule(s) from the user layer",
+		"  remove [--project] <id>... remove rule(s); project layer needs --project",
 		"  clear [--project]     clear file-backed rules (project layer only with --project)",
 		"  edit <id> <yaml>     replace a user-layer rule by id",
 		'  test "<command>"     dry-run a bash command (decision + rule + layer + class)',
@@ -188,32 +191,50 @@ async function addRule(rest: string, ctx: RunPermissionCommandContext): Promise<
 	return `Added rule "${parsed.rule.id}" to the user layer (${file}).`;
 }
 
+/**
+ * Remove rule(s) from whichever file-backed layer holds them. Dynamic and
+ * user rules are removable directly; repo-committed project rules require an
+ * explicit `--project` (accepted anywhere in the argument list) so a shared
+ * file is never wiped by accident.
+ */
 async function removeRule(rest: string, ctx: RunPermissionCommandContext): Promise<string> {
-	const ids = rest.trim().split(/\s+/u).filter(Boolean);
-	if (ids.length === 0) return "Usage: permissions remove <id> [<id>...]";
-	const file = ruleFiles(ctx.cwd).user;
+	const tokens = rest.trim().split(/\s+/u).filter(Boolean);
+	const ids = tokens.filter(token => token !== "--project" && token.toLowerCase() !== "project");
+	const includeProject = ids.length !== tokens.length;
+	if (ids.length === 0) return "Usage: permissions remove [--project] <id> [<id>...]";
+
+	const files = ruleFiles(ctx.cwd);
 	const lines: string[] = [];
 	for (const id of ids) {
-		if (await removeUserRule(file, id)) {
-			lines.push(`Removed rule "${id}" from the user layer.`);
+		// Reload per id: each removal rewrites a layer file, which invalidates
+		// the rule-layer cache.
+		const { rules } = loadRuleLayers(ctx.cwd);
+		const target = rules.find(rule => rule.id === id);
+		if (target === undefined) {
+			lines.push(`No rule with id "${id}" found in the file-backed layers. Use "permissions list" to see rule ids.`);
 			continue;
 		}
-		const { rules } = loadRuleLayers(ctx.cwd);
-		const elsewhere = rules.find(rule => rule.id === id);
-		if (elsewhere !== undefined) {
-			const files = ruleFiles(ctx.cwd);
-			const pathForLayer: Partial<Record<RuleLayer, string>> = {
-				dynamic: files.dynamic,
-				project: files.project,
-				user: files.user,
-			};
-			const location = pathForLayer[elsewhere.layer] !== undefined ? ` (${pathForLayer[elsewhere.layer]})` : "";
+		if (target.layer === "curated" || target.layer === "legacy") {
+			lines.push(`Rule "${id}" is a ${target.layer} rule and cannot be removed.`);
+			continue;
+		}
+		if (target.layer === "project" && !includeProject) {
 			lines.push(
-				`Rule "${id}" lives in the ${elsewhere.layer} layer${location}, which this command does not edit. Only user-layer rules can be removed here.`,
+				`Rule "${id}" lives in the project layer (repo-committed). Re-run "permissions remove --project ${id}" to remove it.`,
 			);
 			continue;
 		}
-		lines.push(`No rule with id "${id}" found in the file-backed layers. Use "permissions list" to see rule ids.`);
+		const removed =
+			target.layer === "dynamic"
+				? await removeDynamicRule(files.dynamic, id)
+				: target.layer === "project"
+					? await removeProjectRule(files.project, id)
+					: await removeUserRule(files.user, id);
+		lines.push(
+			removed
+				? `Removed rule "${id}" from the ${target.layer} layer.`
+				: `No rule with id "${id}" found in the ${target.layer} layer.`,
+		);
 	}
 	return lines.join("\n");
 }

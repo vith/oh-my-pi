@@ -155,6 +155,57 @@ describe("runPermissionCommand add/remove/edit", () => {
 		expect(remaining.some(rule => rule.id === "git1")).toBe(false);
 		expect(remaining.some(rule => rule.id === "npm1")).toBe(false);
 	});
+
+	it("remove deletes engine-written dynamic rules by id", async () => {
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand("remove dyn1", await ctx());
+
+		expect(output).toContain('Removed rule "dyn1" from the dynamic layer.');
+		expect(loadRuleLayers(cwd, home).rules.some(rule => rule.id === "dyn1")).toBe(false);
+	});
+
+	it("remove refuses project rules until --project is passed", async () => {
+		write(
+			path.join(cwd, ".omp", "permissions.yml"),
+			"rules:\n  - id: proj1\n    tool: write\n    match: { path: 'src/**' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand("remove proj1", await ctx());
+
+		expect(output).toContain("project layer (repo-committed)");
+		expect(output).toContain("--project");
+		expect(loadRuleLayers(cwd, home).rules.some(rule => rule.id === "proj1")).toBe(true);
+	});
+
+	it("remove --project deletes project rules", async () => {
+		write(
+			path.join(cwd, ".omp", "permissions.yml"),
+			"rules:\n  - id: proj1\n    tool: write\n    match: { path: 'src/**' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand("remove --project proj1", await ctx());
+
+		expect(output).toContain('Removed rule "proj1" from the project layer.');
+		expect(loadRuleLayers(cwd, home).rules.some(rule => rule.id === "proj1")).toBe(false);
+	});
+
+	it("remove --project handles mixed personal and project ids", async () => {
+		await runPermissionCommand("add tool: bash\nmatch: { command: 'git *' }\naction: allow\nid: git1", await ctx());
+		write(
+			path.join(cwd, ".omp", "permissions.yml"),
+			"rules:\n  - id: proj1\n    tool: write\n    match: { path: 'src/**' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand("remove git1 --project proj1", await ctx());
+
+		expect(output).toContain('Removed rule "git1" from the user layer.');
+		expect(output).toContain('Removed rule "proj1" from the project layer.');
+		expect(loadRuleLayers(cwd, home).rules).toHaveLength(0);
+	});
 });
 
 describe("runPermissionCommand clear", () => {
