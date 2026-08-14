@@ -618,6 +618,17 @@ function evaluatePermissionCore(
 		return { policy: "prompt", tier: decision.tier, reason: decision.reason, source: "tool", override: true };
 	}
 
+	// The bash tool runs its own engine evaluation per piece and declares
+	// policy "allow" only when every piece is allowed (rules, posture, or
+	// safe-consumer). Honor it for compounds: a multi-piece call whose pieces
+	// are all rule-covered must not fall through to a posture prompt in
+	// prompt mode. Deny/prompt rules and the tool's own prompt/override above
+	// still win; only bash declares allow today, so this cannot widen any
+	// other tool's approval under prompt posture.
+	if (decision.policy === "allow" && multiPieceBash) {
+		return { policy: "allow", tier: decision.tier, source: "tool", override: false };
+	}
+
 	if (userPolicy === "prompt") {
 		return { policy: "prompt", tier: decision.tier, source: "user", override: false };
 	}

@@ -874,12 +874,46 @@ describe("whole-command allow rules vs compounds", () => {
 		}
 	});
 
-	it("prompt posture still prompts the same compound", () => {
+	it("prompt posture still prompts the same compound without tool-level analysis", () => {
+		// tool() carries no approval function, so the walk sees no per-piece
+		// evaluation: a compound with only a first-token rule stays a posture
+		// prompt. (With the real bash tool's all-covered allow it is allowed —
+		// covered by the tool-allow test above.)
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
 		try {
 			writeUserRule(dir, "cd *", "allow");
 			const d = evaluatePermission(tool("bash"), { command: "cd /tmp && echo hi" }, walkCtx(dir, "prompt"));
 			expect(d.policy).toBe("prompt");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a compound fully covered by rules auto-allows in prompt posture (tool allow)", () => {
+		// The bash tool runs its own engine per piece and declares policy
+		// "allow" only when every piece is allowed (here: two rule-covered
+		// pieces). The walk must defer to that instead of falling through to
+		// a posture prompt — otherwise a fully rule-covered compound still
+		// dialogs in prompt mode.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			writeUserRule(dir, "cd *", "allow");
+			writeUserRule(dir, "echo *", "allow");
+			const bash = tool("bash", () => ({ tier: "write", policy: "allow" }));
+			const d = evaluatePermission(bash, { command: "cd /tmp && echo hi" }, walkCtx(dir, "prompt"));
+			expect(d).toMatchObject({ policy: "allow", source: "tool" });
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a whole-command deny rule beats a tool allow on a compound", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			writeUserRule(dir, "cd /etc && echo *", "deny");
+			const bash = tool("bash", () => ({ tier: "write", policy: "allow" }));
+			const d = evaluatePermission(bash, { command: "cd /etc && echo hi" }, walkCtx(dir, "allow"));
+			expect(d.policy).toBe("deny");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

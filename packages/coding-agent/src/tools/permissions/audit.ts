@@ -53,7 +53,17 @@ export async function appendAudit(
 	maxEntries: number = DEFAULT_MAX_ENTRIES,
 ): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true });
-	await fs.appendFile(file, `${JSON.stringify(record)}\n`, "utf8");
+	// Single O_APPEND write, never fs.appendFile: Node's appendFile can split
+	// a large line into several write syscalls, letting a concurrent reader
+	// stat an intermediate size and observe a torn tail. One write syscall
+	// keeps the observable file a prefix of complete lines at every instant,
+	// so any parser (jq included) on the live JSONL sees valid rows only.
+	const fh = await fs.open(file, "a");
+	try {
+		await fh.write(`${JSON.stringify(record)}\n`);
+	} finally {
+		await fh.close();
+	}
 	const count = (lineCounts.get(file) ?? 0) + 1;
 	lineCounts.set(file, count);
 	if (maxEntries > 0 && count > maxEntries) {
@@ -61,12 +71,19 @@ export async function appendAudit(
 	}
 }
 
-/** Keep the newest `maxEntries` lines; bounded by maxEntries+1 lines on disk. */
+/**
+ * Keep the newest `maxEntries` lines; bounded by maxEntries+1 lines on disk.
+ * Writes a temp sibling and renames it over the target so concurrent readers
+ * (audit tail, external parsers) see either the old or the new file — never a
+ * truncated one mid-rotation.
+ */
 async function rotate(file: string, maxEntries: number): Promise<void> {
 	const text = await Bun.file(file).text();
 	const lines = text.split("\n").filter(line => line.length > 0);
 	const tail = lines.slice(-maxEntries);
-	await Bun.write(file, tail.length > 0 ? `${tail.join("\n")}\n` : "");
+	const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+	await Bun.write(tmp, tail.length > 0 ? `${tail.join("\n")}\n` : "");
+	await fs.rename(tmp, file);
 	lineCounts.set(file, tail.length);
 }
 
