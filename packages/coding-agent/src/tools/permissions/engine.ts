@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -246,7 +247,18 @@ function normalizeBashMatchText(value: string): string {
 	return normalizeBashApprovalPattern(value).replace(/\|\s+/gu, "|");
 }
 
-function matchPatternValue(key: string, value: unknown, pattern: unknown): boolean {
+/**
+ * Expand a leading `~` (the user's home) in a path pattern or path value.
+ * Command keys never expand: `cd ~/x` is literal text on both sides, and
+ * expanding only one side would break the match.
+ */
+function expandPathHome(text: string): string {
+	if (text === "~") return os.homedir();
+	if (text.startsWith("~/")) return path.join(os.homedir(), text.slice(2));
+	return text;
+}
+
+export function matchPatternValue(key: string, value: unknown, pattern: unknown): boolean {
 	if (typeof pattern !== "string") return value === pattern;
 	if (isRegexWrapped(pattern)) {
 		const regex = compileRegex(pattern);
@@ -254,15 +266,19 @@ function matchPatternValue(key: string, value: unknown, pattern: unknown): boole
 		return regex.test(key === "command" ? normalizeBashApprovalPattern(value) : value);
 	}
 	if (typeof value !== "string") return false;
-	if (key === "command" || pattern.includes("*")) {
+	// Path keys (`path`, `file`, …) treat a leading `~` as the user's home on
+	// both sides, so `~/.omp/**` rules match absolute call paths.
+	const candidate = key === "command" ? value : expandPathHome(value);
+	const expandedPattern = key === "command" ? pattern : expandPathHome(pattern);
+	if (key === "command" || expandedPattern.includes("*")) {
 		// Whitespace-normalized glob matching, identical to the bash approval
 		// helpers — with both sides pipe-normalized so spaced and glued pipe
 		// forms are interchangeable.
-		const candidate = key === "command" ? normalizeBashMatchText(value) : value;
-		const normalizedPattern = key === "command" ? normalizeBashMatchText(pattern) : pattern;
-		return bashApprovalPatternToRegExp(normalizedPattern).test(candidate);
+		const normalizedCandidate = key === "command" ? normalizeBashMatchText(candidate) : candidate;
+		const normalizedPattern = key === "command" ? normalizeBashMatchText(expandedPattern) : expandedPattern;
+		return bashApprovalPatternToRegExp(normalizedPattern).test(normalizedCandidate);
 	}
-	return value === pattern;
+	return candidate === expandedPattern;
 }
 
 export type MatchClass = "exact-structure" | "covering";

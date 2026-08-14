@@ -17,6 +17,11 @@
 - Remember options are dropped (with an explanatory note) when every candidate scope is exact — one-shot code tools like eval can only remember an identical call.
 - The compound remember checklist no longer denies the call when Enter is pressed on a piece row: rows toggle (space or enter), only the "Write checked rules" button commits, and the help line documents the keys plus the `[x]` meaning.
 
+### Fixed
+
+- Path-key rule patterns now expand a leading `~` at match time: a remembered rule like `~/.omp/plugins/**` actually matches the absolute call path instead of silently never firing. Command keys never expand (`cd ~/x` stays literal text).
+- The Custom… glob editor validates the edited pattern against the pending call before accepting: a glob that cannot match this call reopens the input with an error notification (esc abandons the edit). LLM rule suggestions that cannot match the pending call are dropped instead of appended as never-firing options.
+
 ## [17.3.1+vith-fork.142.d1177a301b] - 2026-08-14
 
 ### Added

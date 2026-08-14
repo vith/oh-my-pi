@@ -131,6 +131,17 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   (b) path patterns expand `~` at match time (or the editor resolves to an
   absolute path before saving); (c) same validation applied to LLM
   suggestions.
+- **Fixed (2026-08-14):** the engine expands a leading `~` in path-key
+  patterns (and values) at match time — `~/.omp/**` rules now match absolute
+  call paths, and command keys never expand (`cd ~/x` stays literal). The
+  Custom… editor validates the edited glob against the pending call's value
+  before accepting: a pattern that cannot match this call (wrong subcommand
+  verb, glob narrower than the target) reopens the input with an error
+  notification until it matches or the user escs. LLM suggestions that
+  cannot match the pending call (checked against the call args, or any
+  pending piece for compound bash) are dropped instead of appended as
+  never-firing rule options. Also eliminates the most plausible remaining
+  cause of bug 7 (glob too narrow for the actual path).
 
 ## 10. Are LLM rule suggestions real, and why are they never better?
 

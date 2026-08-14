@@ -706,27 +706,89 @@ describe("promptForDecision", () => {
 		const home = tempHome();
 		let placeholder = "";
 		let dialogCalls = 0;
+		const notifications: string[] = [];
 		const ui = {
 			...noopUi(),
+			notify: (message: string, type?: string) => {
+				notifications.push(`${type}: ${message}`);
+			},
 			showPermissionDialog: async () => {
 				dialogCalls += 1;
 				return dialogCalls === 1 ? 1 : 2; // Allow & remember… → Custom…
 			},
 			input: async (_title: string, current?: string) => {
 				placeholder = current ?? "";
-				return "git branch -a *";
+				return "git branch -a*";
 			},
 		} as unknown as ExtensionUIContext;
 		const decision = fakeDecision({ pieces: [pendingPiece("git branch -a")] });
 		const res = await promptForDecision(ui, "bash", { command: "git branch -a" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("allow");
-		expect(res.remembered?.match).toEqual({ command: "git branch -a *" });
+		expect(res.remembered?.match).toEqual({ command: "git branch -a*" });
 		// the placeholder is the recommended first-token glob (spec §5.1:
 		// "narrower or wider than the first-token pattern")
 		expect(placeholder).toBe("git branch *");
+		// the edited pattern matches the pending call — no validation complaint
+		expect(notifications).toEqual([]);
 		const file = ruleFiles(fakeCtx(home).cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
-		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["git branch -a *"]);
+		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["git branch -a*"]);
+	});
+
+	it("Custom… rejects a pattern that cannot match the pending call until it is fixed", async () => {
+		const home = tempHome();
+		let dialogCalls = 0;
+		let inputCalls = 0;
+		const notifications: string[] = [];
+		const ui = {
+			...noopUi(),
+			notify: (message: string, type?: string) => {
+				notifications.push(`${type}: ${message}`);
+			},
+			showPermissionDialog: async () => {
+				dialogCalls += 1;
+				return dialogCalls === 1 ? 1 : 2; // Allow & remember… → Custom…
+			},
+			input: async () => {
+				inputCalls += 1;
+				// First attempt: a glob that can never match the pending
+				// `git status -s` (subcommand verb is wrong). Second: fixed.
+				return inputCalls === 1 ? "git push *" : "git status *";
+			},
+		} as unknown as ExtensionUIContext;
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(home));
+		expect(res.policy).toBe("allow");
+		expect(res.remembered?.match).toEqual({ command: "git status *" });
+		// the invalid glob was flagged before the input reopened
+		expect(notifications).toHaveLength(1);
+		expect(notifications[0]).toContain("cannot match the pending call");
+		expect(inputCalls).toBe(2);
+	});
+
+	it("Custom… esc on a rejected pattern abandons the edit and returns to the decision page", async () => {
+		const home = tempHome();
+		let dialogCalls = 0;
+		let inputCalls = 0;
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const ui = {
+			...noopUi(),
+			showPermissionDialog: async () => {
+				dialogCalls += 1;
+				if (dialogCalls === 1) return 1; // Allow & remember…
+				if (dialogCalls === 2) return 2; // Custom…
+				return undefined; // esc on the decision page after the back
+			},
+			input: async () => {
+				inputCalls += 1;
+				// never-matching glob → notify + re-prompt; esc abandons the edit
+				return inputCalls === 1 ? "git push *" : undefined;
+			},
+		} as unknown as ExtensionUIContext;
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(home));
+		// back from the abandoned edit → esc on the decision page → deny
+		expect(res.policy).toBe("deny");
+		expect(dialogCalls).toBe(3);
 	});
 
 	it("Tool always is offered for read-only tools", async () => {
@@ -913,9 +975,15 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		const captured: { request?: PermissionDialogRequest } = {};
 		const ui = capturingDialogUi(captured, 0); // "Allow all pending once"
 		const firedPieces: string[] = [];
+		// `echo a` covers the first pending piece (not the whole compound
+		// string), so the filter keeps it.
+		const suggestion: Suggestion = {
+			rule: { id: "s-piece", tool: "bash", match: { command: "echo a" }, action: "allow", reason: "x" },
+			rationale: "x",
+		};
 		const provider = async (piece: string): Promise<SuggestResult> => {
 			firedPieces.push(piece);
-			return { suggestions: [allowSuggestion] };
+			return { suggestions: [suggestion] };
 		};
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
 		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
@@ -927,7 +995,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		const options = await captured.request!.suggestions!;
 		expect(options).toHaveLength(1);
 		expect(options[0]?.label).toContain("Allow bash");
-		expect(options[0]?.description).toContain("git status -s");
+		expect(options[0]?.description).toContain("echo a");
 	});
 
 	it("picking a suggested allow option remembers its rule", async () => {
@@ -1015,6 +1083,63 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		});
 		expect(res.policy).toBe("allow");
 		expect(res.remembered?.id).toBe("s-allow");
+	});
+
+	it("suggestions that cannot match the pending call are dropped", async () => {
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Allow once
+		// denySuggestion matches `git push` — not the pending `git status -s`.
+		const provider = async (): Promise<SuggestResult> => ({ suggestions: [denySuggestion] });
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		const suggestionOptions = await requests[0]!.suggestions!;
+		expect(suggestionOptions.map(option => option.label)).not.toContain("Deny bash: git push");
+	});
+
+	it("compound suggestions matching any pending piece survive the whole-call filter", async () => {
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Allow all pending once
+		const matching = async (): Promise<SuggestResult> => ({
+			suggestions: [
+				{
+					rule: { id: "s-piece", tool: "bash", match: { command: "echo a" }, action: "allow", reason: "x" },
+					rationale: "x",
+				},
+			],
+		});
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: matching,
+		});
+		expect(res.policy).toBe("allow");
+		// `echo a` does not match the whole compound string, but it covers the
+		// first pending piece — the option stays.
+		const keptOptions = await requests[0]!.suggestions!;
+		expect(keptOptions.map(option => option.label)).toContain("Allow bash: echo a");
+		const notMatching = async (): Promise<SuggestResult> => ({
+			suggestions: [
+				{
+					rule: { id: "s-other", tool: "bash", match: { command: "echo c" }, action: "allow", reason: "x" },
+					rationale: "x",
+				},
+			],
+		});
+		const requests2: PermissionDialogRequest[] = [];
+		const { ui: ui2 } = queuedDialogUi([0], requests2);
+		const res2 = await promptForDecision(
+			ui2,
+			"bash",
+			{ command: "echo a && echo b" },
+			decision,
+			fakeCtx(tempHome()),
+			{ suggestionsProvider: notMatching },
+		);
+		expect(res2.policy).toBe("allow");
+		const droppedOptions = await requests2[0]!.suggestions!;
+		expect(droppedOptions.map(option => option.label)).not.toContain("Allow bash: echo c");
 	});
 
 	it("the model's recommendation preselects the matching decision-page option", async () => {

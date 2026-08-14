@@ -32,6 +32,8 @@ import {
 	type EngineDecision,
 	evaluateBashCommand,
 	hasBashApprovalShellControl,
+	matchPatternValue,
+	matchRule,
 	nearMissLine,
 	type PieceEvaluation,
 } from "./engine";
@@ -511,18 +513,41 @@ const EMPTY_SUGGESTIONS: ResolvedSuggestions = {
 	byLabel: new Map<string, Suggestion>(),
 };
 
-function resolveSuggestions(result: SuggestResult): ResolvedSuggestions {
+/**
+ * Shape the provider result into dialog options. Suggestions that cannot
+ * match the pending call are dropped: accepting them would append options
+ * that write never-matching rules. A suggestion matches when its rule matches
+ * the call's args, or — for compound bash calls — any pending piece's command
+ * text (the rule may cover the piece needing approval without covering the
+ * whole compound string).
+ */
+function resolveSuggestions(
+	result: SuggestResult,
+	toolName: string,
+	args: unknown,
+	pendingPieces?: PieceEvaluation[],
+): ResolvedSuggestions {
+	const kept: Suggestion[] = [];
+	for (const suggestion of result.suggestions) {
+		const rule = { ...suggestion.rule, layer: "user" } as PermissionRule;
+		if (matchRule(rule, toolName, args)) {
+			kept.push(suggestion);
+		} else if (pendingPieces !== undefined && toolName === "bash") {
+			const matchesPiece = pendingPieces.some(piece => matchRule(rule, "bash", { command: piece.text }));
+			if (matchesPiece) kept.push(suggestion);
+		}
+	}
 	const seen = new Set<string>();
 	const options: PermissionDialogOption[] = [];
 	const byLabel = new Map<string, Suggestion>();
-	for (const suggestion of result.suggestions) {
+	for (const suggestion of kept) {
 		const label = suggestionLabel(suggestion);
 		if (seen.has(label)) continue; // duplicate labels would be unroutable
 		seen.add(label);
 		options.push({ label, description: renderCandidateYaml(suggestion.rule) });
 		byLabel.set(label, suggestion);
 	}
-	return { result, options, byLabel };
+	return { result: { ...result, suggestions: kept }, options, byLabel };
 }
 
 /**
@@ -632,7 +657,8 @@ async function chooseCandidate(
 	ui: ExtensionUIContext,
 	title: string,
 	candidates: CandidateRule[],
-	recommendedScope?: Promise<RecommendationScope | undefined>,
+	recommendedScope: Promise<RecommendationScope | undefined> | undefined,
+	args: unknown,
 ): Promise<CandidateRule | typeof SCOPE_BACK | undefined> {
 	if (candidates.length === 0) return SCOPE_BACK;
 	if (ui.showPermissionDialog) {
@@ -666,7 +692,7 @@ async function chooseCandidate(
 		// The option list inserts Custom… between candidates, so the picked
 		// index does not map onto the candidates array — resolve by label.
 		const label = options[index]?.label;
-		if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
+		if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates, args);
 		const found = candidates.find(candidateItem => candidateItem.label === label);
 		return found;
 	}
@@ -676,7 +702,7 @@ async function chooseCandidate(
 	];
 	const label = await ui.select(title, labels);
 	if (label === undefined) return SCOPE_BACK;
-	if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
+	if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates, args);
 	const index = candidates.findIndex(candidateItem => candidateItem.label === label);
 	return index >= 0 ? candidates[index] : undefined;
 }
@@ -685,28 +711,45 @@ async function chooseCandidate(
  * Custom… (spec §5.1): edit the recommended pattern glob via `ui.input`,
  * returning a pattern-scope candidate for the caller to write. Cancel/empty
  * edits resolve to undefined (no rule).
+ *
+ * The edited pattern is validated against the pending call's value before
+ * acceptance: a pattern that cannot match this call (e.g. a `~` path the
+ * engine cannot see, a glob narrower than the actual target) would write a
+ * rule that never fires. On mismatch the input reopens with an error
+ * notification so the user can fix the glob or esc to abandon.
  */
 async function editCustomCandidate(
 	ui: ExtensionUIContext,
 	title: string,
 	candidates: CandidateRule[],
+	args: unknown,
 ): Promise<CandidateRule | undefined> {
 	if (ui.input === undefined) return undefined;
 	const recommended = candidates.find(candidateItem => candidateItem.scope === "pattern");
 	if (recommended === undefined) return undefined; // Custom… is only offered next to a Pattern
 	const matchKey = Object.keys(recommended.rule.match)[0] ?? "command";
 	const current = String(recommended.rule.match[matchKey] ?? "");
-	const edited = await ui.input(`Edit pattern (${title})`, current);
-	if (edited === undefined || edited.trim().length === 0) return undefined;
-	const value = edited.trim();
-	const deny = recommended.rule.action === "deny";
-	return candidate(
-		recommended.rule.tool,
-		recommended.rule.action,
-		"pattern",
-		{ [matchKey]: value },
-		`${deny ? "Deny pattern" : "Pattern"}: ${value}`,
-	);
+	const pendingValue = argString(args, matchKey);
+	let edited = await ui.input(`Edit pattern (${title})`, current);
+	while (edited !== undefined && edited.trim().length > 0) {
+		const value = edited.trim();
+		// No pending value for this key (should not happen — Custom… only
+		// follows a Pattern candidate whose key exists in the call): accept
+		// without validation rather than blocking on a phantom mismatch.
+		if (pendingValue === undefined || matchPatternValue(matchKey, pendingValue, value)) {
+			const deny = recommended.rule.action === "deny";
+			return candidate(
+				recommended.rule.tool,
+				recommended.rule.action,
+				"pattern",
+				{ [matchKey]: value },
+				`${deny ? "Deny pattern" : "Pattern"}: ${value}`,
+			);
+		}
+		ui.notify(`This pattern cannot match the pending call — it would never fire: ${value}`, "error");
+		edited = await ui.input(`Edit pattern (${title}) — pattern does not match this call`, value);
+	}
+	return undefined;
 }
 
 async function writeRememberedRule(rule: Omit<PermissionRule, "layer">, ctx: EngineContext): Promise<void> {
@@ -767,7 +810,7 @@ async function promptUnit(
 		opts.suggestionsProvider !== undefined
 			? opts
 					.suggestionsProvider(unitPieceText(toolName, unitArgs))
-					.then(resolveSuggestions)
+					.then(resolved => resolveSuggestions(resolved, toolName, unitArgs, pieces))
 					.catch(() => EMPTY_SUGGESTIONS)
 			: undefined;
 	// Shell-control bash commands cannot be suppressed by a remembered rule,
@@ -815,6 +858,7 @@ async function promptUnit(
 					`Remember an allow rule for ${toolName}`,
 					candidates.filter(candidateItem => candidateItem.rule.action === "allow"),
 					recommendedScope,
+					unitArgs,
 				);
 				// Esc on the scope page returns to the decision page; a
 				// cancelled Custom… glob edit does the same.
@@ -828,6 +872,7 @@ async function promptUnit(
 					`Remember a deny rule for ${toolName}`,
 					candidates.filter(candidateItem => candidateItem.rule.action === "deny"),
 					recommendedScope,
+					unitArgs,
 				);
 				if (rule === SCOPE_BACK || rule === undefined) continue;
 				await writeRememberedRule(rule.rule, ctx);
@@ -1033,7 +1078,7 @@ export async function promptForDecision(
 		opts.suggestionsProvider !== undefined
 			? opts
 					.suggestionsProvider(unitPieceText(toolName, args))
-					.then(resolveSuggestions)
+					.then(resolved => resolveSuggestions(resolved, toolName, args, pendingPieces))
 					.catch(() => EMPTY_SUGGESTIONS)
 			: undefined;
 	const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));

@@ -8,6 +8,7 @@ import {
 	evaluateBashCommand,
 	evaluatePermission,
 	matchClassOf,
+	matchRule,
 	nearMissLine,
 	patternSpecificity,
 	resolvePosture,
@@ -601,6 +602,46 @@ describe("match classes and specificity (spec §3.1)", () => {
 		expect(pieceText).toBe("git log -n 5 |head -1");
 		const exact = rule({ id: "exact", match: { command: pieceText ?? "" } });
 		expect(resolveWholeCommandRule([exact], "bash", { command: pieceText ?? "" })?.rule.id).toBe("exact");
+	});
+});
+
+describe("path-pattern matching expands ~ (bug 9)", () => {
+	const rule = (match: Record<string, unknown>): PermissionRule => ({
+		id: "t",
+		tool: "edit",
+		match,
+		action: "allow",
+		layer: "user",
+	});
+
+	it("a ~/… path pattern matches the absolute call path", () => {
+		const home = os.homedir();
+		const target = path.join(home, ".omp", "plugins", "SKILL.md");
+		expect(matchRule(rule({ path: "~/.omp/plugins/*" }), "edit", { path: target })).toBe(true);
+	});
+
+	it("a bare ~ pattern matches the home directory itself", () => {
+		expect(matchRule(rule({ path: "~" }), "edit", { path: os.homedir() })).toBe(true);
+	});
+
+	it("a ~-value call path matches an absolute pattern and vice versa", () => {
+		const home = os.homedir();
+		expect(matchRule(rule({ path: path.join(home, ".omp", "*") }), "edit", { path: "~/.omp/x" })).toBe(true);
+		expect(matchRule(rule({ path: "~/.omp/*" }), "edit", { path: path.join(home, ".omp", "x") })).toBe(true);
+	});
+
+	it("command keys never expand ~ — it is literal command text", () => {
+		const r = (match: Record<string, unknown>): PermissionRule => ({
+			id: "t",
+			tool: "bash",
+			match,
+			action: "allow",
+			layer: "user",
+		});
+		expect(matchRule(r({ command: "cd ~/x" }), "bash", { command: "cd ~/x" })).toBe(true);
+		expect(matchRule(r({ command: "cd ~/x*" }), "bash", { command: "cd ~/x/y" })).toBe(true);
+		// without expansion the pattern cannot jump to the absolute form
+		expect(matchRule(r({ command: `cd ${os.homedir()}/x *` }), "bash", { command: "cd ~/x/y" })).toBe(false);
 	});
 });
 
