@@ -53,7 +53,7 @@ describe("/permissions rule-id completion", () => {
 		expect(matches?.some(match => match.value === "remove ")).toBe(true);
 	});
 
-	it("completes user-layer rule ids after remove, filtered by prefix", async () => {
+	it("completes personal-layer rule ids after remove, filtered by prefix", async () => {
 		write(
 			userRulesFile,
 			"rules:\n  - id: git1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n  - id: npm1\n    tool: bash\n    match: { command: 'npm *' }\n    action: allow\n",
@@ -73,12 +73,32 @@ describe("/permissions rule-id completion", () => {
 		const labels = matches?.map(match => match.label);
 		expect(labels).toContain("git1");
 		expect(labels).toContain("npm1");
-		// remove only edits the user layer: other layers' ids must not complete.
+		// Dynamic (engine-written) rules are removable: they must complete too.
+		expect(labels).toContain("dyn1");
+		// Project rules are gated behind --project: not offered on a plain remove.
 		expect(labels).not.toContain("proj1");
-		expect(labels).not.toContain("dyn1");
 
 		const filtered = await complete("remove git");
 		expect(filtered?.map(match => match.label)).toEqual(["git1"]);
+	});
+
+	it("completes project ids after remove --project", async () => {
+		write(
+			projectRulesFile,
+			"rules:\n  - id: proj1\n    tool: write\n    match: { path: 'src/**' }\n    action: allow\n",
+		);
+
+		const complete = permissionsCompleter();
+		const matches = await complete("remove --project ");
+
+		expect(matches?.map(match => match.label)).toEqual(["proj1"]);
+	});
+
+	it("offers the --project flag while typing a flag after remove", async () => {
+		const complete = permissionsCompleter();
+		const matches = await complete("remove --");
+
+		expect(matches?.map(match => match.label)).toContain("--project");
 	});
 
 	it("completes user-layer ids after edit", async () => {
@@ -118,17 +138,26 @@ describe("/permissions rule-id completion", () => {
 		expect(labels).toEqual(["dyn1", "git1", "proj1"]);
 	});
 
-	it("annotates completions with the rule summary", async () => {
+	it("annotates completions with the rule summary and layer label", async () => {
 		write(
 			userRulesFile,
 			"rules:\n  - id: git1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+		);
+		write(
+			dynamicRulesFile,
+			"rules:\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
 		);
 
 		const complete = permissionsCompleter();
 		const matches = await complete("remove ");
 
-		expect(matches?.[0]?.description).toContain("bash");
-		expect(matches?.[0]?.description).toContain("allow");
+		const user = matches?.find(match => match.label === "git1");
+		expect(user?.description).toContain("bash");
+		expect(user?.description).toContain("allow");
+		expect(user?.description).toContain("user");
+		const dynamic = matches?.find(match => match.label === "dyn1");
+		expect(dynamic?.description).toContain("dynamic");
+		expect(dynamic?.description).toContain("engine-written");
 	});
 
 	it("returns null for subcommands that take no rule id", async () => {
