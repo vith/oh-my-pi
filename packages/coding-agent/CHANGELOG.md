@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.4+vith-fork.196.72dcc378d8] - 2026-08-14
+
 ### Fixed
 
 - Compound permission dialogs no longer offer remember suggestions that match only the whole `&&`-joined command string — such rules can never fire because the engine evaluates per piece; compound suggestions must match a pending piece.
