@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Compound permission dialogs no longer offer remember suggestions that match only the whole `&&`-joined command string — such rules can never fire because the engine evaluates per piece; compound suggestions must match a pending piece.
+- Compound permission dialogs keep the "Decide per piece →" action when a piece carries shell control, instead of degrading to a binary allow-all/deny-all choice.
+
 ## [17.3.1+vith-fork.147.e4cf13962d] - 2026-08-14
 
 ### Added
