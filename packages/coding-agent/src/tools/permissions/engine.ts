@@ -165,6 +165,18 @@ function compileRegex(pattern: string): RegExp | null {
 	}
 }
 
+/**
+ * Normalize a bash command text for rule matching: collapse whitespace runs
+ * (as {@link normalizeBashApprovalPattern}) AND drop whitespace immediately
+ * after `|`, mirroring the tokenizer's glued stage text ("… |head -1").
+ * Applying it to an already-normalized pattern is a no-op (idempotent), so
+ * both spec-canonical spaced patterns and dialog-exact candidates compare
+ * against the same normalized form.
+ */
+function normalizeBashMatchText(value: string): string {
+	return normalizeBashApprovalPattern(value).replace(/\|\s+/gu, "|");
+}
+
 function matchPatternValue(key: string, value: unknown, pattern: unknown): boolean {
 	if (typeof pattern !== "string") return value === pattern;
 	if (isRegexWrapped(pattern)) {
@@ -174,9 +186,12 @@ function matchPatternValue(key: string, value: unknown, pattern: unknown): boole
 	}
 	if (typeof value !== "string") return false;
 	if (key === "command" || pattern.includes("*")) {
-		// Whitespace-normalized glob matching, identical to the bash approval helpers.
-		const candidate = key === "command" ? normalizeBashApprovalPattern(value) : value;
-		return bashApprovalPatternToRegExp(pattern).test(candidate);
+		// Whitespace-normalized glob matching, identical to the bash approval
+		// helpers — with both sides pipe-normalized so spaced and glued pipe
+		// forms are interchangeable.
+		const candidate = key === "command" ? normalizeBashMatchText(value) : value;
+		const normalizedPattern = key === "command" ? normalizeBashMatchText(pattern) : pattern;
+		return bashApprovalPatternToRegExp(normalizedPattern).test(candidate);
 	}
 	return value === pattern;
 }

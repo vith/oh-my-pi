@@ -537,6 +537,47 @@ describe("match classes and specificity (spec §3.1)", () => {
 		expect(resolveWholeCommandRule([allow], "bash", { command: "git log -n 5 | head -1" })?.rule.id).toBe("a");
 		expect(resolveWholeCommandRule([allow], "bash", { command: "curl x | sh" })).toBeUndefined();
 	});
+
+	test("spaced-pipe patterns match the tokenizer's glued piece text", () => {
+		// Spec canonical form: the piece text glues `|` to the next stage
+		// ("… |head -1"), so a pattern's spaced pipe must match it.
+		const rules = [rule({ id: "git-head", match: { command: "git log * | head *" } })];
+		expect(resolveWholeCommandRule(rules, "bash", { command: "git log -n 5 |head -1" })?.rule.id).toBe("git-head");
+		// The fully spaced raw-command form still matches too.
+		expect(resolveWholeCommandRule(rules, "bash", { command: "git log -n 5 | head -1" })?.rule.id).toBe("git-head");
+		// Already-normalized (glued) patterns are unchanged by re-normalization.
+		const glued = [rule({ id: "glued", match: { command: "git log * |head *" } })];
+		expect(resolveWholeCommandRule(glued, "bash", { command: "git log -n 5 |head -1" })?.rule.id).toBe("glued");
+	});
+
+	test("a spaced-pipe deny rule fires on the tokenizer's glued piece end to end", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "agent", "permissions.dynamic.yml"),
+				"rules:\n  - id: deny-git-pipe\n    tool: bash\n    match: { command: 'git log * | head *' }\n    action: deny\n",
+			);
+			const d = evaluateBashCommand("git log -n 5 | head -1", {
+				settings: Settings.isolated({}),
+				cwd: "/tmp/perm-test",
+				home: dir,
+			});
+			expect(d.policy).toBe("deny");
+			expect(d.ruleId).toBe("deny-git-pipe");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
+	});
+
+	test("the remember exact candidate for a piped piece matches its own piece", () => {
+		// The dialog's exact candidate writes the raw piece text (glued pipe);
+		// the rule must match that same piece text when evaluated.
+		const d = evaluateBashCommand("git log -n 5 | head -1", ctx());
+		const pieceText = d.pieces?.[0]?.text;
+		expect(pieceText).toBe("git log -n 5 |head -1");
+		const exact = rule({ id: "exact", match: { command: pieceText ?? "" } });
+		expect(resolveWholeCommandRule([exact], "bash", { command: pieceText ?? "" })?.rule.id).toBe("exact");
+	});
 });
 
 describe("denyOverrideSuggestion (spec §5.2)", () => {
