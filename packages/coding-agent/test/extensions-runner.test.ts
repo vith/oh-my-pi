@@ -1957,7 +1957,7 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
+			expect(select).toHaveBeenCalledWith(expect.stringContaining("Approve dangerous_tool call?"), [
 				"Allow once",
 				"Allow & remember…",
 				"Deny",

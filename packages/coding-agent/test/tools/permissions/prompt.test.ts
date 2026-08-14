@@ -391,6 +391,42 @@ describe("promptForDecision", () => {
 		expect(requests[0]?.options.map(option => option.label)).toEqual([...COMPOUND_ACTIONS]);
 	});
 
+	it("v3 dialog title asks the question; tool and reason travel in the lines", async () => {
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Allow all pending once
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
+			approvalReason: "fixture reason",
+		});
+		expect(res.policy).toBe("allow");
+		expect(requests[0]?.title).toBe("Approve this command?");
+		const linesJson = JSON.stringify(requests[0]?.lines);
+		expect(linesJson).toContain("tool: bash");
+		expect(linesJson).toContain("reason: fixture reason");
+	});
+
+	it("non-bash v3 dialogs title with the tool call question", async () => {
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Allow once
+		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
+		const res = await promptForDecision(ui, "read", { path: "src/x.ts" }, decision, fakeCtx(tempHome()));
+		expect(res.policy).toBe("allow");
+		expect(requests[0]?.title).toBe("Approve read call?");
+		expect(JSON.stringify(requests[0]?.lines)).toContain("tool: read");
+	});
+
+	it("forced prompts keep the provided legacy title", async () => {
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Approve
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a" }, decision, fakeCtx(tempHome()), {
+			includeCandidates: false,
+			title: "Allow tool: bash\nReason: safety",
+		});
+		expect(res.policy).toBe("allow");
+		expect(requests[0]?.title).toBe("Allow tool: bash\nReason: safety");
+	});
+
 	it("keeps already-allowed pieces visible in the compound dialog", async () => {
 		const requests: PermissionDialogRequest[] = [];
 		const { ui } = queuedDialogUi([0], requests); // Allow all pending once
@@ -639,10 +675,7 @@ describe("promptForDecision", () => {
 		expect(res.remembered?.match).toEqual({ command: "git log *" });
 		expect(requests[0]?.options.map(option => option.label)).toEqual([...COMPOUND_ACTIONS]);
 		expect(requests[1]?.checklist).toBe(true);
-		expect(requests[1]?.options.map(option => option.label)).toEqual([
-			"git log *",
-			"Write checked allow rules (1)",
-		]);
+		expect(requests[1]?.options.map(option => option.label)).toEqual(["git log *", "Write checked allow rules (1)"]);
 		const file = ruleFiles(ctx.cwd, ctx.home).dynamic;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toContain("git log *");

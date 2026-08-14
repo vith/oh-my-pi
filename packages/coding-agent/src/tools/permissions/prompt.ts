@@ -58,6 +58,18 @@ export interface PromptForDecisionOptions {
 	/** Formatted approval prompt (tool name, reason, provider safety checks) shown as the dialog title. */
 	title?: string;
 	/**
+	 * Approval reason carried into the v3 dialog lines (metadata, alongside
+	 * the tool line). The wrapper passes the gate's reason here instead of
+	 * overriding the v3 title with the legacy prompt format.
+	 */
+	approvalReason?: string;
+	/**
+	 * The tool's `formatApprovalDetails` lines, appended to the v3 dialog
+	 * metadata (legacy titles showed them; the v3 dialog carries them in its
+	 * lines).
+	 */
+	approvalDetails?: string | readonly string[];
+	/**
 	 * When false the dialog offers only Approve/Deny with no candidates and no
 	 * remember options (provider safety-check forced prompts).
 	 */
@@ -190,9 +202,29 @@ function toolWideAllowed(toolName: string): boolean {
  * (`echo *`).
  */
 const SUBCOMMAND_COMMANDS: ReadonlySet<string> = new Set([
-	"git", "npm", "bun", "cargo", "docker", "gh", "pnpm", "yarn", "brew", "apt",
-	"apt-get", "pacman", "dnf", "make", "cmake", "kubectl", "helm", "terraform",
-	"go", "rustup", "pip", "pip3", "uv",
+	"git",
+	"npm",
+	"bun",
+	"cargo",
+	"docker",
+	"gh",
+	"pnpm",
+	"yarn",
+	"brew",
+	"apt",
+	"apt-get",
+	"pacman",
+	"dnf",
+	"make",
+	"cmake",
+	"kubectl",
+	"helm",
+	"terraform",
+	"go",
+	"rustup",
+	"pip",
+	"pip3",
+	"uv",
 ]);
 
 /**
@@ -330,10 +362,41 @@ export function renderAllowSuggestion(toolName: string, args: unknown, ctx: Engi
 	return `To allow this call, add rule:\n${first.yaml}`;
 }
 
-function defaultTitle(toolName: string, decision: EngineDecision): string {
-	const lines = [`Allow tool: ${toolName}`];
-	if (decision.reason !== undefined) lines.push(`Reason: ${decision.reason}`);
-	return lines.join("\n");
+/** v3 dialog title (spec §5.1): the question, not the legacy "Allow tool" format. */
+function defaultTitle(toolName: string): string {
+	return toolName === "bash" ? "Approve this command?" : `Approve ${toolName} call?`;
+}
+
+/** v3 dialog metadata lines: the tool being approved, the approval reason, and the tool's details. */
+function dialogMetadataLines(toolName: string, opts: PromptForDecisionOptions): PermissionDialogLine[] {
+	const lines: PermissionDialogLine[] = [{ segments: [{ text: `tool: ${toolName}` }], style: "muted" }];
+	if (opts.approvalReason !== undefined && opts.approvalReason.length > 0) {
+		lines.push({ segments: [{ text: `reason: ${opts.approvalReason}` }], style: "muted" });
+	}
+	const details = opts.approvalDetails;
+	if (typeof details === "string") {
+		if (details.length > 0) lines.push({ segments: [{ text: details }], style: "muted" });
+	} else if (Array.isArray(details)) {
+		for (const detail of details) {
+			if (detail.length > 0) lines.push({ segments: [{ text: detail }], style: "muted" });
+		}
+	}
+	return lines;
+}
+
+/** Plain-text rendering of the metadata block, for legacy select surfaces that only show a title. */
+function metadataText(lines: PermissionDialogLine[]): string {
+	return lines.map(line => line.segments.map(segment => segment.text).join("")).join("\n");
+}
+
+/**
+ * The v3 dialog title; legacy select surfaces (no showPermissionDialog) only
+ * render the title, so the metadata block folds in there to keep the pending
+ * call identifiable.
+ */
+function dialogTitle(ui: ExtensionUIContext, title: string, metaLines: PermissionDialogLine[]): string {
+	if (ui.showPermissionDialog !== undefined || metaLines.length === 0) return title;
+	return `${title}\n${metadataText(metaLines)}`;
 }
 
 function pieceStatusText(piece: PieceEvaluation): { text: string; style?: "muted" | "text" | "accent" } {
@@ -560,7 +623,7 @@ async function promptUnit(
 	opts: PromptForDecisionOptions,
 	pieces: PieceEvaluation[] | undefined,
 ): Promise<PromptResolution> {
-	const title = opts.title ?? defaultTitle(toolName, decision);
+	const title = opts.title ?? defaultTitle(toolName);
 
 	if (opts.includeCandidates === false) {
 		// Provider safety-check forced prompt: no candidates, binary choice only.
@@ -582,11 +645,12 @@ async function promptUnit(
 	// Shell-control bash commands cannot be suppressed by a remembered rule:
 	// drop both remember options and say why.
 	const rememberDisabled = bashRememberDisabled(unitArgs);
-	const lines: (string | PermissionDialogLine)[] = buildDialogLines(decision, pieces, ctx);
+	const metaLines = dialogMetadataLines(toolName, opts);
+	const lines: (string | PermissionDialogLine)[] = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
 	if (rememberDisabled) lines.push("", BASH_SHELL_CONTROL_NOTE);
 	const chosen = await chooseLabel(
 		ui,
-		title,
+		dialogTitle(ui, title, metaLines),
 		rememberDisabled ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER],
 		lines,
 		suggestionsPromise?.then(result => result.options),
@@ -786,8 +850,9 @@ export async function promptForDecision(
 	}
 
 	// v3 compound flow: one dialog for the whole call (spec §5.1).
-	const title = opts.title ?? defaultTitle(toolName, decision);
-	const lines = buildDialogLines(decision, pieces, ctx);
+	const title = opts.title ?? defaultTitle(toolName);
+	const metaLines = dialogMetadataLines(toolName, opts);
+	const lines = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
 	const suggestionsPromise =
 		opts.suggestionsProvider !== undefined
 			? opts
@@ -801,7 +866,7 @@ export async function promptForDecision(
 		: [ALLOW_ALL_ONCE, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
 	const chosen = await chooseLabel(
 		ui,
-		title,
+		dialogTitle(ui, title, metaLines),
 		baseOptions,
 		lines,
 		suggestionsPromise?.then(result => result.options),

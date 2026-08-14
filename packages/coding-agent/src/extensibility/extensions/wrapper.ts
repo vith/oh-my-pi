@@ -188,10 +188,7 @@ function blockedByPolicyError(
 	// piece-level allow overrides only match their own piece text.
 	const deniedPiece = decision.pieces?.find(piece => piece.policy === "deny");
 	const bashRuleDeny = toolName === "bash" && decision.ruleId !== undefined;
-	if (
-		args !== undefined &&
-		(decision.source === "posture" || decision.source === "rule" || bashRuleDeny)
-	) {
+	if (args !== undefined && (decision.source === "posture" || decision.source === "rule" || bashRuleDeny)) {
 		const suggestionArgs =
 			deniedPiece !== undefined && toolName === "bash"
 				? { ...(args as Record<string, unknown>), command: deniedPiece.text }
@@ -506,7 +503,17 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				let resolution: PromptResolution;
 				try {
 					resolution = await promptForDecision(uiContext, this.tool.name, resolvedArgs, decision, engineCtx, {
-						title: safetyPrompt,
+						// The v3 dialog titles itself ("Approve this command?") and
+						// carries the approval reason and tool details in its
+						// metadata lines; the legacy full-prompt title stays only
+						// for provider-safety forced prompts, whose binary flow
+						// keeps the whole text.
+						...(includeCandidates
+							? {
+									approvalReason: approvalCheck.reason,
+									approvalDetails: this.tool.formatApprovalDetails?.(resolvedArgs),
+								}
+							: { title: safetyPrompt }),
 						// Provider safety checks are stronger than any rule: the dialog
 						// shows without candidates and only offers Approve/Deny.
 						includeCandidates,

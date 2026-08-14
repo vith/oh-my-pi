@@ -213,11 +213,17 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 		const settings = approvalSettings({});
 		let message = "";
 		try {
-			await bashTool().execute("deny-suggest-piece", { command: "git push origin main && echo hi" }, undefined, undefined, {
-				settings,
-				sessionManager,
-				home: tempDir,
-			} as unknown as AgentToolContext);
+			await bashTool().execute(
+				"deny-suggest-piece",
+				{ command: "git push origin main && echo hi" },
+				undefined,
+				undefined,
+				{
+					settings,
+					sessionManager,
+					home: tempDir,
+				} as unknown as AgentToolContext,
+			);
 		} catch (err) {
 			message = err instanceof Error ? err.message : String(err);
 		}
