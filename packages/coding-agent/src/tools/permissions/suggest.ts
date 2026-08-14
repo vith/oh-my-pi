@@ -52,7 +52,7 @@ export interface SuggestionUnit {
 export type SuggestionProvider = (unit: SuggestionUnit) => Promise<SuggestResult>;
 
 /** Side requests are bounded: hard timeout, capped token budget, at most 3 rules. */
-const SUGGEST_TIMEOUT_MS = 20000;
+const SUGGEST_TIMEOUT_MS = 30000;
 // Reasoning models (e.g. opencode-go deepseek-v4-flash) spend most of the
 // budget thinking before emitting the JSON; 256 tokens was entirely consumed
 // by reasoning (stopReason "length", zero text) so no recommendation ever
@@ -202,6 +202,19 @@ async function suggestWithModel(
 				}
 			}),
 		});
+
+		if (response.stopReason === "aborted") {
+			// The hard timeout or the caller's signal cut the request before
+			// the provider produced a result (observed: 20s, zero tokens on a
+			// compound call — gateway start latency). Distinct from bad-json
+			// so timeouts are diagnosable at a glance.
+			logger.debug("permission-suggest: suggestion request aborted", {
+				reason: "request-aborted",
+				pendingCall: unit.text,
+				elapsedMs: Math.round(performance.now() - requestStartedAt),
+			});
+			return EMPTY_RESULT;
+		}
 
 		if (response.stopReason === "error") {
 			// The provider rejected the side request (e.g. a sibling dialog's
