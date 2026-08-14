@@ -57,9 +57,10 @@ describe("safe-consumer stages (spec §3.4/§4.3)", () => {
 		expect(isSafeConsumerStage("head -1 `touch /tmp/x`")).toBe(false);
 		expect(isSafeConsumerStage("head -1; echo hi")).toBe(false);
 		expect(isSafeConsumerStage("head -1 & echo hi")).toBe(false);
-		// Per-command write flags: sort -o / --output= write output.
+		// Per-command write flags: sort -o / --output= / --output write output.
 		expect(isSafeConsumerStage("sort -o /tmp/out")).toBe(false);
 		expect(isSafeConsumerStage("sort --output=/tmp/out")).toBe(false);
+		expect(isSafeConsumerStage("sort --output /tmp/out")).toBe(false);
 		// grep -o is read-only and must stay exempt.
 		expect(isSafeConsumerStage("grep -o foo")).toBe(true);
 	});

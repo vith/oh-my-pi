@@ -83,5 +83,5 @@ const UNSAFE_STAGE_MARKERS: readonly string[] = [">", "<", "$(", "`", ";", "&"];
 
 /** Per-command write flags that disqualify an otherwise-safe consumer (`grep -o` is read-only and stays allowed). */
 const STAGE_WRITE_FLAGS: Readonly<Record<string, readonly string[]>> = {
-	sort: ["-o", "--output="],
+	sort: ["-o", "--output=", "--output"],
 };
