@@ -121,6 +121,92 @@ function terminatorOf(node: RawNode | null): ShellPiece["operator"] {
 	return node.kind === "sequence" ? (node.operator === "&" ? "&" : ";") : ";";
 }
 
+/**
+ * File-writing `>`-family redirects: `>`, `>>`, fd-prefixed (`2>`), `&>`
+ * (both streams), and `>|` (noclobber). Everything else in brush's redirect
+ * set is input (`<`, heredocs, herestrings) or fd duplication.
+ */
+const FILE_WRITE_REDIRECT_RE = /^(?:\d*&?>>?|&>|>\|)\s*(\S+)$/u;
+/** fd duplication (`2>&1`, `>&2`, `<&N`) — brush renders these as `2>& 1`. */
+const FD_DUP_REDIRECT_RE = /^(?:\d*>&|\d*<&)/u;
+
+/** All `redirects` entries across an AST, recursively (pipeline/compound children included). */
+function collectRedirects(nodes: RawNode[]): string[] {
+	const out: string[] = [];
+	const visit = (node: RawNode): void => {
+		out.push(...(node.redirects ?? []));
+		for (const child of node.children ?? []) visit(child);
+	};
+	for (const node of nodes) visit(node);
+	return out;
+}
+
+export interface RedirectWriteScan {
+	/** Any file-writing `>`-family redirect present at all. */
+	present: boolean;
+	/** Attributable simple-token file write targets. */
+	targets: string[];
+	/** A file redirect whose target is quoted/expanded and cannot be attributed. */
+	unattributable: boolean;
+}
+
+/**
+ * Scan a command's AST (Rust brush parser — the same parser that executes
+ * bash) for file-writing `>`-family redirections, grammar-level and
+ * quote-aware. Heredocs/herestrings and `<` input redirects are not writes;
+ * `>&`/`<&` fd duplication is not a file write. Targets that are quoted or
+ * expanded cannot be attributed and mark the scan unattributable — the
+ * caller must not sanction that write. `null` when the command does not
+ * parse, so callers fail closed.
+ */
+export function scanRedirectWrites(command: string): RedirectWriteScan | null {
+	let nodes: RawNode[];
+	try {
+		nodes = JSON.parse(natives.parseShellCommand(command)) as RawNode[];
+	} catch {
+		return null;
+	}
+	const targets: string[] = [];
+	let present = false;
+	let unattributable = false;
+	for (const redirect of collectRedirects(nodes)) {
+		if (redirect.startsWith("<") || FD_DUP_REDIRECT_RE.test(redirect)) continue;
+		const match = FILE_WRITE_REDIRECT_RE.exec(redirect);
+		if (match === null) continue;
+		present = true;
+		const target = match[1];
+		if (/^[A-Za-z0-9_./~+:-]+$/u.test(target)) targets.push(target);
+		else unattributable = true;
+	}
+	return { present, targets, unattributable };
+}
+
+/**
+ * Remove file-writing and fd-duplication redirections from a command text,
+ * leaving input redirects (`<`, heredocs) and everything else intact. Used to
+ * re-evaluate the base command when redirections are its only shell control.
+ * Returns the original text when the command does not parse (fail-closed).
+ */
+export function stripFileWriteRedirects(command: string): string {
+	let nodes: RawNode[];
+	try {
+		nodes = JSON.parse(natives.parseShellCommand(command)) as RawNode[];
+	} catch {
+		return command;
+	}
+	let base = command;
+	for (const redirect of collectRedirects(nodes)) {
+		if (redirect.startsWith("<")) continue;
+		// brush renders fd duplication with a normalized space (`2>&1` →
+		// `2>& 1`); compact-match those so the source form is removed too.
+		// File redirects match their source form exactly (a double-space
+		// source simply does not strip — the caller fails closed safely).
+		const form = FD_DUP_REDIRECT_RE.test(redirect) ? redirect.replace(/\s+/gu, "") : redirect;
+		base = base.replaceAll(form, "");
+	}
+	return base;
+}
+
 export function isSinglePiece(command: string): boolean {
 	const out = parseCommand(command);
 	if (!out.ok) return false;
