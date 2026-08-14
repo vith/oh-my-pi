@@ -6,6 +6,7 @@ import { getMCPConfigPath, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
 import { expandTilde } from "../tools/path-utils";
+import { loadRuleLayers } from "../tools/permissions/rules";
 import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";
 
 /**
@@ -144,6 +145,50 @@ async function buildMcpRemoveCompletions(
 		)
 		.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
 	return matches.length > 0 ? matches : null;
+}
+
+/** /permissions subcommands whose argument is a rule id (per their `usage: "<id>"`). */
+const PERMISSION_RULE_ID_SUBCOMMANDS: Readonly<Record<string, "user" | "all">> = {
+	show: "all",
+	remove: "user",
+	edit: "user",
+};
+
+/**
+ * Build getArgumentCompletions for /permissions. Delegates to the generic
+ * declarative subcommand completer while the subcommand name itself is still
+ * being typed, then switches to rule-id completion (sourced from the
+ * file-backed rule layers) once a recognized id-taking subcommand is
+ * followed by a space. `remove` and `edit` only ever succeed against
+ * user-layer rules, so they complete user-layer ids only; `show` accepts any
+ * file-backed id. Subcommands with a different argument shape (add, test,
+ * clear, ...) get no argument completion.
+ */
+export function buildPermissionsArgumentCompletions(
+	subcommands: SubcommandDef[],
+	runtime: TuiSlashCommandRuntime,
+): (argumentPrefix: string) => Promise<AutocompleteItem[] | null> {
+	const genericCompletions = buildArgumentCompletions(subcommands);
+	return async (argumentPrefix: string) => {
+		const spaceIndex = argumentPrefix.indexOf(" ");
+		if (spaceIndex === -1) return genericCompletions(argumentPrefix);
+
+		const rawSubcommand = argumentPrefix.slice(0, spaceIndex);
+		const idScope = PERMISSION_RULE_ID_SUBCOMMANDS[rawSubcommand.toLowerCase()];
+		if (idScope === undefined) return null;
+		const idPrefix = argumentPrefix.slice(spaceIndex + 1).toLowerCase();
+
+		const { rules } = loadRuleLayers(runtime.ctx.sessionManager.getCwd());
+		const matches: AutocompleteItem[] = rules
+			.filter(rule => idScope !== "user" || rule.layer === "user")
+			.filter(rule => rule.id.toLowerCase().startsWith(idPrefix))
+			.map(rule => ({
+				value: `${rawSubcommand} ${rule.id} `,
+				label: rule.id,
+				description: `${rule.tool} ${JSON.stringify(rule.match)} → ${rule.action} (${rule.layer})`,
+			}));
+		return matches.length > 0 ? matches : null;
+	};
 }
 
 /**
