@@ -279,7 +279,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV17_3_5_vith_fork_168_afb4ad5f71(): void
+export declare function __piNativesV17_3_4_vith_fork_173_1824f02362(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
