@@ -73,6 +73,10 @@ export class ExtensionUiController {
 	// the rest queue. See `#presentDialog`.
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
+	/** flowId of the dialog currently presented (undefined for single-page dialogs). */
+	#dialogFlowId: string | undefined = undefined;
+	/** The flow whose page most recently settled — its next page claims the free slot. */
+	#lastSettledFlowId: string | undefined = undefined;
 	/**
 	 * Built once in `initHooksAndCustomTools()`. Reused directly by `/tree`
 	 * `ask` re-answer (issue #5642) to drive a standalone `AskTool.execute()`
@@ -93,6 +97,7 @@ export class ExtensionUiController {
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
 			showPermissionDialog: (request, dialogOptions) => this.showPermissionDialog(request, dialogOptions),
+			endPermissionFlow: flowId => this.endPermissionFlow(flowId),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setHookStatus(key, text),
@@ -623,7 +628,7 @@ export class ExtensionUiController {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
-		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
+		return this.#presentDialog<ExtensionAskDialogResult>(settle => {
 			let askDialog: AskDialogComponent | undefined;
 			let promptEditor: HookEditorComponent | undefined;
 			let promptResolve: ((value: string | undefined) => void) | undefined;
@@ -714,7 +719,7 @@ export class ExtensionUiController {
 				this.ctx.ui.setFocus(this.ctx.editor);
 				this.ctx.ui.requestRender();
 			};
-		});
+		}, dialogOptions);
 	}
 
 	/**
@@ -887,7 +892,7 @@ export class ExtensionUiController {
 		dialogOptions?: InteractiveSelectorDialogOptions,
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
-		return this.#presentDialog(dialogOptions?.signal, settle => {
+		return this.#presentDialog(settle => {
 			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
 			this.ctx.hookSelector = new HookSelectorComponent(
 				title,
@@ -929,7 +934,7 @@ export class ExtensionUiController {
 			this.ctx.ui.setFocus(this.ctx.hookSelector);
 			this.ctx.ui.requestRender();
 			return () => this.hideHookSelector();
-		});
+		}, dialogOptions);
 	}
 	/**
 	 * Hide the hook selector.
@@ -953,7 +958,7 @@ export class ExtensionUiController {
 		request: PermissionDialogRequest,
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<number | undefined> {
-		return this.#presentDialog<number>(dialogOptions?.signal, settle => {
+		return this.#presentDialog<number>(settle => {
 			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
 			this.ctx.permissionDialog = new PermissionDialogComponent(
 				request.title,
@@ -982,7 +987,7 @@ export class ExtensionUiController {
 			this.ctx.ui.setFocus(this.ctx.permissionDialog);
 			this.ctx.ui.requestRender();
 			return () => this.hidePermissionDialog();
-		});
+		}, dialogOptions);
 	}
 
 	/**
@@ -1013,7 +1018,7 @@ export class ExtensionUiController {
 		placeholder?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
-		return this.#presentDialog(dialogOptions?.signal, settle => {
+		return this.#presentDialog(settle => {
 			this.ctx.hookInput = new HookInputComponent(
 				title,
 				placeholder,
@@ -1030,7 +1035,7 @@ export class ExtensionUiController {
 			this.ctx.ui.setFocus(this.ctx.hookInput);
 			this.ctx.ui.requestRender();
 			return () => this.hideHookInput();
-		});
+		}, dialogOptions);
 	}
 
 	/**
@@ -1054,7 +1059,7 @@ export class ExtensionUiController {
 		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
-		return this.#presentDialog(dialogOptions?.signal, settle => {
+		return this.#presentDialog(settle => {
 			this.ctx.hookEditor = new HookEditorComponent(
 				this.ctx.ui,
 				title,
@@ -1068,7 +1073,7 @@ export class ExtensionUiController {
 			this.ctx.ui.setFocus(this.ctx.hookEditor);
 			this.ctx.ui.requestRender();
 			return () => this.hideHookEditor();
-		});
+		}, dialogOptions);
 	}
 
 	/**
@@ -1232,21 +1237,27 @@ export class ExtensionUiController {
 
 	/**
 	 * Present a modal dialog on the shared editor surface, serializing against any
-	 * dialog already open. `present` builds the component, swaps it into
-	 * `editorContainer`, steals focus, and returns a `hide` closure; it is invoked
-	 * with a single `settle` callback that the component fires on submit/cancel.
+	/**
+	 * Present one dialog on the single-dialog surface. All dialog kinds share
+	 * the queue: because selector / input / editor all clear `editorContainer`
+	 * and re-focus, showing a second while the first is open would orphan the
+	 * first — its promise would hang until the caller's signal aborts. So at
+	 * most one dialog is presented at a time and the rest queue (FIFO).
 	 *
-	 * Because selector / input / editor all clear `editorContainer` and re-focus,
-	 * showing a second one while the first is open would orphan the first — its
-	 * promise would hang until the caller's signal aborts. So at most one dialog is
-	 * presented at a time and the rest queue (FIFO). `settle` (or an abort) hides
-	 * the current dialog and hands the surface to the next queued request. A request
-	 * whose signal aborts before its turn resolves `undefined` and is never shown.
+	 * A permission decision is a multi-page FLOW: its pages share
+	 * `dialogOptions.flowId`, the first page acquires the slot, and follow-up
+	 * pages replace the active dialog in place (never queue). The flow holds
+	 * its slot until `endPermissionFlow` releases it — page settles do not
+	 * advance the queue, so a second flow can never interleave between a
+	 * flow's pages. Single-page dialogs (no flowId) keep the old semantics:
+	 * settle hides and immediately advances the queue.
 	 */
 	#presentDialog<T = string>(
-		signal: AbortSignal | undefined,
 		present: (settle: (value: T | undefined) => void) => () => void,
+		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<T | undefined> {
+		const signal = dialogOptions?.signal;
+		const flowId = dialogOptions?.flowId;
 		const { promise, resolve, reject } = Promise.withResolvers<T | undefined>();
 		let settled = false;
 		let started = false;
@@ -1263,7 +1274,17 @@ export class ExtensionUiController {
 			if (started) {
 				hide?.();
 				this.#dialogActive = false;
-				this.#advanceDialogQueue();
+				if (flowId === undefined) {
+					// Single-page dialog: the surface is free for the queue.
+					this.#advanceDialogQueue();
+				} else {
+					// A flow keeps its slot across pages; its next page claims
+					// the free surface (see the dispatch below), and its own
+					// endPermissionFlow releases it — never advance here, or a
+					// sibling flow's page would interleave between this flow's
+					// pages.
+					this.#lastSettledFlowId = flowId;
+				}
 			}
 			resolve(value);
 		};
@@ -1276,12 +1297,14 @@ export class ExtensionUiController {
 			}
 			started = true;
 			this.#dialogActive = true;
+			this.#dialogFlowId = flowId;
 			try {
 				hide = present(settle);
 			} catch (error) {
 				settled = true;
 				signal?.removeEventListener("abort", onAbort);
 				this.#dialogActive = false;
+				this.#dialogFlowId = undefined;
 				reject(error);
 				this.#advanceDialogQueue();
 			}
@@ -1294,11 +1317,34 @@ export class ExtensionUiController {
 		signal?.addEventListener("abort", onAbort, { once: true });
 
 		if (this.#dialogActive) {
-			this.#dialogQueue.push(startPresentation);
-		} else {
+			if (flowId !== undefined && flowId === this.#dialogFlowId) {
+				// Same flow, next page: the previous page already settled and
+				// hid; swap in the new page without touching the queue.
+				startPresentation();
+			} else {
+				this.#dialogQueue.push(startPresentation);
+			}
+		} else if (flowId !== undefined && flowId === this.#lastSettledFlowId) {
+			// The flow whose page just settled continues — its next page
+			// claims the free slot before any queued dialog.
 			startPresentation();
+		} else if (this.#dialogQueue.length === 0) {
+			// Nothing queued and no continuing flow: first come, first served.
+			startPresentation();
+		} else {
+			this.#dialogQueue.push(startPresentation);
 		}
 		return promise;
+	}
+
+	/**
+	 * Release the slot held by a permission dialog flow: called once the
+	 * flow's last page has settled, handing the surface to the next queued
+	 * dialog.
+	 */
+	endPermissionFlow(_flowId: string): void {
+		this.#lastSettledFlowId = undefined;
+		this.#advanceDialogQueue();
 	}
 
 	#advanceDialogQueue(): void {

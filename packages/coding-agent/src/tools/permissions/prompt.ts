@@ -86,6 +86,12 @@ export interface PromptForDecisionOptions {
 	 * Never called for forced prompts (`includeCandidates: false`).
 	 */
 	suggestionsProvider?: SuggestionProvider;
+	/**
+	 * Dialog-flow identity shared by every page of this decision. Generated
+	 * when omitted: the flow's pages occupy one dialog-queue slot and never
+	 * interleave with another pending approval's dialogs.
+	 */
+	flowId?: string;
 }
 
 const ALLOW_ONCE = "Allow once";
@@ -101,6 +107,9 @@ const ALLOW_ALL_SESSION = "Allow all for this session";
 const ALLOW_ALL_REMEMBER = "Allow all & remember…";
 const DENY_ALL = "Deny all pending";
 const DRILL_DOWN = "Decide per piece →";
+
+/** Monotonic source for generated permission-flow ids. */
+let dialogFlowCounter = 0;
 
 /**
  * Dialog note shown when a bash command's remember options are suppressed:
@@ -665,6 +674,8 @@ interface ChooseLabelDialogOpts {
 	preselect?: Promise<number | undefined> | (() => Promise<number | undefined>);
 	/** Help line shown at the bottom of the dialog. */
 	helpText?: string;
+	/** Dialog-flow identity — pages of one decision share it (see ExtensionUIDialogOptions.flowId). */
+	flowId?: string;
 }
 
 /**
@@ -695,7 +706,10 @@ async function chooseLabel(
 			...(dialogOpts?.preselect !== undefined ? { preselect: dialogOpts.preselect } : {}),
 			...(dialogOpts?.helpText !== undefined ? { helpText: dialogOpts.helpText } : {}),
 		};
-		const index = await ui.showPermissionDialog(request);
+		const index = await ui.showPermissionDialog(
+			request,
+			dialogOpts?.flowId !== undefined ? { flowId: dialogOpts.flowId } : undefined,
+		);
 		if (index === undefined) return undefined;
 		const base = options[index];
 		if (base !== undefined) return base;
@@ -725,6 +739,7 @@ async function chooseCandidate(
 	candidates: CandidateRule[],
 	recommendedScope: Promise<CandidateScope | undefined> | undefined,
 	args: unknown,
+	flowId?: string,
 ): Promise<CandidateRule | typeof SCOPE_BACK | undefined> {
 	if (candidates.length === 0) return SCOPE_BACK;
 	if (ui.showPermissionDialog) {
@@ -753,7 +768,7 @@ async function chooseCandidate(
 					}
 				: {}),
 		};
-		const index = await ui.showPermissionDialog(request);
+		const index = await ui.showPermissionDialog(request, flowId !== undefined ? { flowId } : undefined);
 		if (index === undefined || index === -1) return SCOPE_BACK; // esc — back to the decision page
 		// The option list inserts Custom… between candidates, so the picked
 		// index does not map onto the candidates array — resolve by label.
@@ -863,6 +878,7 @@ async function promptUnit(
 		// only; Approve is preselected (auto-mode-with-confirmation).
 		const chosen = await chooseLabel(ui, title, [APPROVE, DENY], buildDialogLines(decision, pieces, ctx), undefined, {
 			initialIndex: 0,
+			flowId: opts.flowId,
 		});
 		const approved = chosen === APPROVE || chosen === ALLOW_ONCE;
 		return { policy: approved ? "allow" : "deny" };
@@ -927,7 +943,7 @@ async function promptUnit(
 			opts.suggestionsProvider !== undefined
 				? () => startSuggestionFlow().then(result => result.options)
 				: undefined,
-			{ ...(opts.suggestionsProvider !== undefined ? { preselect } : {}) },
+			{ flowId: opts.flowId, ...(opts.suggestionsProvider !== undefined ? { preselect } : {}) },
 		);
 		switch (chosen) {
 			case ALLOW_ONCE:
@@ -952,6 +968,7 @@ async function promptUnit(
 					candidates.filter(candidateItem => candidateItem.rule.action === "allow"),
 					recommendedScope(),
 					unitArgs,
+					opts.flowId,
 				);
 				// Esc on the scope page returns to the decision page; a
 				// cancelled Custom… glob edit does the same.
@@ -966,6 +983,7 @@ async function promptUnit(
 					candidates.filter(candidateItem => candidateItem.rule.action === "deny"),
 					recommendedScope(),
 					unitArgs,
+					opts.flowId,
 				);
 				if (rule === SCOPE_BACK || rule === undefined) continue;
 				await writeRememberedRule(rule.rule, ctx);
@@ -1005,6 +1023,7 @@ export async function rememberCompound(
 	pendingPieces: PieceEvaluation[],
 	action: "allow" | "deny",
 	ctx: EngineContext,
+	flowId?: string,
 ): Promise<Omit<PermissionRule, "layer"> | typeof SCOPE_BACK | undefined> {
 	const toRule = (piece: PieceEvaluation): CandidateRule => {
 		const pattern = firstTokenPattern(piece.text);
@@ -1054,7 +1073,7 @@ export async function rememberCompound(
 		// writes immediately (spec §5.1). Row = pieces.length (last option).
 		initialIndex: pendingPieces.length,
 	};
-	const index = await ui.showPermissionDialog?.(request);
+	const index = await ui.showPermissionDialog?.(request, flowId !== undefined ? { flowId } : undefined);
 	if (index === -1 || index === undefined) return SCOPE_BACK; // esc — back to the compound decision page
 	if (index < -1) {
 		// e: edit the selected piece's glob, then write the edited rule directly.
@@ -1095,7 +1114,16 @@ async function drillDownPieces(
 	let remembered: Omit<PermissionRule, "layer"> | undefined;
 	const remaining = [...pendingPieces];
 	while (remaining.length > 0) {
-		const picked = await chooseLabel(ui, "Decide per piece", ["Back", ...remaining.map(piece => piece.text)]);
+		const picked = await chooseLabel(
+			ui,
+			"Decide per piece",
+			["Back", ...remaining.map(piece => piece.text)],
+			undefined,
+			undefined,
+			{
+				flowId: opts.flowId,
+			},
+		);
 		if (picked === undefined || picked === "Back") break; // cancel — undecided pieces stay denied
 		const index = remaining.findIndex(piece => piece.text === picked);
 		if (index < 0) break;
@@ -1149,107 +1177,115 @@ export async function promptForDecision(
 	ctx: EngineContext,
 	opts: PromptForDecisionOptions = {},
 ): Promise<PromptResolution> {
-	const ptyCall = isPtyCall(args);
+	// One dialog-queue slot per decision: every page of this flow shares the
+	// id, so a sibling pending approval's dialogs never interleave between
+	// them (see ExtensionUiController.#presentDialog).
+	const flowId = opts.flowId ?? `perm-dialog-${dialogFlowCounter++}`;
+	try {
+		const ptyCall = isPtyCall(args);
 
-	let pieces = decision.pieces;
-	if (pieces === undefined && toolName === "bash" && !ptyCall) {
-		const command = argString(args, "command");
-		if (command !== undefined) {
-			pieces = evaluateBashCommand(command, ctx).pieces;
+		let pieces = decision.pieces;
+		if (pieces === undefined && toolName === "bash" && !ptyCall) {
+			const command = argString(args, "command");
+			if (command !== undefined) {
+				pieces = evaluateBashCommand(command, ctx).pieces;
+			}
 		}
-	}
-	const pendingPieces = (pieces ?? []).filter(piece => piece.policy === "prompt");
+		const pendingPieces = (pieces ?? []).filter(piece => piece.policy === "prompt");
 
-	// Every piece is already decided — nothing to prompt for. Only bash
-	// decisions carry pieces; non-bash tools (pieces undefined) must still
-	// dialog below.
-	if (pieces !== undefined && pendingPieces.length === 0) {
-		return { policy: "allow" };
-	}
+		// Every piece is already decided — nothing to prompt for. Only bash
+		// decisions carry pieces; non-bash tools (pieces undefined) must still
+		// dialog below.
+		if (pieces !== undefined && pendingPieces.length === 0) {
+			return { policy: "allow" };
+		}
 
-	// Single-unit flows: PTY, non-bash, forced prompts, or one piece.
-	if (ptyCall || opts.includeCandidates === false || pieces === undefined || pieces.length <= 1) {
-		return promptUnit(ui, toolName, args, decision, ctx, opts, pieces);
-	}
+		// Single-unit flows: PTY, non-bash, forced prompts, or one piece.
+		if (ptyCall || opts.includeCandidates === false || pieces === undefined || pieces.length <= 1) {
+			return promptUnit(ui, toolName, args, decision, ctx, opts, pieces);
+		}
 
-	// v3 compound flow: one dialog for the whole call (spec §5.1).
-	const title = opts.title ?? defaultTitle(toolName);
-	const metaLines = dialogMetadataLines(toolName, opts);
-	const lines = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
-	// The provider fires when the dialog is presented (mount), not at gate
-	// time: a queued dialog keeps its full timeout budget and never overlaps
-	// a sibling dialog's request (issue 13). The memoized starter shares one
-	// request across the compound dialog and the suggestion-pick path.
-	let suggestionFlow: Promise<ResolvedSuggestions> | undefined;
-	const startSuggestionFlow = (): Promise<ResolvedSuggestions> =>
-		(suggestionFlow ??=
-			opts.suggestionsProvider !== undefined
-				? opts
-						.suggestionsProvider({ tool: toolName, args, text: unitPieceText(toolName, args) })
-						.then(resolved => resolveSuggestions(resolved, toolName, args, pendingPieces))
-						.catch(() => EMPTY_SUGGESTIONS)
-				: Promise.resolve(EMPTY_SUGGESTIONS));
-	const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));
-	// Shell control kills the rule-backed actions (remember, session — those
-	// allows degrade to a prompt), but per-piece allow/deny decisions still
-	// work, so drill-down stays in the degraded set.
-	const baseOptions = rememberDisabled
-		? [ALLOW_ALL_ONCE, DENY_ALL, DRILL_DOWN]
-		: [ALLOW_ALL_ONCE, ALLOW_ALL_SESSION, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
-	// The first choice preselects the compound option when it lands; until
-	// then no selection. Esc on the remember checklist returns here. The
-	// starter is lazy: the dialog fires it on mount.
-	const preselect = (): Promise<number | undefined> =>
-		startSuggestionFlow().then(resolved => compoundRecommendationIndex(resolved.result.choices[0], baseOptions));
-	while (true) {
-		const chosen = await chooseLabel(
-			ui,
-			dialogTitle(ui, title, metaLines),
-			baseOptions,
-			lines,
-			opts.suggestionsProvider !== undefined
-				? () => startSuggestionFlow().then(result => result.options)
-				: undefined,
-			{ ...(opts.suggestionsProvider !== undefined ? { preselect } : {}) },
-		);
-		switch (chosen) {
-			case ALLOW_ALL_ONCE:
-				return { policy: "allow" };
-			case DENY_ALL:
-				return { policy: "deny" };
-			case ALLOW_ALL_SESSION: {
-				// One in-memory session rule per pending piece (first-token
-				// globs), mirroring the remember checklist without any disk
-				// write.
-				for (const piece of pendingPieces) {
-					const rule = candidate(
-						"bash",
-						"allow",
-						"pattern",
-						{ command: firstTokenPattern(piece.text) },
-						firstTokenPattern(piece.text),
-					).rule;
-					addSessionRule(sessionRuleKey(ctx), sessionRule(rule));
-				}
-				return { policy: "allow" };
-			}
-			case ALLOW_ALL_REMEMBER: {
-				const rule = await rememberCompound(ui, pendingPieces, "allow", ctx);
-				if (rule === SCOPE_BACK) continue; // back to the compound decision page
-				return rule === undefined ? { policy: "deny" } : { policy: "allow", remembered: rule };
-			}
-			case DRILL_DOWN:
-				return drillDownPieces(ui, pendingPieces, decision, ctx, opts);
-			default:
-				// Suggestion option picked from the dialog (appended options).
-				if (chosen !== undefined && opts.suggestionsProvider !== undefined) {
-					const picked = (await startSuggestionFlow()).byLabel.get(chosen);
-					if (picked !== undefined) {
-						await writeRememberedRule(picked, ctx);
-						return { policy: picked.action === "allow" ? "allow" : "deny", remembered: picked };
+		// v3 compound flow: one dialog for the whole call (spec §5.1).
+		const title = opts.title ?? defaultTitle(toolName);
+		const metaLines = dialogMetadataLines(toolName, opts);
+		const lines = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
+		// The provider fires when the dialog is presented (mount), not at gate
+		// time: a queued dialog keeps its full timeout budget and never overlaps
+		// a sibling dialog's request (issue 13). The memoized starter shares one
+		// request across the compound dialog and the suggestion-pick path.
+		let suggestionFlow: Promise<ResolvedSuggestions> | undefined;
+		const startSuggestionFlow = (): Promise<ResolvedSuggestions> =>
+			(suggestionFlow ??=
+				opts.suggestionsProvider !== undefined
+					? opts
+							.suggestionsProvider({ tool: toolName, args, text: unitPieceText(toolName, args) })
+							.then(resolved => resolveSuggestions(resolved, toolName, args, pendingPieces))
+							.catch(() => EMPTY_SUGGESTIONS)
+					: Promise.resolve(EMPTY_SUGGESTIONS));
+		const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));
+		// Shell control kills the rule-backed actions (remember, session — those
+		// allows degrade to a prompt), but per-piece allow/deny decisions still
+		// work, so drill-down stays in the degraded set.
+		const baseOptions = rememberDisabled
+			? [ALLOW_ALL_ONCE, DENY_ALL, DRILL_DOWN]
+			: [ALLOW_ALL_ONCE, ALLOW_ALL_SESSION, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
+		// The first choice preselects the compound option when it lands; until
+		// then no selection. Esc on the remember checklist returns here. The
+		// starter is lazy: the dialog fires it on mount.
+		const preselect = (): Promise<number | undefined> =>
+			startSuggestionFlow().then(resolved => compoundRecommendationIndex(resolved.result.choices[0], baseOptions));
+		while (true) {
+			const chosen = await chooseLabel(
+				ui,
+				dialogTitle(ui, title, metaLines),
+				baseOptions,
+				lines,
+				opts.suggestionsProvider !== undefined
+					? () => startSuggestionFlow().then(result => result.options)
+					: undefined,
+				{ flowId, ...(opts.suggestionsProvider !== undefined ? { preselect } : {}) },
+			);
+			switch (chosen) {
+				case ALLOW_ALL_ONCE:
+					return { policy: "allow" };
+				case DENY_ALL:
+					return { policy: "deny" };
+				case ALLOW_ALL_SESSION: {
+					// One in-memory session rule per pending piece (first-token
+					// globs), mirroring the remember checklist without any disk
+					// write.
+					for (const piece of pendingPieces) {
+						const rule = candidate(
+							"bash",
+							"allow",
+							"pattern",
+							{ command: firstTokenPattern(piece.text) },
+							firstTokenPattern(piece.text),
+						).rule;
+						addSessionRule(sessionRuleKey(ctx), sessionRule(rule));
 					}
+					return { policy: "allow" };
 				}
-				return { policy: "deny" };
+				case ALLOW_ALL_REMEMBER: {
+					const rule = await rememberCompound(ui, pendingPieces, "allow", ctx, flowId);
+					if (rule === SCOPE_BACK) continue; // back to the compound decision page
+					return rule === undefined ? { policy: "deny" } : { policy: "allow", remembered: rule };
+				}
+				case DRILL_DOWN:
+					return drillDownPieces(ui, pendingPieces, decision, ctx, opts);
+				default:
+					// Suggestion option picked from the dialog (appended options).
+					if (chosen !== undefined && opts.suggestionsProvider !== undefined) {
+						const picked = (await startSuggestionFlow()).byLabel.get(chosen);
+						if (picked !== undefined) {
+							await writeRememberedRule(picked, ctx);
+							return { policy: picked.action === "allow" ? "allow" : "deny", remembered: picked };
+						}
+					}
+					return { policy: "deny" };
+			}
 		}
+	} finally {
+		ui.endPermissionFlow?.(flowId);
 	}
 }
