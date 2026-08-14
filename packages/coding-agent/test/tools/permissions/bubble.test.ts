@@ -20,6 +20,7 @@ import type { AgentSession } from "../../../src/session/agent-session";
 import type { CustomMessage } from "../../../src/session/messages";
 import type { EngineDecision } from "../../../src/tools/permissions/engine";
 import { firstRunNotice } from "../../../src/tools/permissions/migrate";
+import { resolveLazy } from "../../../src/tools/permissions/prompt";
 import {
 	abortPendingForSession,
 	PERMISSION_PENDING_TYPE,
@@ -142,8 +143,15 @@ function makeController(
 	tempHomes.add(tempHome);
 	const notify = vi.fn();
 	let capturedRequest: PermissionDialogRequest | undefined;
+	// Mirror the real dialog component: lazy suggestion/preselect starters
+	// fire on presentation (issue 13), not at prompt time.
+	const mountDialog = (request: PermissionDialogRequest): void => {
+		void resolveLazy(request.suggestions);
+		void resolveLazy(request.preselect);
+	};
 	const showPermissionDialog = vi.fn(async (request: PermissionDialogRequest) => {
 		capturedRequest = request;
+		mountDialog(request);
 		return 0; // index 0 = "Allow once"
 	});
 	const entries: Array<{ customType: string; data: unknown }> = [];

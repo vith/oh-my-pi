@@ -607,10 +607,22 @@ function candidateOptionIndex(candidates: CandidateRule[], scope: Recommendation
 interface ChooseLabelDialogOpts {
 	/** Row to preselect; omitted = no selection. */
 	initialIndex?: number;
-	/** Resolves to the row to preselect once the model's recommendation lands. */
-	preselect?: Promise<number | undefined>;
+	/**
+	 * Resolves to the row to preselect once the model's recommendation lands.
+	 * May be a starter function the dialog invokes on mount.
+	 */
+	preselect?: Promise<number | undefined> | (() => Promise<number | undefined>);
 	/** Help line shown at the bottom of the dialog. */
 	helpText?: string;
+}
+
+/**
+ * Resolve a possibly-lazy dialog value. The permission dialog invokes its
+ * suggestion/preselect starters on mount; consumers outside the component
+ * (appended-option mapping, tests) resolve them the same way.
+ */
+export function resolveLazy<T>(value: T | (() => T)): T {
+	return typeof value === "function" ? (value as () => T)() : value;
 }
 
 /** Present an option list, mapping the choice back to its label. Cancel → undefined. */
@@ -619,7 +631,7 @@ async function chooseLabel(
 	title: string,
 	options: string[],
 	lines?: readonly (string | PermissionDialogLine)[],
-	suggestions?: Promise<PermissionDialogOption[]>,
+	suggestions?: Promise<PermissionDialogOption[]> | (() => Promise<PermissionDialogOption[]>),
 	dialogOpts?: ChooseLabelDialogOpts,
 ): Promise<string | undefined> {
 	if (ui.showPermissionDialog) {
@@ -638,7 +650,7 @@ async function chooseLabel(
 		if (base !== undefined) return base;
 		// The picked option is one the dialog appended after it opened.
 		if (suggestions === undefined) return undefined;
-		const appended = await suggestions;
+		const appended = await resolveLazy(suggestions);
 		return appended[index - options.length]?.label;
 	}
 	return ui.select(title, [...options]);
@@ -806,16 +818,20 @@ async function promptUnit(
 	}
 
 	const candidates = buildCandidates(toolName, unitArgs, pieces);
-	// The forced-prompt branch above already returned, so only candidate
-	// dialogs reach here; the provider fires once per pending unit and its
-	// recommendation drives the dialog preselection.
-	const suggestionFlow =
-		opts.suggestionsProvider !== undefined
-			? opts
-					.suggestionsProvider({ tool: toolName, args: unitArgs, text: unitPieceText(toolName, unitArgs) })
-					.then(resolved => resolveSuggestions(resolved, toolName, unitArgs, pieces))
-					.catch(() => EMPTY_SUGGESTIONS)
-			: undefined;
+	// Only candidate dialogs reach here. The provider fires when the dialog
+	// is presented (mount), not at gate time: a queued dialog keeps its full
+	// timeout budget and never overlaps a sibling dialog's request (issue
+	// 13). The memoized starter shares one request across the decision page,
+	// the scope page, and the suggestion-pick path.
+	let suggestionFlow: Promise<ResolvedSuggestions> | undefined;
+	const startSuggestionFlow = (): Promise<ResolvedSuggestions> =>
+		(suggestionFlow ??=
+			opts.suggestionsProvider !== undefined
+				? opts
+						.suggestionsProvider({ tool: toolName, args: unitArgs, text: unitPieceText(toolName, unitArgs) })
+						.then(resolved => resolveSuggestions(resolved, toolName, unitArgs, pieces))
+						.catch(() => EMPTY_SUGGESTIONS)
+				: Promise.resolve(EMPTY_SUGGESTIONS));
 	// Shell-control bash commands cannot be suppressed by a remembered rule,
 	// and tools whose candidates are exact-only (one-shot code tools like
 	// eval) can only remember an identical call — drop the remember options
@@ -841,19 +857,22 @@ async function promptUnit(
 	const options = backLabel !== undefined ? [...baseOptions, backLabel] : baseOptions;
 	// The model's recommendation preselects the decision-page option when it
 	// lands; until then the dialog shows no selection (auto-mode-with-
-	// confirmation — the model decides, the user confirms).
-	const recommendedScope = suggestionFlow?.then(resolved => resolved.result.recommendation?.scope);
-	const preselect = suggestionFlow?.then(resolved =>
-		decisionRecommendationIndex(resolved.result.recommendation, options),
-	);
+	// confirmation — the model decides, the user confirms). Both are lazy
+	// starters: the dialog fires them on mount.
+	const recommendedScope = (): Promise<RecommendationScope | undefined> =>
+		startSuggestionFlow().then(resolved => resolved.result.recommendation?.scope);
+	const preselect = (): Promise<number | undefined> =>
+		startSuggestionFlow().then(resolved => decisionRecommendationIndex(resolved.result.recommendation, options));
 	while (true) {
 		const chosen = await chooseLabel(
 			ui,
 			dialogTitle(ui, title, metaLines),
 			options,
 			lines,
-			suggestionFlow?.then(result => result.options),
-			{ ...(preselect !== undefined ? { preselect } : {}) },
+			opts.suggestionsProvider !== undefined
+				? () => startSuggestionFlow().then(result => result.options)
+				: undefined,
+			{ ...(opts.suggestionsProvider !== undefined ? { preselect } : {}) },
 		);
 		switch (chosen) {
 			case ALLOW_ONCE:
@@ -876,7 +895,7 @@ async function promptUnit(
 					ui,
 					`Remember an allow rule for ${toolName}`,
 					candidates.filter(candidateItem => candidateItem.rule.action === "allow"),
-					recommendedScope,
+					recommendedScope(),
 					unitArgs,
 				);
 				// Esc on the scope page returns to the decision page; a
@@ -890,7 +909,7 @@ async function promptUnit(
 					ui,
 					`Remember a deny rule for ${toolName}`,
 					candidates.filter(candidateItem => candidateItem.rule.action === "deny"),
-					recommendedScope,
+					recommendedScope(),
 					unitArgs,
 				);
 				if (rule === SCOPE_BACK || rule === undefined) continue;
@@ -903,8 +922,8 @@ async function promptUnit(
 				// A suggestion option picked from the dialog: remember its rule
 				// and resolve with its action. Unknown labels (incl. esc) still
 				// fail closed.
-				if (chosen !== undefined && suggestionFlow !== undefined) {
-					const picked = (await suggestionFlow).byLabel.get(chosen);
+				if (chosen !== undefined && opts.suggestionsProvider !== undefined) {
+					const picked = (await startSuggestionFlow()).byLabel.get(chosen);
 					if (picked !== undefined) {
 						await writeRememberedRule(picked.rule, ctx);
 						return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
@@ -1102,31 +1121,38 @@ export async function promptForDecision(
 	const title = opts.title ?? defaultTitle(toolName);
 	const metaLines = dialogMetadataLines(toolName, opts);
 	const lines = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
-	const suggestionFlow =
-		opts.suggestionsProvider !== undefined
-			? opts
-					.suggestionsProvider({ tool: toolName, args, text: unitPieceText(toolName, args) })
-					.then(resolved => resolveSuggestions(resolved, toolName, args, pendingPieces))
-					.catch(() => EMPTY_SUGGESTIONS)
-			: undefined;
+	// The provider fires when the dialog is presented (mount), not at gate
+	// time: a queued dialog keeps its full timeout budget and never overlaps
+	// a sibling dialog's request (issue 13). The memoized starter shares one
+	// request across the compound dialog and the suggestion-pick path.
+	let suggestionFlow: Promise<ResolvedSuggestions> | undefined;
+	const startSuggestionFlow = (): Promise<ResolvedSuggestions> =>
+		(suggestionFlow ??=
+			opts.suggestionsProvider !== undefined
+				? opts
+						.suggestionsProvider({ tool: toolName, args, text: unitPieceText(toolName, args) })
+						.then(resolved => resolveSuggestions(resolved, toolName, args, pendingPieces))
+						.catch(() => EMPTY_SUGGESTIONS)
+				: Promise.resolve(EMPTY_SUGGESTIONS));
 	const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));
 	const baseOptions = rememberDisabled
 		? [ALLOW_ALL_ONCE, DENY_ALL]
 		: [ALLOW_ALL_ONCE, ALLOW_ALL_SESSION, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
 	// The model's recommendation preselects the compound option when it
 	// lands; until then no selection. Esc on the remember checklist returns
-	// here.
-	const preselect = suggestionFlow?.then(resolved =>
-		compoundRecommendationIndex(resolved.result.recommendation, baseOptions),
-	);
+	// here. The starter is lazy: the dialog fires it on mount.
+	const preselect = (): Promise<number | undefined> =>
+		startSuggestionFlow().then(resolved => compoundRecommendationIndex(resolved.result.recommendation, baseOptions));
 	while (true) {
 		const chosen = await chooseLabel(
 			ui,
 			dialogTitle(ui, title, metaLines),
 			baseOptions,
 			lines,
-			suggestionFlow?.then(result => result.options),
-			{ ...(preselect !== undefined ? { preselect } : {}) },
+			opts.suggestionsProvider !== undefined
+				? () => startSuggestionFlow().then(result => result.options)
+				: undefined,
+			{ ...(opts.suggestionsProvider !== undefined ? { preselect } : {}) },
 		);
 		switch (chosen) {
 			case ALLOW_ALL_ONCE:
@@ -1158,8 +1184,8 @@ export async function promptForDecision(
 				return drillDownPieces(ui, pendingPieces, decision, ctx, opts);
 			default:
 				// Suggestion option picked from the dialog (appended options).
-				if (chosen !== undefined && suggestionFlow !== undefined) {
-					const picked = (await suggestionFlow).byLabel.get(chosen);
+				if (chosen !== undefined && opts.suggestionsProvider !== undefined) {
+					const picked = (await startSuggestionFlow()).byLabel.get(chosen);
 					if (picked !== undefined) {
 						await writeRememberedRule(picked.rule, ctx);
 						return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
