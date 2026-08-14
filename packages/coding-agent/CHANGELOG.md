@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ## [17.3.4+vith-fork.196.72dcc378d8] - 2026-08-14
+### Added
+
+- `/mode [allow|prompt|deny]` slash command: shows the current permission posture, or switches it persistently via `permissions.default`.
+- `app.permissions.cycleMode` keybinding (default `ctrl+shift+m`): cycles the permission posture allow → prompt → deny and writes it persistently.
 
 ### Fixed
 

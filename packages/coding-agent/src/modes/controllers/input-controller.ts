@@ -26,6 +26,8 @@ import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
+import { resolvePosture } from "../../tools/permissions/engine";
+import { cyclePosture } from "../../tools/permissions/manage";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { vocalizer } from "../../tts/vocalizer";
 import {
@@ -439,6 +441,11 @@ export class InputController {
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();
 		this.ctx.editor.setActionKeys("app.thinking.cycle", this.ctx.keybindings.getKeys("app.thinking.cycle"));
 		this.ctx.editor.onCycleThinkingLevel = () => this.cycleThinkingLevel();
+		this.ctx.editor.setActionKeys(
+			"app.permissions.cycleMode",
+			this.ctx.keybindings.getKeys("app.permissions.cycleMode"),
+		);
+		this.ctx.editor.onCyclePermissionMode = () => this.cyclePermissionMode();
 		this.ctx.editor.setActionKeys("app.model.cycleForward", this.ctx.keybindings.getKeys("app.model.cycleForward"));
 		this.ctx.editor.onCycleModelForward = () => this.cycleRoleModel("forward");
 		this.ctx.editor.setActionKeys("app.model.cycleBackward", this.ctx.keybindings.getKeys("app.model.cycleBackward"));
@@ -1873,6 +1880,16 @@ export class InputController {
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
 		}
+	}
+
+	cyclePermissionMode(): void {
+		if (this.ctx.focusedAgentId) {
+			this.ctx.showStatus("Mode/thinking apply to the main session — press ←← to return first");
+			return;
+		}
+		const next = cyclePosture(resolvePosture(settings));
+		settings.set("permissions.default", next);
+		this.ctx.showStatus(`Permission mode: ${next}`);
 	}
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {

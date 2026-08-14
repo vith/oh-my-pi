@@ -11,6 +11,7 @@ import {
 	evaluateBashCommand,
 	matchClassOf,
 	matchRule,
+	type Posture,
 	patternSpecificity,
 	resolvePosture,
 	resolveWholeCommandRule,
@@ -59,6 +60,28 @@ export interface RunPermissionCommandContext {
 }
 
 const FILE_LAYERS = ["project", "user"] as const;
+
+/** The next posture when cycling: allow → prompt → deny → allow. */
+export function cyclePosture(current: Posture): Posture {
+	return current === "allow" ? "prompt" : current === "prompt" ? "deny" : "allow";
+}
+
+/**
+ * The `/mode` surface: show or switch the overall permission posture.
+ * No argument prints the current posture; `allow|prompt|deny` writes
+ * `permissions.default` (persistent, same key `/permissions status` reads).
+ */
+export async function runModeCommand(args: string, ctx: RunPermissionCommandContext): Promise<string> {
+	const value = args.trim().toLowerCase();
+	if (value === "") {
+		return `Mode: ${resolvePosture(ctx.settings)}`;
+	}
+	if (value === "allow" || value === "prompt" || value === "deny") {
+		ctx.settings.set("permissions.default", value);
+		return `Mode set to ${value} (permissions.default)`;
+	}
+	return `Unknown mode "${args.trim()}". Use: allow, prompt, or deny (no argument shows the current mode).`;
+}
 
 export async function runPermissionCommand(args: string, ctx: RunPermissionCommandContext): Promise<string> {
 	const { token, rest } = splitFirstToken(args.trim());
