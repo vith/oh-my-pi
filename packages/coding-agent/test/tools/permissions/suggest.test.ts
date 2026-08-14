@@ -186,7 +186,7 @@ describe("suggestRules", () => {
 		// to think before answering (issue 14: 256 tokens were consumed by
 		// reasoning alone, so the JSON never arrived).
 		expect(options?.maxTokens).toBeGreaterThanOrEqual(512);
-		expect(options?.maxTokens).toBeLessThanOrEqual(2048);
+		expect(options?.maxTokens).toBeLessThanOrEqual(4096);
 		// OpenAI-compat gateways default thinking ON when the effort field is
 		// omitted; pin the lowest effort so the model still reasons (its
 		// judgment decides the preselection) but with a bounded budget.
@@ -214,6 +214,52 @@ describe("suggestRules", () => {
 		expect(options?.signal).toBeDefined();
 		expect(options?.signal).not.toBe(controller.signal); // composed, not the raw caller signal
 		expect(options?.signal?.aborted).toBe(true);
+	});
+
+	it("retries once without reasoning when the model burns the budget on thinking", async () => {
+		// Issue 17: `reasoning: minimal` does not hard-cap thinking on complex
+		// prompts — the model emitted only thinking blocks, stopReason
+		// "length", zero text. The fallback attempt must land a choice.
+		const spy = vi
+			.spyOn(piAi, "completeSimple")
+			.mockResolvedValueOnce({
+				stopReason: "length",
+				content: [{ type: "thinking", thinking: "Need evaluate..." }],
+			} as never)
+			.mockResolvedValueOnce(assistantJson('{"choices":[{"action":"allow","remember":false,"reason":"fallback"}]}'));
+		const result = await suggestRules(unit("bash", { command: "git push --force" }), fakeCtx(), fakeRegistry());
+		expect(result.choices).toEqual([{ action: "allow", remember: false, reason: "fallback" }]);
+		expect(spy).toHaveBeenCalledTimes(2);
+		const first = spy.mock.calls[0]?.[2] as { reasoning?: string; forceReasoningOff?: boolean };
+		const second = spy.mock.calls[1]?.[2] as { reasoning?: string; forceReasoningOff?: boolean };
+		expect(first.reasoning).toBe("minimal");
+		expect(first.forceReasoningOff).not.toBe(true);
+		expect(second.forceReasoningOff).toBe(true);
+		expect(second.reasoning).toBeUndefined();
+	});
+
+	it("returns an empty result when the no-reasoning retry also fails", async () => {
+		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue({
+			stopReason: "length",
+			content: [{ type: "thinking", thinking: "still thinking" }],
+		} as never);
+		const result = await suggestRules(unit("bash", { command: "git push --force" }), fakeCtx(), fakeRegistry());
+		expect(result).toEqual(EMPTY_CHOICES);
+		expect(spy).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not retry when the first response contains text", async () => {
+		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"choices":[]}'));
+		await suggestRules(unit("bash", { command: "git status" }), fakeCtx(), fakeRegistry());
+		expect(spy).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not retry when the first response was aborted", async () => {
+		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue({ stopReason: "aborted", content: [] } as never);
+		expect(await suggestRules(unit("bash", { command: "git status" }), fakeCtx(), fakeRegistry())).toEqual(
+			EMPTY_CHOICES,
+		);
+		expect(spy).toHaveBeenCalledTimes(1);
 	});
 
 	it("still supplies a timeout signal when the caller passes none", async () => {
