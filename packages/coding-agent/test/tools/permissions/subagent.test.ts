@@ -271,6 +271,7 @@ describe("wrapper park integration", () => {
 		const created = await createAgentSession({
 			cwd,
 			agentDir: tempDir,
+			home: tempDir,
 			sessionManager,
 			settings: Settings.isolated(BASE_SETTINGS),
 			model: getBundledModel("openai", "gpt-4o-mini"),

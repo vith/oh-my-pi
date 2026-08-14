@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { DEBUG_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/tools/debug";
+import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 type ApprovalTool = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
 
@@ -32,6 +33,20 @@ function tool(
  */
 const HERMETIC_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "pi-approval-test-"));
 const HERMETIC_CWD = path.join(HERMETIC_HOME, "cwd");
+
+afterAll(() => {
+	// Windows can briefly hold tempdir handles; retry a few times.
+	for (let attempt = 0; attempt < 5; attempt++) {
+		try {
+			removeSyncWithRetries(HERMETIC_HOME);
+			break;
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "EBUSY" && code !== "ENOTEMPTY" && code !== "EPERM") throw err;
+			if (attempt === 4) break; // best-effort: OS will reclaim
+		}
+	}
+});
 
 function createBashTool(settingsOverrides: Record<string, unknown> = {}): BashTool {
 	fs.mkdirSync(HERMETIC_CWD, { recursive: true });

@@ -45,6 +45,7 @@ describe("tools.approvalMode setting", () => {
 		const created = await createAgentSession({
 			cwd,
 			agentDir: tempDir,
+			home: tempDir,
 			sessionManager,
 			settings: Settings.isolated(BASE_SETTINGS),
 			model: getBundledModel("openai", "gpt-4o-mini"),
@@ -168,6 +169,7 @@ describe("tools.approvalMode setting", () => {
 		const result = await bashTool().execute("cli-override", { command: "echo override" }, undefined, undefined, {
 			settings,
 			autoApprove: true,
+			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("override");
 	});

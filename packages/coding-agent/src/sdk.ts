@@ -351,6 +351,13 @@ export interface CreateAgentSessionOptions {
 	additionalDirectories?: string[];
 	/** Global config directory. Default: ~/.omp/agent */
 	agentDir?: string;
+	/**
+	 * Home directory for permission-rule resolution (user/dynamic layers,
+	 * `<home>/.omp/agent/permissions*.yml`). Defaults to `os.homedir()` when
+	 * unset; embedding hosts and tests pass an isolated home so developer
+	 * rules never leak into the session's evaluations.
+	 */
+	home?: string;
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
 
@@ -1661,6 +1668,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			home: options.home,
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,
@@ -2579,6 +2587,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			autoApprove: options.autoApprove ?? false,
+			home: options.home,
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext);
 		const setSessionActiveToolNames = (names: Iterable<string>): void => {
