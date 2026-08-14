@@ -21,6 +21,7 @@
 
 ### Fixed
 
+- Concurrent approval prompts no longer detach from their diffs: while a permission dialog is open the transcript holds — later tool calls in the batch (and their results) park and replay in order once the dialog resolves, so the approved diff stays directly above its dialog and the todos tree renders below the dialogs, not between a diff and its prompt.
 - Path-key rule patterns now expand a leading `~` at match time: a remembered rule like `~/.omp/plugins/**` actually matches the absolute call path instead of silently never firing. Command keys never expand (`cd ~/x` stays literal text).
 - The Custom… glob editor validates the edited pattern against the pending call before accepting: a glob that cannot match this call reopens the input with an error notification (esc abandons the edit). LLM rule suggestions that cannot match the pending call are dropped instead of appended as never-firing options.
 

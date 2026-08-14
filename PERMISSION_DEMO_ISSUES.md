@@ -100,6 +100,20 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   approving; further tool calls/messages in the turn do not render until
   earlier pending calls have been dealt with; the todos tree renders below
   the dialogs, not between a diff and its dialog.
+- **Fixed (2026-08-14):** the dialog mounts in the editor region below the
+  transcript, so any card rendered while it is open pushes the approved diff
+  off-screen. The event-controller now engages a transcript hold when the
+  first approval-gated call's `tool_execution_start` dispatches and parks
+  every later event FIFO until that call's `tool_execution_end` (the wrapper
+  only completes a gated call after its dialog resolves; a prediction miss
+  also ends promptly, so the hold cannot stick). Parked events replay in
+  order on release; a replayed gated start re-engages the hold for its own
+  dialog. Resulting order: (diff)(dialog)(result)(diff)(dialog)(result)… —
+  the todos tree renders below the dialogs. The gate prediction mirrors the
+  wrapper's `resolveApproval` inputs (approval mode + per-tool policies +
+  tool declarations), the same approximation the attention title uses;
+  prompts arising solely from engine file rules are not yet held. Tests:
+  `test/modes/controllers/event-controller-approval-hold.test.ts`.
 
 ## 7. Rule saved for worktree edits but prompt asked again
 

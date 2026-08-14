@@ -94,6 +94,19 @@ export class EventController {
 	/** Tool calls whose approval prompt drove the title into `attention`; cleared
 	 *  at their tool_execution_end so the title returns to `working`. */
 	#approvalAttentionToolCallIds = new Set<string>();
+	/**
+	 * While a permission approval dialog is open the transcript must not grow:
+	 * the dialog mounts in the editor region below the transcript, so any card
+	 * that renders after the approved diff pushes that diff off-screen and the
+	 * dialog reads as detached from it (demo bug 6). Engaged when the first
+	 * approval-gated call's `tool_execution_start` dispatches; every later
+	 * event parks FIFO until that call's `tool_execution_end` — the wrapper
+	 * only completes a gated call after its dialog resolves, and a prediction
+	 * miss (the call runs without prompting) also ends promptly, so the hold
+	 * cannot stick. Parked events replay in order on release; a replayed gated
+	 * start re-engages the hold for its own dialog.
+	 */
+	#approvalHold: { toolCallId: string; parked: AgentSessionEvent[] } | undefined = undefined;
 	#approvalPreviewGates = new Map<string, ApprovalPreviewGate>();
 	#detachToolApprovalPreviewWaiter: (() => void) | undefined;
 	#readToolCallArgs = new Map<string, Record<string, unknown>>();
@@ -650,6 +663,10 @@ export class EventController {
 		this.#postToolAssistantComponents.clear();
 		this.#backgroundTaskCallIds.clear();
 		this.#approvalAttentionToolCallIds.clear();
+		// Safety net: a hold still active at teardown means its batch never
+		// completed (abort/error); parked events belong to a dead turn and must
+		// not replay into the next one.
+		this.#approvalHold = undefined;
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
@@ -670,6 +687,30 @@ export class EventController {
 	}
 
 	async handleEvent(event: AgentSessionEvent): Promise<void> {
+		// Approval hold (demo bug 6): park every event that arrives while a
+		// permission dialog is open — see #approvalHold. The holding call's own
+		// `tool_execution_end` releases the hold, renders its result, then
+		// replays the parked queue in arrival order (a replayed gated start
+		// re-engages the hold for its own dialog). Live usage runs through the
+		// serialized dispatch chain (`subscribeToAgent`), so the release +
+		// replay block below is atomic with respect to newly arriving events.
+		if (this.#approvalHold !== undefined) {
+			if (event.type === "tool_execution_end" && event.toolCallId === this.#approvalHold.toolCallId) {
+				const { parked } = this.#approvalHold;
+				this.#approvalHold = undefined;
+				await this.#dispatchEvent(event);
+				for (const parkedEvent of parked) {
+					await this.handleEvent(parkedEvent);
+				}
+				return;
+			}
+			this.#approvalHold.parked.push(event);
+			return;
+		}
+		await this.#dispatchEvent(event);
+	}
+
+	async #dispatchEvent(event: AgentSessionEvent): Promise<void> {
 		if (!this.ctx.isInitialized) {
 			await this.ctx.init();
 		}
@@ -735,6 +776,9 @@ export class EventController {
 
 	async #handleAgentStart(_event: Extract<AgentSessionEvent, { type: "agent_start" }>): Promise<void> {
 		this.#clearApprovalPreviewGates();
+		// A new agent run starts only after the previous batch settled, so any
+		// hold still engaged here belongs to a dead turn (abort/error).
+		this.#approvalHold = undefined;
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
 		this.#retractedToolCallIds.clear();
@@ -1343,9 +1387,17 @@ export class EventController {
 		if (this.#retractedToolCallIds.has(event.toolCallId)) return;
 		this.#ensureWorkingLoaderWhileStreaming();
 		this.#updateWorkingMessageFromIntent(event.intent);
-		if (event.toolName === "ask" || this.#toolWillPromptForApproval(event.toolName, event.args)) {
+		const willPrompt = this.#toolWillPromptForApproval(event.toolName, event.args);
+		if (event.toolName === "ask" || willPrompt) {
 			this.#approvalAttentionToolCallIds.add(event.toolCallId);
 			setTerminalTitleState("attention");
+		}
+		// Bug 6: the first approval-gated call of the batch engages the
+		// transcript hold so its dialog renders adjacent to its diff. `ask`
+		// presents its own dialog via a different path — the hold covers only
+		// approval-gated calls.
+		if (willPrompt && this.#approvalHold === undefined) {
+			this.#approvalHold = { toolCallId: event.toolCallId, parked: [] };
 		}
 		this.#resolveDisplaceablePoll(event.toolName);
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
