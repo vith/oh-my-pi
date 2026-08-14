@@ -1,9 +1,12 @@
 /**
- * LLM-suggested permission rules (spec §5.3): a one-shot, non-streaming side
- * completion on the session's active model that proposes allow/deny rules for
- * a pending call. The approval dialog shows these behind a spinner and appends
- * them as extra options; every failure path degrades silently to `[]` so the
- * mechanical candidates always remain the floor.
+ * Model-decided approval recommendation (spec §5.3): a one-shot side
+ * completion on the session's active model that (a) recommends which action
+ * the approval dialog should preselect — auto-mode-with-confirmation — and
+ * (b) optionally proposes allow/deny rules appended to the dialog as extra
+ * options. The recommendation always runs; the rule suggestions are gated by
+ * `permissions.llmSuggestions`. Every failure path degrades silently to an
+ * empty result, so the mechanical candidates always remain the floor and a
+ * failing recommendation simply leaves the dialog unpreselected.
  */
 import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -19,6 +22,24 @@ export interface Suggestion {
 	rationale: string;
 }
 
+/** The remember scopes a recommendation can target; `once` = no rule. */
+export type RecommendationScope = "once" | "exact" | "pattern" | "tool";
+
+/** The model's recommended action for a pending call — what gets preselected. */
+export interface Recommendation {
+	action: "allow" | "deny";
+	scope: RecommendationScope;
+	reason?: string;
+}
+
+/** The full provider outcome: the recommendation plus any proposed rules. */
+export interface SuggestResult {
+	suggestions: Suggestion[];
+	recommendation?: Recommendation;
+}
+
+export type SuggestionProvider = (piece: string) => Promise<SuggestResult>;
+
 /** Side requests are bounded: 8s hard timeout, low token budget, at most 3 rules. */
 const SUGGEST_TIMEOUT_MS = 8000;
 const SUGGEST_MAX_TOKENS = 256;
@@ -26,7 +47,7 @@ const SUGGEST_MAX_SUGGESTIONS = 3;
 
 const LLM_SUGGESTIONS_KEY = "permissions.llmSuggestions";
 
-/** The feature gate: `permissions.llmSuggestions` defaults to true. */
+/** The rule-suggestion gate: `permissions.llmSuggestions` (defaults to off). Rules only — the recommendation always runs. */
 function suggestionsEnabled(ctx: EngineContext): boolean {
 	return ctx.settings.get(LLM_SUGGESTIONS_KEY) !== false;
 }
@@ -40,11 +61,14 @@ function resolveSuggestionModel(registry: ModelRegistry): Model<Api> | undefined
 	return registry.getAvailable()[0];
 }
 
+const EMPTY_RESULT: SuggestResult = { suggestions: [] };
+
 /**
- * Fire the one-shot suggestion completion for a pending call.
+ * Fire the one-shot recommendation completion for a pending call.
  *
  * Any failure — no model, no API key, provider error, timeout, abort, or
- * unparseable output — degrades to `[]` (silently; debug-logged only).
+ * unparseable output — degrades to an empty result (silently; debug-logged
+ * only), leaving the dialog without a preselection.
  */
 export async function suggestRules(
 	piece: string,
@@ -52,18 +76,17 @@ export async function suggestRules(
 	registry: ModelRegistry,
 	sessionId?: string,
 	signal?: AbortSignal,
-): Promise<Suggestion[]> {
+): Promise<SuggestResult> {
 	try {
-		if (!suggestionsEnabled(ctx)) return [];
 		const model = resolveSuggestionModel(registry);
-		if (!model) return [];
+		if (!model) return EMPTY_RESULT;
 		return await suggestWithModel(piece, model, ctx, registry, sessionId, signal);
 	} catch (error) {
 		logger.debug("permission-suggest: suggestion request failed", {
 			reason: "unexpected-failure",
 			error: error instanceof Error ? error.message : String(error),
 		});
-		return [];
+		return EMPTY_RESULT;
 	}
 }
 
@@ -79,10 +102,9 @@ export function createSuggestionProvider(
 	sessionId?: string,
 	model?: Model<Api>,
 	signal?: AbortSignal,
-): (piece: string) => Promise<Suggestion[]> {
-	if (!suggestionsEnabled(ctx)) return () => Promise.resolve([]);
+): SuggestionProvider {
 	const resolvedModel = model ?? resolveSuggestionModel(registry);
-	if (!resolvedModel) return () => Promise.resolve([]);
+	if (!resolvedModel) return () => Promise.resolve(EMPTY_RESULT);
 	return piece => suggestWithModel(piece, resolvedModel, ctx, registry, sessionId, signal);
 }
 
@@ -93,10 +115,10 @@ async function suggestWithModel(
 	registry: ModelRegistry,
 	sessionId?: string,
 	signal?: AbortSignal,
-): Promise<Suggestion[]> {
+): Promise<SuggestResult> {
 	try {
 		const apiKey = await registry.getApiKey(model, sessionId);
-		if (!apiKey) return [];
+		if (!apiKey) return EMPTY_RESULT;
 
 		// The side request must never outlive the dialog: the caller's signal
 		// (session teardown, dialog dismissal) and the hard timeout race.
@@ -119,14 +141,14 @@ async function suggestWithModel(
 			},
 		);
 
-		if (response.stopReason === "error") return [];
-		return parseSuggestionResponse(response.content);
+		if (response.stopReason === "error") return EMPTY_RESULT;
+		return parseSuggestResponse(response.content, suggestionsEnabled(ctx));
 	} catch (error) {
 		logger.debug("permission-suggest: suggestion request failed", {
 			reason: "request-failed",
 			error: error instanceof Error ? error.message : String(error),
 		});
-		return [];
+		return EMPTY_RESULT;
 	}
 }
 
@@ -140,11 +162,33 @@ function buildSuggestionPrompt(piece: string, ctx: EngineContext): string {
 			lines.push(`- ${rule.tool} ${JSON.stringify(rule.match)} -> ${rule.action}`);
 		}
 	}
+	// Rule suggestions are gated; the recommendation always runs.
+	if (!suggestionsEnabled(ctx)) lines.push("Do not include a rules array in your response.");
 	return lines.join("\n");
 }
 
-/** Parse the model's JSON array, validating each record and capping at 3. */
-function parseSuggestionResponse(content: AssistantMessage["content"]): Suggestion[] {
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Validate the model's `recommendation` object; malformed → undefined. */
+function parseRecommendation(value: unknown): Recommendation | undefined {
+	if (!isRecord(value)) return undefined;
+	const action = value.action;
+	if (action !== "allow" && action !== "deny") return undefined;
+	const scope = value.scope;
+	if (scope !== "once" && scope !== "exact" && scope !== "pattern" && scope !== "tool") return undefined;
+	const recommendation: Recommendation = { action, scope };
+	if (typeof value.reason === "string" && value.reason.length > 0) recommendation.reason = value.reason;
+	return recommendation;
+}
+
+/**
+ * Parse the model's JSON object: `{ recommendation?, rules? }`, validating
+ * each record and capping rules at 3. Malformed output degrades to an empty
+ * result.
+ */
+function parseSuggestResponse(content: AssistantMessage["content"], includeRules: boolean): SuggestResult {
 	let text = "";
 	for (const block of content) {
 		if (block.type === "text") text += block.text;
@@ -158,21 +202,25 @@ function parseSuggestionResponse(content: AssistantMessage["content"]): Suggesti
 	try {
 		parsed = JSON.parse(jsonText);
 	} catch {
-		return [];
+		return EMPTY_RESULT;
 	}
-	if (!Array.isArray(parsed)) return [];
+	if (!isRecord(parsed)) return EMPTY_RESULT;
 
-	const suggestions: Suggestion[] = [];
-	for (const record of parsed) {
-		if (suggestions.length >= SUGGEST_MAX_SUGGESTIONS) break;
+	const result: SuggestResult = { suggestions: [] };
+	const recommendation = parseRecommendation(parsed.recommendation);
+	if (recommendation !== undefined) result.recommendation = recommendation;
+	if (!includeRules || !Array.isArray(parsed.rules)) return result;
+
+	for (const record of parsed.rules) {
+		if (result.suggestions.length >= SUGGEST_MAX_SUGGESTIONS) break;
 		const rule = normalizeRule(record, "user");
 		if (rule === null) continue;
 		// Read-only tools are curated-allowlisted; a deny suggestion for one can
 		// never take effect and only confuses the user.
 		if (rule.action === "deny" && (CURATED_ALLOW_TOOLS as readonly string[]).includes(rule.tool)) continue;
-		suggestions.push({ rule: withoutLayer(rule), rationale: rule.reason ?? "" });
+		result.suggestions.push({ rule: withoutLayer(rule), rationale: rule.reason ?? "" });
 	}
-	return suggestions;
+	return result;
 }
 
 function withoutLayer(rule: PermissionRule): Omit<PermissionRule, "layer"> {

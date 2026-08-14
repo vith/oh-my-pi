@@ -18,12 +18,15 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
 - **Notes:** needs a decision-recommendation output from the provider plus
   preselection wiring (including the late-arrival case: preselect when
   suggestions land if the user hasn't moved yet).
-- **Fixed (2026-08-14):** deterministic preselection on every page — the
-  decision page preselects "Allow once" (compound: "Allow all pending
-  once"), the forced-prompt binary preselects "Approve", and the scope page
-  already preselected the Pattern candidate. With `permissions.llmSuggestions`
-  now off by default, the recommendation is the least-commitment action
-  (auto-mode-with-confirmation); the model-driven variant can layer on later.
+- **Fixed (2026-08-14, round 2):** preselection exists on every page, but
+  with the wrong mechanism — a deterministic least-commitment default
+  ("Allow once"). **Correction (round 3): the MODEL decides.** The side
+  completion now returns a `recommendation` (action + scope) that preselects
+  the matching option when it lands (dialog applies it unless the user has
+  already interacted); the scope page preselects the recommended scope.
+  `permissions.llmSuggestions` gates only the extra rule options — the
+  recommendation always runs. No recommendation (provider failure/off) ⇒ no
+  preselection, per the model-decides design.
 
 ## 2. `echo "hello from bash"` flagged as unanalyzable shell control
 

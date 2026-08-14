@@ -160,6 +160,12 @@ export interface PermissionDialogRequest {
 	options: PermissionDialogOption[];
 	/** Row to preselect; -1/omitted = no selection (Task 6's Pattern preselect). */
 	initialIndex?: number;
+	/**
+	 * Resolves to the row to preselect once the model's recommendation lands.
+	 * Applied only while the dialog is untouched (no key pressed, not settled);
+	 * resolving `undefined` keeps the current selection.
+	 */
+	preselect?: Promise<number | undefined>;
 	/** Help line shown at the bottom; defaults to the standard navigate/select/cancel text. */
 	helpText?: string;
 	/** Checklist mode: space toggles toggleable options. */

@@ -971,6 +971,8 @@ export class ExtensionUiController {
 					allowEdit: request.allowEdit,
 					previewFor: request.previewFor,
 					helpText: request.helpText,
+					preselect: request.preselect,
+					ui: this.ctx.ui,
 					...(request.allowEdit === true ? { onEdit: index => settle(-(index + 2)) } : {}),
 					...(request.suggestions !== undefined ? { suggestions: request.suggestions, ui: this.ctx.ui } : {}),
 				},

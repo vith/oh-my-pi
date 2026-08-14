@@ -33,7 +33,7 @@ import {
 	registerPermissionHandler,
 	unregisterPermissionHandler,
 } from "../../tools/permissions/subagent";
-import type { Suggestion } from "../../tools/permissions/suggest";
+import type { SuggestionProvider } from "../../tools/permissions/suggest";
 
 export interface PermissionControllerDeps {
 	/** Root session-manager id — the namespace the answering handler is registered in. */
@@ -56,10 +56,7 @@ export interface PermissionControllerDeps {
 	 * same degradation the main dialog uses.
 	 */
 	suggestionsProvider?:
-		| ((
-				session: AgentSession | undefined,
-				engineCtx: EngineContext,
-		  ) => ((piece: string) => Promise<Suggestion[]>) | undefined)
+		| ((session: AgentSession | undefined, engineCtx: EngineContext) => SuggestionProvider | undefined)
 		| undefined;
 	/** Session-manager id of the session the TUI is attached to, or undefined when detached. */
 	attachedManagerId: () => string | undefined;

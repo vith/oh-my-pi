@@ -37,7 +37,7 @@ import {
 } from "./engine";
 import { type PermissionRule, type RuleAction, ruleFiles, writeUserRule } from "./rules";
 import { extractSubCommands } from "./split";
-import type { Suggestion } from "./suggest";
+import type { Recommendation, RecommendationScope, Suggestion, SuggestionProvider, SuggestResult } from "./suggest";
 
 /** A selectable rule candidate: the label the user sees, the YAML preview, and the rule to write. */
 export interface CandidateRule {
@@ -75,12 +75,14 @@ export interface PromptForDecisionOptions {
 	 */
 	includeCandidates?: boolean;
 	/**
-	 * Task 11 (§5.3): optional LLM rule-suggestion provider. Per pending unit
-	 * the flow fires it while the dialog is shown; suggestions append as extra
-	 * options behind the dialog's spinner. Any provider failure degrades to
-	 * candidates-only. Never called for forced prompts (`includeCandidates: false`).
+	 * Model-decided approval provider (spec §5.3): per pending unit the flow
+	 * fires it while the dialog is shown. Its recommendation preselects the
+	 * dialog option when it lands (auto-mode-with-confirmation); its rule
+	 * suggestions append as extra options behind the dialog's spinner. Any
+	 * provider failure degrades to candidates-only with no preselection.
+	 * Never called for forced prompts (`includeCandidates: false`).
 	 */
-	suggestionsProvider?: (piece: string) => Promise<Suggestion[]>;
+	suggestionsProvider?: SuggestionProvider;
 }
 
 const ALLOW_ONCE = "Allow once";
@@ -496,28 +498,89 @@ function unitPieceText(toolName: string, unitArgs: unknown): string {
 	return `${toolName} ${JSON.stringify(unitArgs)}`;
 }
 
-/** Shape the provider result for both the dialog options and label routing. */
-function resolveSuggestions(suggestions: Suggestion[]): {
+/** The provider result shaped for both the dialog options and label routing. */
+interface ResolvedSuggestions {
+	result: SuggestResult;
 	options: PermissionDialogOption[];
 	byLabel: Map<string, Suggestion>;
-} {
+}
+
+const EMPTY_SUGGESTIONS: ResolvedSuggestions = {
+	result: { suggestions: [] },
+	options: [],
+	byLabel: new Map<string, Suggestion>(),
+};
+
+function resolveSuggestions(result: SuggestResult): ResolvedSuggestions {
 	const seen = new Set<string>();
 	const options: PermissionDialogOption[] = [];
 	const byLabel = new Map<string, Suggestion>();
-	for (const suggestion of suggestions) {
+	for (const suggestion of result.suggestions) {
 		const label = suggestionLabel(suggestion);
 		if (seen.has(label)) continue; // duplicate labels would be unroutable
 		seen.add(label);
 		options.push({ label, description: renderCandidateYaml(suggestion.rule) });
 		byLabel.set(label, suggestion);
 	}
-	return { options, byLabel };
+	return { result, options, byLabel };
+}
+
+/**
+ * Map the model's recommendation to the decision-page option index; the
+ * recommended label not being offered (remember dropped) falls back to the
+ * same-polarity least-commitment action. `undefined` = no preselection.
+ */
+function decisionRecommendationIndex(
+	recommendation: Recommendation | undefined,
+	options: readonly string[],
+): number | undefined {
+	if (recommendation === undefined) return undefined;
+	const remember = recommendation.scope !== "once";
+	const label =
+		recommendation.action === "allow" ? (remember ? ALLOW_REMEMBER : ALLOW_ONCE) : remember ? DENY_REMEMBER : DENY;
+	const index = options.indexOf(label);
+	if (index >= 0) return index;
+	const fallback = recommendation.action === "allow" ? ALLOW_ONCE : DENY;
+	const fallbackIndex = options.indexOf(fallback);
+	return fallbackIndex >= 0 ? fallbackIndex : undefined;
+}
+
+/** Compound-page variant: allow-all-once / allow-all-remember / deny-all. */
+function compoundRecommendationIndex(
+	recommendation: Recommendation | undefined,
+	options: readonly string[],
+): number | undefined {
+	if (recommendation === undefined) return undefined;
+	const label =
+		recommendation.action === "deny"
+			? DENY_ALL
+			: recommendation.scope === "once"
+				? ALLOW_ALL_ONCE
+				: ALLOW_ALL_REMEMBER;
+	const index = options.indexOf(label);
+	if (index >= 0) return index;
+	const fallback = recommendation.action === "allow" ? ALLOW_ALL_ONCE : DENY_ALL;
+	const fallbackIndex = options.indexOf(fallback);
+	return fallbackIndex >= 0 ? fallbackIndex : undefined;
+}
+
+/** The option-list index of the first candidate with `scope` (Custom… rows count). */
+function candidateOptionIndex(candidates: CandidateRule[], scope: RecommendationScope): number | undefined {
+	let optionIndex = 0;
+	for (const candidateItem of candidates) {
+		if (candidateItem.scope === scope) return optionIndex;
+		optionIndex += 1;
+		if (candidateItem.scope === "pattern") optionIndex += 1; // Custom… follows a pattern
+	}
+	return undefined;
 }
 
 /** Dialog presentation options for {@link chooseLabel}. */
 interface ChooseLabelDialogOpts {
 	/** Row to preselect; omitted = no selection. */
 	initialIndex?: number;
+	/** Resolves to the row to preselect once the model's recommendation lands. */
+	preselect?: Promise<number | undefined>;
 	/** Help line shown at the bottom of the dialog. */
 	helpText?: string;
 }
@@ -538,6 +601,7 @@ async function chooseLabel(
 			options: options.map(label => ({ label })),
 			...(suggestions !== undefined ? { suggestions } : {}),
 			...(dialogOpts?.initialIndex !== undefined ? { initialIndex: dialogOpts.initialIndex } : {}),
+			...(dialogOpts?.preselect !== undefined ? { preselect: dialogOpts.preselect } : {}),
 			...(dialogOpts?.helpText !== undefined ? { helpText: dialogOpts.helpText } : {}),
 		};
 		const index = await ui.showPermissionDialog(request);
@@ -558,11 +622,17 @@ const CUSTOM_LABEL = "Custom…";
 /** The scope dialog's back-to-decision-page signal (esc / cancel). */
 const SCOPE_BACK = "back" as const;
 
-/** Level-2 scope choice: pick a candidate (with its YAML preview), edit via Custom…, or go back. */
+/**
+ * Level-2 scope choice: pick a candidate (with its YAML preview), edit via
+ * Custom…, or go back. `recommendedScope` resolves to the model's recommended
+ * scope for this call, preselected when it lands; without a recommendation
+ * the Pattern candidate stays preselected (the one that will fire again).
+ */
 async function chooseCandidate(
 	ui: ExtensionUIContext,
 	title: string,
 	candidates: CandidateRule[],
+	recommendedScope?: Promise<RecommendationScope | undefined>,
 ): Promise<CandidateRule | typeof SCOPE_BACK | undefined> {
 	if (candidates.length === 0) return SCOPE_BACK;
 	if (ui.showPermissionDialog) {
@@ -583,6 +653,13 @@ async function chooseCandidate(
 				candidates.findIndex(candidateItem => candidateItem.scope === "pattern"),
 			),
 			helpText: "j/k navigate  enter select  esc back",
+			...(recommendedScope !== undefined
+				? {
+						preselect: recommendedScope.then(scope =>
+							scope === undefined ? undefined : candidateOptionIndex(candidates, scope),
+						),
+					}
+				: {}),
 		};
 		const index = await ui.showPermissionDialog(request);
 		if (index === undefined || index === -1) return SCOPE_BACK; // esc — back to the decision page
@@ -684,13 +761,14 @@ async function promptUnit(
 
 	const candidates = buildCandidates(toolName, unitArgs, pieces);
 	// The forced-prompt branch above already returned, so only candidate
-	// dialogs reach here; the provider fires once per pending unit.
-	const suggestionsPromise =
+	// dialogs reach here; the provider fires once per pending unit and its
+	// recommendation drives the dialog preselection.
+	const suggestionFlow =
 		opts.suggestionsProvider !== undefined
 			? opts
 					.suggestionsProvider(unitPieceText(toolName, unitArgs))
 					.then(resolveSuggestions)
-					.catch(() => ({ options: [], byLabel: new Map<string, Suggestion>() }))
+					.catch(() => EMPTY_SUGGESTIONS)
 			: undefined;
 	// Shell-control bash commands cannot be suppressed by a remembered rule,
 	// and tools whose candidates are exact-only (one-shot code tools like
@@ -709,16 +787,21 @@ async function promptUnit(
 	}
 	const baseOptions = rememberUseless ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER];
 	const options = backLabel !== undefined ? [...baseOptions, backLabel] : baseOptions;
-	// The decision page preselects "Allow once": the least-commitment action
-	// is the recommended default (auto-mode-with-confirmation).
+	// The model's recommendation preselects the decision-page option when it
+	// lands; until then the dialog shows no selection (auto-mode-with-
+	// confirmation — the model decides, the user confirms).
+	const recommendedScope = suggestionFlow?.then(resolved => resolved.result.recommendation?.scope);
+	const preselect = suggestionFlow?.then(resolved =>
+		decisionRecommendationIndex(resolved.result.recommendation, options),
+	);
 	while (true) {
 		const chosen = await chooseLabel(
 			ui,
 			dialogTitle(ui, title, metaLines),
 			options,
 			lines,
-			suggestionsPromise?.then(result => result.options),
-			{ initialIndex: 0 },
+			suggestionFlow?.then(result => result.options),
+			{ ...(preselect !== undefined ? { preselect } : {}) },
 		);
 		switch (chosen) {
 			case ALLOW_ONCE:
@@ -731,6 +814,7 @@ async function promptUnit(
 					ui,
 					`Remember an allow rule for ${toolName}`,
 					candidates.filter(candidateItem => candidateItem.rule.action === "allow"),
+					recommendedScope,
 				);
 				// Esc on the scope page returns to the decision page; a
 				// cancelled Custom… glob edit does the same.
@@ -743,6 +827,7 @@ async function promptUnit(
 					ui,
 					`Remember a deny rule for ${toolName}`,
 					candidates.filter(candidateItem => candidateItem.rule.action === "deny"),
+					recommendedScope,
 				);
 				if (rule === SCOPE_BACK || rule === undefined) continue;
 				await writeRememberedRule(rule.rule, ctx);
@@ -754,8 +839,8 @@ async function promptUnit(
 				// A suggestion option picked from the dialog: remember its rule
 				// and resolve with its action. Unknown labels (incl. esc) still
 				// fail closed.
-				if (chosen !== undefined && suggestionsPromise !== undefined) {
-					const picked = (await suggestionsPromise).byLabel.get(chosen);
+				if (chosen !== undefined && suggestionFlow !== undefined) {
+					const picked = (await suggestionFlow).byLabel.get(chosen);
 					if (picked !== undefined) {
 						await writeRememberedRule(picked.rule, ctx);
 						return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
@@ -944,28 +1029,31 @@ export async function promptForDecision(
 	const title = opts.title ?? defaultTitle(toolName);
 	const metaLines = dialogMetadataLines(toolName, opts);
 	const lines = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
-	const suggestionsPromise =
+	const suggestionFlow =
 		opts.suggestionsProvider !== undefined
 			? opts
 					.suggestionsProvider(unitPieceText(toolName, args))
 					.then(resolveSuggestions)
-					.catch(() => ({ options: [], byLabel: new Map<string, Suggestion>() }))
+					.catch(() => EMPTY_SUGGESTIONS)
 			: undefined;
 	const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));
 	const baseOptions = rememberDisabled
 		? [ALLOW_ALL_ONCE, DENY_ALL]
 		: [ALLOW_ALL_ONCE, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
-	// "Allow all pending once" is preselected: the least-commitment action is
-	// the recommended default (auto-mode-with-confirmation). Esc on the
-	// remember checklist returns here (auto-mode-with-confirmation back nav).
+	// The model's recommendation preselects the compound option when it
+	// lands; until then no selection. Esc on the remember checklist returns
+	// here.
+	const preselect = suggestionFlow?.then(resolved =>
+		compoundRecommendationIndex(resolved.result.recommendation, baseOptions),
+	);
 	while (true) {
 		const chosen = await chooseLabel(
 			ui,
 			dialogTitle(ui, title, metaLines),
 			baseOptions,
 			lines,
-			suggestionsPromise?.then(result => result.options),
-			{ initialIndex: 0 },
+			suggestionFlow?.then(result => result.options),
+			{ ...(preselect !== undefined ? { preselect } : {}) },
 		);
 		switch (chosen) {
 			case ALLOW_ALL_ONCE:
@@ -981,8 +1069,8 @@ export async function promptForDecision(
 				return drillDownPieces(ui, pendingPieces, decision, ctx, opts);
 			default:
 				// Suggestion option picked from the dialog (appended options).
-				if (chosen !== undefined && suggestionsPromise !== undefined) {
-					const picked = (await suggestionsPromise).byLabel.get(chosen);
+				if (chosen !== undefined && suggestionFlow !== undefined) {
+					const picked = (await suggestionFlow).byLabel.get(chosen);
 					if (picked !== undefined) {
 						await writeRememberedRule(picked.rule, ctx);
 						return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
