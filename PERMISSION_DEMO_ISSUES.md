@@ -153,24 +153,30 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   never-firing rule options. Also eliminates the most plausible remaining
   cause of bug 7 (glob too narrow for the actual path).
 
-## 10. Are LLM rule suggestions real, and why are they never better?
+## 10. Are LLM rule suggestions real, and why are they never better? — FIXED
 
 - The pipeline exists: one-shot completion on the session model per pending
   call (`tools/permissions/suggest.ts`, gate `permissions.llmSuggestions`
-  default true), appended to the dialog behind a spinner; every failure
-  degrades silently to no suggestions. But the system prompt
-  (`suggest.prompt.md`) is thin — "Pending call: …", "Cwd: …", current
-  rules, "glob with *" — it never explains engine glob semantics (`*`
-  crosses `/`, no `~` expansion, whitespace normalization) or shows the
-  deterministic candidate shapes, so the model emits generic single-`*`
-  patterns ("worktree/*") that look no better than the mechanical
-  candidates. Nothing validates that a suggestion matches the pending call.
-- **Expected:** richer prompt (candidate shapes, glob semantics, exact call
-  text) + drop suggestions that don't match the pending call. Related to
-  bug 1 (model should also recommend the action, preselected).
-- **Decision (2026-08-14):** the fallback suggestion path is not worth
-  keeping on by default — flip `permissions.llmSuggestions` to default
-  **off** (keep the setting for opt-in).
+  default off, opt-in), appended to the dialog behind a spinner; every
+  failure degrades silently to no suggestions. The old system prompt was
+  thin — "Pending call: …", "Cwd: …", current rules, "glob with *" — it
+  never explained engine glob semantics or showed the deterministic
+  candidate shapes, so the model emitted generic single-`*` patterns that
+  looked no better than the mechanical candidates.
+- **Fixed (2026-08-14):** the provider contract now carries the tool name,
+  raw args, and display text (`SuggestionUnit`). The rewritten system
+  prompt spells out the engine's glob semantics (`*` crosses `/`; the
+  space before `*` is literal, so "git log *" is the family form; a
+  leading `~` in path patterns expands; case-sensitive, whitespace
+  literal), the match keys per tool (command/path/arg keys), the dialog's
+  scope rules (no tool-wide bash), and the at-most-3/must-match/preselect
+  rules. The user message adds Tool, Arguments, and the mechanical
+  candidates (exact + first-token glob for bash, exact + parent glob for
+  file tools) so the model aims above them. Suggestions that cannot match
+  the pending call are dropped (bug-9 fix) and a tool-wide bash *allow*
+  suggestion is refused outright — the yolo knob is hand-edited only.
+- Related to bug 1 (model should also recommend the action, preselected) —
+  that part ships independently of the opt-in rules gate.
 
 ## 11. Redirects/pipes flagged "unanalyzable" too aggressively
 

@@ -812,7 +812,7 @@ async function promptUnit(
 	const suggestionFlow =
 		opts.suggestionsProvider !== undefined
 			? opts
-					.suggestionsProvider(unitPieceText(toolName, unitArgs))
+					.suggestionsProvider({ tool: toolName, args: unitArgs, text: unitPieceText(toolName, unitArgs) })
 					.then(resolved => resolveSuggestions(resolved, toolName, unitArgs, pieces))
 					.catch(() => EMPTY_SUGGESTIONS)
 			: undefined;
@@ -1105,7 +1105,7 @@ export async function promptForDecision(
 	const suggestionFlow =
 		opts.suggestionsProvider !== undefined
 			? opts
-					.suggestionsProvider(unitPieceText(toolName, args))
+					.suggestionsProvider({ tool: toolName, args, text: unitPieceText(toolName, args) })
 					.then(resolved => resolveSuggestions(resolved, toolName, args, pendingPieces))
 					.catch(() => EMPTY_SUGGESTIONS)
 			: undefined;

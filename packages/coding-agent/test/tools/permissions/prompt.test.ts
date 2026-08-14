@@ -23,7 +23,7 @@ import {
 	sessionRuleKey,
 	sessionRules,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/session-rules";
-import type { Suggestion, SuggestResult } from "@oh-my-pi/pi-coding-agent/tools/permissions/suggest";
+import type { Suggestion, SuggestionUnit, SuggestResult } from "@oh-my-pi/pi-coding-agent/tools/permissions/suggest";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 
@@ -720,7 +720,6 @@ describe("promptForDecision", () => {
 	it("Custom… edits the glob via ui.input and writes the edited pattern", async () => {
 		const home = tempHome();
 		let placeholder = "";
-		let dialogCalls = 0;
 		const notifications: string[] = [];
 		const ui = {
 			...noopUi(),
@@ -728,7 +727,6 @@ describe("promptForDecision", () => {
 				notifications.push(`${type}: ${message}`);
 			},
 			showPermissionDialog: async () => {
-				dialogCalls += 1;
 				return 2; // Allow & remember… → Custom…
 			},
 			input: async (_title: string, current?: string) => {
@@ -752,7 +750,6 @@ describe("promptForDecision", () => {
 
 	it("Custom… rejects a pattern that cannot match the pending call until it is fixed", async () => {
 		const home = tempHome();
-		let dialogCalls = 0;
 		let inputCalls = 0;
 		const notifications: string[] = [];
 		const ui = {
@@ -761,7 +758,6 @@ describe("promptForDecision", () => {
 				notifications.push(`${type}: ${message}`);
 			},
 			showPermissionDialog: async () => {
-				dialogCalls += 1;
 				return 2; // Allow & remember… → Custom…
 			},
 			input: async () => {
@@ -991,15 +987,15 @@ describe("promptForDecision with a suggestionsProvider", () => {
 	it("fires the provider once with the whole call text for compound commands", async () => {
 		const captured: { request?: PermissionDialogRequest } = {};
 		const ui = capturingDialogUi(captured, 0); // "Allow all pending once"
-		const firedPieces: string[] = [];
+		const firedUnits: SuggestionUnit[] = [];
 		// `echo a` covers the first pending piece (not the whole compound
 		// string), so the filter keeps it.
 		const suggestion: Suggestion = {
 			rule: { id: "s-piece", tool: "bash", match: { command: "echo a" }, action: "allow", reason: "x" },
 			rationale: "x",
 		};
-		const provider = async (piece: string): Promise<SuggestResult> => {
-			firedPieces.push(piece);
+		const provider = async (unit: SuggestionUnit): Promise<SuggestResult> => {
+			firedUnits.push(unit);
 			return { suggestions: [suggestion] };
 		};
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
@@ -1007,7 +1003,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			suggestionsProvider: provider,
 		});
 		expect(res.policy).toBe("allow");
-		expect(firedPieces).toEqual(["echo a && echo b"]);
+		expect(firedUnits).toEqual([{ tool: "bash", args: { command: "echo a && echo b" }, text: "echo a && echo b" }]);
 		expect(captured.request?.suggestions).toBeDefined();
 		const options = await captured.request!.suggestions!;
 		expect(options).toHaveLength(1);

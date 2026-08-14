@@ -38,7 +38,17 @@ export interface SuggestResult {
 	recommendation?: Recommendation;
 }
 
-export type SuggestionProvider = (piece: string) => Promise<SuggestResult>;
+/** One prompt unit handed to the provider: the tool, its raw args, and display text. */
+export interface SuggestionUnit {
+	/** Tool name, e.g. "bash", "read", "write". */
+	tool: string;
+	/** The tool call arguments (the raw record, unnormalized). */
+	args: unknown;
+	/** Display text: the command for bash, else `tool <json-args>`. */
+	text: string;
+}
+
+export type SuggestionProvider = (unit: SuggestionUnit) => Promise<SuggestResult>;
 
 /** Side requests are bounded: 8s hard timeout, low token budget, at most 3 rules. */
 const SUGGEST_TIMEOUT_MS = 8000;
@@ -71,7 +81,7 @@ const EMPTY_RESULT: SuggestResult = { suggestions: [] };
  * only), leaving the dialog without a preselection.
  */
 export async function suggestRules(
-	piece: string,
+	unit: SuggestionUnit,
 	ctx: EngineContext,
 	registry: ModelRegistry,
 	sessionId?: string,
@@ -80,7 +90,7 @@ export async function suggestRules(
 	try {
 		const model = resolveSuggestionModel(registry);
 		if (!model) return EMPTY_RESULT;
-		return await suggestWithModel(piece, model, ctx, registry, sessionId, signal);
+		return await suggestWithModel(unit, model, ctx, registry, sessionId, signal);
 	} catch (error) {
 		logger.debug("permission-suggest: suggestion request failed", {
 			reason: "unexpected-failure",
@@ -105,11 +115,11 @@ export function createSuggestionProvider(
 ): SuggestionProvider {
 	const resolvedModel = model ?? resolveSuggestionModel(registry);
 	if (!resolvedModel) return () => Promise.resolve(EMPTY_RESULT);
-	return piece => suggestWithModel(piece, resolvedModel, ctx, registry, sessionId, signal);
+	return unit => suggestWithModel(unit, resolvedModel, ctx, registry, sessionId, signal);
 }
 
 async function suggestWithModel(
-	piece: string,
+	unit: SuggestionUnit,
 	model: Model<Api>,
 	ctx: EngineContext,
 	registry: ModelRegistry,
@@ -131,7 +141,7 @@ async function suggestWithModel(
 			model,
 			{
 				systemPrompt: [suggestionSystemPrompt],
-				messages: [{ role: "user", content: buildSuggestionPrompt(piece, ctx), timestamp: Date.now() }],
+				messages: [{ role: "user", content: buildSuggestionPrompt(unit, ctx), timestamp: Date.now() }],
 			},
 			{
 				apiKey: registry.resolver(model, sessionId),
@@ -152,19 +162,49 @@ async function suggestWithModel(
 	}
 }
 
-/** The user message: the pending call, the cwd, and a summary of current rules. */
-function buildSuggestionPrompt(piece: string, ctx: EngineContext): string {
+/**
+ * The user message: the pending call (tool + args), the cwd, a summary of
+ * current rules, and the mechanical candidates the dialog would offer on its
+ * own — so the model aims above them instead of duplicating them.
+ */
+function buildSuggestionPrompt(unit: SuggestionUnit, ctx: EngineContext): string {
 	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
-	const lines = [`Pending call: ${piece}`, `Cwd: ${ctx.cwd}`];
+	const lines = [
+		`Pending call: ${unit.text}`,
+		`Tool: ${unit.tool}`,
+		`Arguments: ${JSON.stringify(unit.args)}`,
+		`Cwd: ${ctx.cwd}`,
+	];
 	if (rules.length > 0) {
 		lines.push("Current rules:");
 		for (const rule of rules) {
 			lines.push(`- ${rule.tool} ${JSON.stringify(rule.match)} -> ${rule.action}`);
 		}
 	}
+	const candidates = mechanicalCandidates(unit);
+	if (candidates.length > 0) {
+		lines.push("Mechanical candidates (already offered — do not duplicate them):");
+		for (const candidate of candidates) lines.push(`- ${candidate}`);
+	}
 	// Rule suggestions are gated; the recommendation always runs.
 	if (!suggestionsEnabled(ctx)) lines.push("Do not include a rules array in your response.");
 	return lines.join("\n");
+}
+
+/** The deterministic candidate shapes the dialog offers without the model. */
+function mechanicalCandidates(unit: SuggestionUnit): string[] {
+	if (unit.tool === "bash") {
+		const command = isRecord(unit.args) && typeof unit.args.command === "string" ? unit.args.command : unit.text;
+		const firstToken = command.trim().split(/\s+/u)[0];
+		return firstToken !== undefined ? [`Exact: ${command}`, `Pattern: ${firstToken} *`] : [`Exact: ${command}`];
+	}
+	if (isRecord(unit.args) && typeof unit.args.path === "string") {
+		const fileArg = unit.args.path;
+		const parent = fileArg.includes("/") ? fileArg.slice(0, fileArg.lastIndexOf("/")) : ".";
+		const glob = parent === "." ? "./**" : `${parent}/**`;
+		return [`Exact: ${fileArg}`, `Pattern: ${glob}`];
+	}
+	return [`Exact: ${JSON.stringify(unit.args)}`];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -218,6 +258,11 @@ function parseSuggestResponse(content: AssistantMessage["content"], includeRules
 		// Read-only tools are curated-allowlisted; a deny suggestion for one can
 		// never take effect and only confuses the user.
 		if (rule.action === "deny" && (CURATED_ALLOW_TOOLS as readonly string[]).includes(rule.tool)) continue;
+		// bash has no tool-wide scope in the dialog (the yolo knob is
+		// hand-edited only): a tool-wide allow suggestion would append an
+		// option that silently allows every future command. Denies of the
+		// same shape stay — they are a legitimate defensive policy.
+		if (rule.action === "allow" && rule.tool === "bash" && rule.match.command === "*") continue;
 		result.suggestions.push({ rule: withoutLayer(rule), rationale: rule.reason ?? "" });
 	}
 	return result;
