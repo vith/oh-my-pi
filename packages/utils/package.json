@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-utils",
-  "version": "17.3.1+vith-fork.136.4b7d383011",
+  "version": "17.3.1+vith-fork.142.d1177a301b",
   "description": "Shared utilities for pi packages",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
