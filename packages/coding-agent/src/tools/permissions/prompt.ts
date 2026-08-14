@@ -182,10 +182,37 @@ function toolWideAllowed(toolName: string): boolean {
 	return (CURATED_ALLOW_TOOLS as readonly string[]).includes(toolName);
 }
 
-/** bash: exact command, first-token pattern (`git *`), tool-wide only for read-only tools (never bash). */
+/**
+ * Commands whose first token dispatches to subcommands: a bare first-token
+ * pattern (`git *`) would also cover destructive variants like git push, rm,
+ * reset, or clean, so their remember pattern takes the subcommand verb too
+ * (`git log *`). Everything else keeps the bare first-token pattern
+ * (`echo *`).
+ */
+const SUBCOMMAND_COMMANDS: ReadonlySet<string> = new Set([
+	"git", "npm", "bun", "cargo", "docker", "gh", "pnpm", "yarn", "brew", "apt",
+	"apt-get", "pacman", "dnf", "make", "cmake", "kubectl", "helm", "terraform",
+	"go", "rustup", "pip", "pip3", "uv",
+]);
+
+/**
+ * First-token remember pattern (spec §5.1): `git log *` when the first token
+ * dispatches subcommands (and a subcommand is present), `git *` for a bare
+ * subcommand-verb invocation, `echo *` otherwise.
+ */
+function firstTokenPattern(command: string): string {
+	const tokens = command.trim().split(/\s+/u);
+	const first = tokens[0] ?? "";
+	const second = tokens[1];
+	if (second !== undefined && SUBCOMMAND_COMMANDS.has(first)) {
+		return `${first} ${second} *`;
+	}
+	return `${first} *`;
+}
+
+/** bash: exact command, first-token pattern (`git log *`), tool-wide only for read-only tools (never bash). */
 function bashCandidates(toolName: string, command: string, action: RuleAction): CandidateRule[] {
-	const firstToken = command.trim().split(/\s+/u)[0] ?? "";
-	const pattern = `${firstToken} *`;
+	const pattern = firstTokenPattern(command);
 	const deny = action === "deny";
 	const candidates: CandidateRule[] = [
 		candidate(toolName, action, "exact", { command }, `${deny ? "Deny exact" : "Exact"}: ${command}`),
@@ -613,8 +640,7 @@ export async function rememberCompound(
 	ctx: EngineContext,
 ): Promise<Omit<PermissionRule, "layer"> | undefined> {
 	const toRule = (piece: PieceEvaluation): CandidateRule => {
-		const firstToken = piece.text.trim().split(/\s+/u)[0] ?? "";
-		const pattern = `${firstToken} *`;
+		const pattern = firstTokenPattern(piece.text);
 		return candidate("bash", action, "pattern", { command: pattern }, `${pattern}`);
 	};
 	const buildOptions = (pieces: PieceEvaluation[]): PermissionDialogOption[] => {

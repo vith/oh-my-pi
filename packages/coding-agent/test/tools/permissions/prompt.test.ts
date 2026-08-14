@@ -122,7 +122,7 @@ describe("buildCandidates", () => {
 		const c = buildCandidates("bash", { command: "git status -s" });
 		const labels = c.map(x => x.label);
 		expect(labels).toContain("Exact: git status -s");
-		expect(labels).toContain("Pattern: git *");
+		expect(labels).toContain("Pattern: git status *");
 		expect(labels).not.toContain("Tool: bash always");
 		expect(c.some(x => x.rule.match.arg === "*")).toBe(false);
 	});
@@ -145,12 +145,12 @@ describe("buildCandidates", () => {
 		// Control: the same scopes stay for a shell-control-free command.
 		const control = buildCandidates("bash", { command: "git status -s" });
 		expect(control.some(candidate => candidate.rule.match.command === "git status -s")).toBe(true);
-		expect(control.some(candidate => candidate.rule.match.command === "git *")).toBe(true);
+		expect(control.some(candidate => candidate.rule.match.command === "git status *")).toBe(true);
 		expect(control.some(candidate => candidate.rule.match.arg === "*")).toBe(false); // no tool-wide for bash
 		// A pipeline is analyzable: its candidates come back too.
 		const piped = buildCandidates("bash", { command: "git log | head -5" });
 		expect(piped.some(candidate => candidate.rule.match.command === "git log | head -5")).toBe(true);
-		expect(piped.some(candidate => candidate.rule.match.command === "git *")).toBe(true);
+		expect(piped.some(candidate => candidate.rule.match.command === "git log *")).toBe(true);
 	});
 
 	it("file tools: exact path and parent glob, no tool-wide for write tools", () => {
@@ -181,7 +181,7 @@ describe("buildCandidates", () => {
 		const denies = c.filter(x => x.rule.action === "deny");
 		expect(denies.length).toBeGreaterThan(0);
 		expect(denies.some(x => x.rule.match.command === "git push")).toBe(true);
-		expect(denies.some(x => x.rule.match.command === "git *")).toBe(true);
+		expect(denies.some(x => x.rule.match.command === "git push *")).toBe(true);
 		expect(denies.some(x => x.rule.match.arg === "*")).toBe(false); // no tool-wide deny for bash
 	});
 
@@ -200,10 +200,26 @@ describe("buildCandidates", () => {
 		const singleToken = buildCandidates("write", { path: "./**" });
 		expect(new Set(singleToken.map(x => x.rule.id)).size).toBe(singleToken.length);
 	});
+
+	it("subcommand-verb commands pattern on the subcommand, not the bare first token", () => {
+		// A bare `git *` would cover git push/rm/reset/clean; the remember
+		// pattern must take the subcommand verb (`git push *`).
+		const c = buildCandidates("bash", { command: "git push origin main" });
+		expect(c.some(candidate => candidate.rule.match.command === "git push *")).toBe(true);
+		expect(c.some(candidate => candidate.rule.match.command === "git *")).toBe(false);
+	});
+
+	it("non-subcommand first tokens keep the bare first-token pattern", () => {
+		const c = buildCandidates("bash", { command: "echo hello world" });
+		expect(c.some(candidate => candidate.rule.match.command === "echo *")).toBe(true);
+		// A bare single token (no subcommand available) still patterns on it.
+		const bare = buildCandidates("bash", { command: "git" });
+		expect(bare.some(candidate => candidate.rule.match.command === "git *")).toBe(true);
+	});
 });
 
 describe("rememberCompound", () => {
-	// Distinct first tokens so the two globs differ (git → "git *", echo → "echo *").
+	// Distinct first tokens so the two globs differ (git log → "git log *", echo → "echo *").
 	const twoPieces = [pendingPiece("git log -n 5"), pendingPiece("echo hi")];
 
 	function dialogUi(
@@ -237,7 +253,7 @@ describe("rememberCompound", () => {
 			expect(request.previewFor).toBeDefined();
 			expect(request.options).toHaveLength(3);
 			expect(request.options[0]).toEqual({
-				label: "git *",
+				label: "git log *",
 				description: "git log -n 5",
 				checked: true,
 				toggleable: true,
@@ -254,16 +270,16 @@ describe("rememberCompound", () => {
 			expect(write?.labelFor?.([true, false, false])).toBe("Write checked allow rules (1)");
 			// preview renders the YAML of the checked rows only
 			const preview = request.previewFor?.([true, false, false]);
-			expect(preview).toContain("git *");
+			expect(preview).toContain("git log *");
 			expect(preview).not.toContain("echo *");
 			return 2; // the write button
 		});
 		const remembered = await rememberCompound(ui, twoPieces, "allow", ctx);
 		expect(remembered).toBeDefined();
-		expect(remembered?.match).toEqual({ command: "git *" }); // first written rule
+		expect(remembered?.match).toEqual({ command: "git log *" }); // first written rule
 		expect(requests).toHaveLength(1);
 		const commands = (await writtenCommands(ctx)).map(match => match.command).sort();
-		expect(commands).toEqual(["echo *", "git *"]);
+		expect(commands).toEqual(["echo *", "git log *"]);
 	});
 
 	it("skips unchecked rows read back from the dialog (component write-back)", async () => {
@@ -321,6 +337,40 @@ describe("rememberCompound", () => {
 		const remembered = await rememberCompound(ui, twoPieces, "allow", ctx);
 		expect(remembered).toBeUndefined();
 		expect(await writtenCommands(ctx)).toEqual([]);
+	});
+
+	it("subcommand-verb pieces pattern on the subcommand (git push → git push *)", async () => {
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		const requests: PermissionDialogRequest[] = [];
+		const ui = dialogUi(requests, request => {
+			expect(request.options[0]?.label).toBe("git push *");
+			expect(request.options[0]?.description).toBe("git push origin main");
+			return 1; // the write button
+		});
+		const remembered = await rememberCompound(ui, [pendingPiece("git push origin main")], "allow", ctx);
+		expect(remembered?.match).toEqual({ command: "git push *" });
+	});
+
+	it("two pieces of the same subcommand verb write distinct per-subcommand rules", async () => {
+		// `git log *` and `git status *` are different rules; both are written
+		// (no id collision, no dedupe that would drop one).
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		const ui = dialogUi([], () => 2); // the write button
+		const remembered = await rememberCompound(
+			ui,
+			[pendingPiece("git log -n 5"), pendingPiece("git status -s")],
+			"allow",
+			ctx,
+		);
+		expect(remembered).toBeDefined();
+		const commands = (await writtenCommands(ctx)).map(match => match.command).sort();
+		expect(commands).toEqual(["git log *", "git status *"]);
+		const file = ruleFiles(ctx.cwd, ctx.home).dynamic;
+		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+		const ids = doc.rules.map(rule => rule.id as string);
+		expect(new Set(ids).size).toBe(2);
 	});
 });
 
@@ -586,13 +636,16 @@ describe("promptForDecision", () => {
 		const { ui } = queuedDialogUi([1, 1], requests); // Allow all & remember… → write option
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("allow");
-		expect(res.remembered?.match).toEqual({ command: "git *" });
+		expect(res.remembered?.match).toEqual({ command: "git log *" });
 		expect(requests[0]?.options.map(option => option.label)).toEqual([...COMPOUND_ACTIONS]);
 		expect(requests[1]?.checklist).toBe(true);
-		expect(requests[1]?.options.map(option => option.label)).toEqual(["git *", "Write checked allow rules (1)"]);
+		expect(requests[1]?.options.map(option => option.label)).toEqual([
+			"git log *",
+			"Write checked allow rules (1)",
+		]);
 		const file = ruleFiles(ctx.cwd, ctx.home).dynamic;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
-		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toContain("git *");
+		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toContain("git log *");
 	});
 
 	it("single-piece scope: Pattern is preselected, Custom… is offered, bash has no Tool always", async () => {
@@ -602,16 +655,16 @@ describe("promptForDecision", () => {
 		const decision = fakeDecision({ pieces: [pendingPiece("git branch -a")] });
 		const res = await promptForDecision(ui, "bash", { command: "git branch -a" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("allow");
-		expect(res.remembered?.match).toEqual({ command: "git *" }); // first-token glob
+		expect(res.remembered?.match).toEqual({ command: "git branch *" }); // first-token glob
 		expect(requests).toHaveLength(2);
 		const scope = requests[1]!;
 		expect(scope.initialIndex).toBe(1); // Pattern preselected
 		const labels = scope.options.map(option => option.label);
-		expect(labels).toEqual(["Exact: git branch -a", "Pattern: git *", "Custom…"]);
+		expect(labels).toEqual(["Exact: git branch -a", "Pattern: git branch *", "Custom…"]);
 		expect(labels).not.toContain("Tool: bash always");
 		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
-		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["git *"]);
+		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["git branch *"]);
 	});
 
 	it("Custom… edits the glob via ui.input and writes the edited pattern", async () => {
@@ -635,7 +688,7 @@ describe("promptForDecision", () => {
 		expect(res.remembered?.match).toEqual({ command: "git branch -a *" });
 		// the placeholder is the recommended first-token glob (spec §5.1:
 		// "narrower or wider than the first-token pattern")
-		expect(placeholder).toBe("git *");
+		expect(placeholder).toBe("git branch *");
 		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["git branch -a *"]);
