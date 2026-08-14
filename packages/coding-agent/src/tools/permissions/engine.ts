@@ -8,7 +8,15 @@ import { bashApprovalPatternToRegExp, normalizeBashApprovalPattern } from "../ba
 import { CURATED_ALLOW_TOOLS, isSafeConsumerStage, matchCuratedDeny } from "./curated";
 import { findNearestProjectRoot, loadRuleLayers, type PermissionRule, type RuleLayer } from "./rules";
 import { sessionRuleKey, sessionRules } from "./session-rules";
-import { extractSubCommands, isPipeline, isSinglePiece, parseCommand, type ShellPiece } from "./split";
+import {
+	extractSubCommands,
+	isPipeline,
+	isSinglePiece,
+	parseCommand,
+	type ShellPiece,
+	scanRedirectWrites,
+	stripFileWriteRedirects,
+} from "./split";
 
 export type PermissionPolicy = "allow" | "deny" | "prompt";
 export type Posture = "allow" | "prompt" | "deny";
@@ -509,6 +517,59 @@ function bashAllowDegradedByShellControl(toolName: string, command: string | und
 	return toolName === "bash" && command !== undefined && hasBashApprovalShellControl(command);
 }
 
+/** Resolve a redirect target to an absolute path (home- and cwd-relative). */
+function resolveRedirectTarget(target: string, ctx: EngineContext): string {
+	const home = ctx.home ?? os.homedir();
+	const expanded = target === "~" ? home : target.startsWith("~/") ? path.join(home, target.slice(2)) : target;
+	return path.isAbsolute(expanded) ? path.normalize(expanded) : path.resolve(ctx.cwd, expanded);
+}
+
+/**
+ * The posture that sanctions a redirect write target, mirroring the write
+ * tools' {@link resolveEffectivePosture}: project-internal targets use
+ * `permissions.projectWrites`, everything else the general posture.
+ * `/dev/null` is a discard device, not a real write, and is always allowed.
+ */
+function redirectWritePosture(ctx: EngineContext, target: string): Posture {
+	if (target === "/dev/null") return "allow";
+	if (isInsideProjectDir(resolveRedirectTarget(target, ctx), ctx.cwd)) {
+		return resolveProjectWritesPosture(ctx.settings);
+	}
+	return resolvePosture(ctx.settings);
+}
+
+/**
+ * Aggregate the redirect write postures for a command (targets from the Rust
+ * brush parser, not a text scan): any denied target denies; an unattributable
+ * or unsanctioned write prompts; otherwise (every target sanctioned —
+ * including the empty set of pure fd duplication) the redirects are allowed.
+ * `undefined` when the command carries no file-writing redirect or does not
+ * parse (fail-closed — the caller's conservative decision stands).
+ */
+function redirectWritePostureFor(command: string, ctx: EngineContext): "allow" | "prompt" | "deny" | undefined {
+	const scan = scanRedirectWrites(command);
+	if (scan === null || !scan.present) return undefined;
+	if (scan.unattributable) return "prompt";
+	let sawPrompt = false;
+	for (const target of scan.targets) {
+		const posture = redirectWritePosture(ctx, target);
+		if (posture === "deny") return "deny";
+		if (posture !== "allow") sawPrompt = true;
+	}
+	return sawPrompt ? "prompt" : "allow";
+}
+
+/** Name the first denied redirect target in a reason string. */
+function redirectDenyReason(command: string, ctx: EngineContext): string {
+	const scan = scanRedirectWrites(command);
+	for (const target of scan?.targets ?? []) {
+		if (redirectWritePosture(ctx, target) === "deny") {
+			return `redirect write to "${target}" denied by policy`;
+		}
+	}
+	return "redirect write denied by policy";
+}
+
 /**
  * Rule matching per the Global Constraints: the tool must match (or the rule is
  * `*`), every `match` entry must hold (AND), and a single-entry match whose
@@ -541,7 +602,10 @@ export function matchRule(rule: PermissionRule, toolName: string, args: unknown)
  * 5. tool-declared `prompt` / `override: true`
  * 6. legacy user-policy prompt
  * 7. legacy user-policy allow
- * 8. curated read-only allowlist, then default posture
+ * 8. curated read-only allowlist, then the redirect write gate (bash
+ *    `>`-redirection targets must be sanctioned by posture — projectWrites
+ *    inside the project, the general posture elsewhere; a denied target
+ *    denies, an unsanctioned one prompts), then default posture
  */
 function evaluatePermissionCore(
 	tool: { name: string; approval?: unknown; formatApprovalDetails?: unknown },
@@ -603,6 +667,41 @@ function evaluatePermissionCore(
 	const best = resolveWholeCommandRule(pool, tool.name, args);
 	if (best !== undefined) {
 		const degraded = best.rule.action === "allow" && bashAllowDegradedByShellControl(tool.name, command);
+		if (degraded && command !== undefined) {
+			// R1 refinement: a command whose only shell control is redirection
+			// is not unanalyzable — the redirects are writes to their targets.
+			// When the stripped base command is still rule-covered and every
+			// redirect target's write is sanctioned by posture, the allow
+			// stands; a denied target denies the call. Any other shell control
+			// (`-c`/`-e`/`$(…)`, …) keeps the degradation.
+			const base = stripFileWriteRedirects(command);
+			if (base !== command && !bashAllowDegradedByShellControl(tool.name, base)) {
+				const writePosture = redirectWritePostureFor(command, ctx);
+				if (writePosture === "deny") {
+					return {
+						policy: "deny",
+						tier: decision.tier,
+						reason: redirectDenyReason(command, ctx),
+						source: "posture",
+						override: false,
+					};
+				}
+				if (writePosture === "allow" || writePosture === undefined) {
+					const baseBest = resolveWholeCommandRule(pool, tool.name, { command: base });
+					if (baseBest !== undefined && baseBest.rule.action === "allow") {
+						return {
+							policy: "allow",
+							tier: decision.tier,
+							ruleId: baseBest.rule.id,
+							layer: baseBest.rule.layer,
+							reason: baseBest.rule.reason,
+							source: "rule",
+							override: false,
+						};
+					}
+				}
+			}
+		}
 		return {
 			policy: degraded ? "prompt" : best.rule.action,
 			tier: decision.tier,
@@ -639,6 +738,27 @@ function evaluatePermissionCore(
 
 	if ((CURATED_ALLOW_TOOLS as readonly string[]).includes(tool.name)) {
 		return { policy: "allow", tier: decision.tier, source: "curated", override: false };
+	}
+
+	// Redirect write gate (R1 refinement): a bash redirect is a write to its
+	// target file, and rules cannot analyze where a redirect points — the
+	// write must be sanctioned by posture itself (`permissions.projectWrites`
+	// inside the project, the general posture elsewhere, mirroring the write
+	// tools). A denied target denies the call even under allow-all; an
+	// unsanctioned write prompts. Rule-backed redirect commands were handled
+	// in the degraded branch above; this catches everything else.
+	if (tool.name === "bash" && command !== undefined) {
+		const writePosture = redirectWritePostureFor(command, ctx);
+		if (writePosture !== undefined && writePosture !== "allow") {
+			return {
+				policy: writePosture,
+				tier: decision.tier,
+				reason:
+					writePosture === "deny" ? redirectDenyReason(command, ctx) : "redirect write not sanctioned by posture",
+				source: "posture",
+				override: false,
+			};
+		}
 	}
 
 	return {

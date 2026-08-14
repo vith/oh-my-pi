@@ -330,9 +330,21 @@ describe("sub-command evaluation", () => {
 		expect(denied.policy).toBe("deny");
 	});
 
-	it("redirects and interpreter reinterpreting options still degrade to a prompt", () => {
+	it("redirects check their write target; interpreter options still degrade to a prompt", () => {
+		// A redirect is a write to its target file: when the target is
+		// sanctioned by posture (allow mode), the rule-backed base allow
+		// stands — the redirect is analyzed, not blanket-degraded.
 		const redirect = evaluateBashCommand("echo hi > /tmp/x", allow("echo *"));
-		expect(redirect.policy).toBe("prompt");
+		expect(redirect.policy).toBe("allow");
+		// Under prompt posture the /tmp write is unsanctioned → still prompts.
+		const unsanctioned = evaluateBashCommand(
+			"echo hi > /tmp/x",
+			ctx({ "bash.patterns": [{ match: "echo *", approval: "allow" }] }),
+		);
+		expect(unsanctioned.policy).toBe("prompt");
+		// Interpreter reinterpreting options smuggle code — there is no
+		// redirect write to check, so the R1 degradation stands even under
+		// allow-all.
 		const pwsh = evaluateBashCommand("pwsh -Command 'Remove-Item -Recurse /'", allow("*"));
 		expect(pwsh.policy).toBe("prompt");
 		const cmdExe = evaluateBashCommand("cmd /c del /f /q x", allow("*"));
@@ -919,14 +931,82 @@ describe("whole-command allow rules vs compounds", () => {
 		}
 	});
 
-	it("single-piece shell-control commands still degrade a rule allow (R1)", () => {
-		// `cd /tmp > out` is one piece with a redirect: the rule cannot
-		// vouch for it, so it must keep prompting even under allow posture.
+	it("a project-internal redirect write is sanctioned by projectWrites: allow", () => {
+		// Prompt posture + rule-covered base + project target +
+		// projectWrites: allow → the redirect is analyzed as a write and the
+		// piece is allowed — no shell-control blanket prompt.
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
 		try {
 			writeUserRule(dir, "cd *", "allow");
-			const d = evaluatePermission(tool("bash"), { command: "cd /tmp > out" }, walkCtx(dir, "allow"));
-			expect(d.policy).toBe("prompt");
+			const c = {
+				settings: Settings.isolated({
+					"permissions.default": "prompt",
+					"permissions.projectWrites": "allow",
+				}),
+				cwd: "/tmp/perm-test",
+				home: dir,
+			};
+			const d = evaluatePermission(tool("bash"), { command: "cd /tmp/perm-test > /tmp/perm-test/out.txt" }, c);
+			expect(d.policy).toBe("allow");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a denied project-internal redirect write denies even under allow-all", () => {
+		// projectWrites: deny must beat allow posture for a redirect into the
+		// project — the write is explicit policy, exactly like the write tools.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			const c = {
+				settings: Settings.isolated({
+					"permissions.default": "allow",
+					"permissions.projectWrites": "deny",
+				}),
+				cwd: "/tmp/perm-test",
+				home: dir,
+			};
+			const d = evaluatePermission(tool("bash"), { command: "echo hi > /tmp/perm-test/out.txt" }, c);
+			expect(d.policy).toBe("deny");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("/dev/null redirects are sanctioned writes (no gate prompt)", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			writeUserRule(dir, "echo *", "allow");
+			const d = evaluatePermission(tool("bash"), { command: "echo hi > /dev/null" }, walkCtx(dir, "prompt"));
+			expect(d.policy).toBe("allow");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("fd duplication (2>&1) is not a write and does not gate", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			writeUserRule(dir, "echo *", "allow");
+			const d = evaluatePermission(tool("bash"), { command: "echo hi 2>&1" }, walkCtx(dir, "prompt"));
+			expect(d.policy).toBe("allow");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("single-piece redirect commands are checked as writes, not blanket-degraded", () => {
+		// `cd /tmp > out` is one piece with a redirect: the redirect is a
+		// write to `out`, sanctioned by posture under allow mode, so the
+		// rule-backed base allow stands. Under prompt posture the write is
+		// unsanctioned and the piece keeps prompting.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			writeUserRule(dir, "cd *", "allow");
+			const allowed = evaluatePermission(tool("bash"), { command: "cd /tmp > out" }, walkCtx(dir, "allow"));
+			expect(allowed.policy).toBe("allow");
+			const prompted = evaluatePermission(tool("bash"), { command: "cd /tmp > out" }, walkCtx(dir, "prompt"));
+			expect(prompted.policy).toBe("prompt");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

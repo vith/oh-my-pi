@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { isSinglePiece, nestedCommandTexts, parseCommand } from "@oh-my-pi/pi-coding-agent/tools/permissions/split";
+import {
+	isSinglePiece,
+	nestedCommandTexts,
+	parseCommand,
+	scanRedirectWrites,
+	stripFileWriteRedirects,
+} from "@oh-my-pi/pi-coding-agent/tools/permissions/split";
 import * as natives from "@oh-my-pi/pi-natives";
 
 function piecesOf(command: string) {
@@ -130,5 +136,65 @@ describe("nestedCommandTexts", () => {
 	it("reports nothing when the command has no compound nodes", () => {
 		const nodes: unknown[] = JSON.parse(natives.parseShellCommand("rm -rf $(git rev-parse HEAD)"));
 		expect(nestedCommandTexts(nodes)).toEqual([]); // command substitution is not a compound node
+	});
+});
+
+describe("scanRedirectWrites", () => {
+	it("collects >-family file write targets grammar-level", () => {
+		expect(scanRedirectWrites("echo hi > /tmp/x")).toEqual({
+			present: true,
+			targets: ["/tmp/x"],
+			unattributable: false,
+		});
+		expect(scanRedirectWrites("echo hi >> /tmp/x 2> err")).toEqual({
+			present: true,
+			targets: ["/tmp/x", "err"],
+			unattributable: false,
+		});
+		expect(scanRedirectWrites("echo hi &> all")).toEqual({ present: true, targets: ["all"], unattributable: false });
+	});
+
+	it("collects redirects from pipeline and compound children", () => {
+		expect(scanRedirectWrites("ls -la | grep foo > out")).toEqual({
+			present: true,
+			targets: ["out"],
+			unattributable: false,
+		});
+		expect(scanRedirectWrites("cd /tmp > out && echo done")).toEqual({
+			present: true,
+			targets: ["out"],
+			unattributable: false,
+		});
+	});
+
+	it("ignores fd duplication, input redirects, and heredocs", () => {
+		expect(scanRedirectWrites("echo hi 2>&1")).toEqual({ present: false, targets: [], unattributable: false });
+		expect(scanRedirectWrites("cat < in.txt > out.txt")).toEqual({
+			present: true,
+			targets: ["out.txt"],
+			unattributable: false,
+		});
+		expect(scanRedirectWrites("cat <<EOF\nhi\nEOF")).toEqual({ present: false, targets: [], unattributable: false });
+	});
+
+	it("marks quoted or expanded targets unattributable", () => {
+		expect(scanRedirectWrites('echo hi > "$x"')).toEqual({ present: true, targets: [], unattributable: true });
+	});
+
+	it("fails closed (null) when the command does not parse", () => {
+		expect(scanRedirectWrites("echo 'unterminated")).toBeNull();
+	});
+});
+
+describe("stripFileWriteRedirects", () => {
+	it("removes file writes and fd duplication, keeping input redirects", () => {
+		expect(stripFileWriteRedirects("echo hi 2>&1")).toBe("echo hi ");
+		expect(stripFileWriteRedirects("cd /tmp > out")).toBe("cd /tmp ");
+		expect(stripFileWriteRedirects("cat < in.txt > out.txt")).toBe("cat < in.txt ");
+	});
+
+	it("strips inside compound texts and returns parse failures unchanged", () => {
+		expect(stripFileWriteRedirects("cd /tmp > out && echo done")).toBe("cd /tmp  && echo done");
+		expect(stripFileWriteRedirects("echo 'unterminated")).toBe("echo 'unterminated");
 	});
 });
