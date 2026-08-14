@@ -148,21 +148,19 @@ async function buildMcpRemoveCompletions(
 }
 
 /** /permissions subcommands whose argument is a rule id (per their `usage: "<id>"`). */
-const PERMISSION_RULE_ID_SUBCOMMANDS: Readonly<Record<string, "all" | "personal" | "user">> = {
+const PERMISSION_RULE_ID_SUBCOMMANDS: Readonly<Record<string, "all" | "user">> = {
 	show: "all",
-	remove: "personal",
+	remove: "user",
 	edit: "user",
 };
 
 /** Human label for a rule layer in completion descriptions. */
 function permissionLayerLabel(layer: string): string {
 	switch (layer) {
-		case "dynamic":
-			return "dynamic · engine-written";
 		case "project":
 			return "project · repo-committed";
 		case "user":
-			return "user · hand-written";
+			return "user · personal";
 		default:
 			return layer;
 	}
@@ -173,12 +171,12 @@ function permissionLayerLabel(layer: string): string {
  * declarative subcommand completer while the subcommand name itself is still
  * being typed, then switches to rule-id completion (sourced from the
  * file-backed rule layers) once a recognized id-taking subcommand is
- * followed by a space. `remove` completes the removable personal layers
- * (dynamic + user) and, after an explicit `--project` flag, project ids too
- * — the flag itself is offered while typing it. `edit` only ever succeeds
- * against user-layer rules, so it completes those only; `show` accepts any
- * file-backed id. Subcommands with a different argument shape (add, test,
- * clear, ...) get no argument completion.
+ * followed by a space. `remove` completes user rules and, after an explicit
+ * `--project` flag, project rules too — the flag itself is offered while
+ * typing it. `edit` only ever succeeds against user-layer rules, so it
+ * completes those only; `show` accepts any file-backed id. Subcommands with
+ * a different argument shape (add, test, clear, ...) get no argument
+ * completion.
  */
 export function buildPermissionsArgumentCompletions(
 	subcommands: SubcommandDef[],
@@ -216,8 +214,7 @@ export function buildPermissionsArgumentCompletions(
 		const { rules } = loadRuleLayers(runtime.ctx.sessionManager.getCwd());
 		const matches: AutocompleteItem[] = rules
 			.filter(rule => {
-				if (idScope === "user") return rule.layer === "user";
-				if (idScope === "personal") return includeProject || rule.layer !== "project";
+				if (idScope === "user") return includeProject || rule.layer === "user";
 				return true;
 			})
 			.filter(rule => rule.id.toLowerCase().startsWith(idPrefix))

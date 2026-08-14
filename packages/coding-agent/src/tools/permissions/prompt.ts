@@ -10,8 +10,8 @@
  * calls keep the single-unit flow: per pending piece the user picks from
  * Allow once / Allow & remember… / Deny / Deny & remember…, then a scope-level
  * choice of candidate rules (exact, pattern, custom, tool-wide for read-only
- * tools) that preview the exact YAML they write. Remembering writes a dynamic
- * rule (`writeDynamicRule` into the dynamic layer file).
+ * tools) that preview the exact YAML they write. Remembering writes a
+ * user-layer rule.
  *
  * PTY calls (spec §4.3) cannot be execution-split: they prompt once for the
  * whole command, with candidates scoped to the whole command text.
@@ -35,7 +35,7 @@ import {
 	nearMissLine,
 	type PieceEvaluation,
 } from "./engine";
-import { type PermissionRule, type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
+import { type PermissionRule, type RuleAction, ruleFiles, writeUserRule } from "./rules";
 import { extractSubCommands } from "./split";
 import type { Suggestion } from "./suggest";
 
@@ -159,7 +159,7 @@ function candidateRuleId(
 
 /**
  * The exact YAML block the user sees and that gets written for a rule.
- * Matches `writeDynamicRule`'s entry shape so `normalizeRule` round-trips it.
+ * Matches `writeUserRule`'s entry shape so `normalizeRule` round-trips it.
  */
 export function renderCandidateYaml(rule: Omit<PermissionRule, "layer">): string {
 	const entry: Record<string, unknown> = {
@@ -330,7 +330,7 @@ export function buildCandidates(toolName: string, args: unknown, pieces?: PieceE
  * consultation. Otherwise the engine's suggestion decides: an allow that
  * strictly beats the deciding deny renders its exact YAML and why; a deny
  * nothing beats renders the dead end; a posture-source deny (no deny rule
- * matched — a dynamic allow beats the posture) suggests the mechanical first
+ * matched — a rule allow beats the posture) suggests the mechanical first
  * candidate. Non-bash calls go through the same dead-end/override gate so a
  * tying or losing candidate is never suggested.
  */
@@ -353,7 +353,7 @@ export function renderAllowSuggestion(toolName: string, args: unknown, ctx: Engi
 	if (suggestion.status === "dead-end") {
 		return "This call is denied, and no allow rule can override the matching deny. Add a more specific allow rule (same command shape, more literal tokens) via /permissions add, or change the deny.";
 	}
-	// No deny rule matched (posture-source deny): a dynamic allow beats the
+	// No deny rule matched (posture-source deny): a rule allow beats the
 	// posture, so the mechanical first candidate is exactly what unblocks it.
 	const first = buildCandidates(toolName, args)[0];
 	if (first === undefined) {
@@ -402,9 +402,7 @@ function dialogTitle(ui: ExtensionUIContext, title: string, metaLines: Permissio
 export function pieceStatusText(piece: PieceEvaluation): { text: string; style?: "muted" | "text" | "accent" } {
 	if (piece.policy === "allow") {
 		if (piece.ruleId === undefined) return { text: "allowed" };
-		return piece.layer === "dynamic"
-			? { text: "allowed · remembered this session", style: "muted" }
-			: { text: `allowed · ${piece.layer ?? "rule"} rule ${piece.ruleId}`, style: "muted" };
+		return { text: `allowed · ${piece.layer ?? "rule"} rule ${piece.ruleId}`, style: "muted" };
 	}
 	if (piece.policy === "deny") return { text: "denied", style: "accent" };
 	return piece.ruleId !== undefined
@@ -610,7 +608,7 @@ async function editCustomCandidate(
 }
 
 async function writeRememberedRule(rule: Omit<PermissionRule, "layer">, ctx: EngineContext): Promise<void> {
-	await writeDynamicRule(ruleFiles(ctx.cwd, ctx.home).dynamic, { ...rule, layer: "dynamic" });
+	await writeUserRule(ruleFiles(ctx.cwd, ctx.home).user, rule);
 }
 
 /** PromptUnit outcome: a normal resolution, or the drill-down's back-to-selector signal. */

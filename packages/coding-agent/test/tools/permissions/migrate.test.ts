@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -32,10 +32,14 @@ beforeEach(() => {
 	fs.rmSync(tmp, { recursive: true, force: true });
 	fs.mkdirSync(agentDir, { recursive: true });
 	fs.mkdirSync(cwd, { recursive: true });
+	// firstRunNotice resolves rule files against the OS home; point it at the
+	// temp home so the real user's rules never leak into the plan.
+	vi.spyOn(os, "homedir").mockReturnValue(home);
 });
 
 afterEach(() => {
 	clearFsCache();
+	vi.restoreAllMocks();
 	restoreSettingsTestState(settingsState);
 });
 
@@ -181,6 +185,19 @@ describe("planMigration", () => {
 		expect(settings.get("permissions.default")).toBe("prompt");
 	});
 
+	it("notices a legacy dynamic file that applyMigration will fold", async () => {
+		fs.mkdirSync(path.join(home, ".omp", "agent"), { recursive: true });
+		fs.writeFileSync(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: old1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+		);
+		const settings = await Settings.init({ agentDir, cwd });
+		const plan = planMigration(settings, cwd, home);
+		expect(
+			plan.notices.some(notice => notice.includes("legacy dynamic") && notice.includes("1 remembered rule")),
+		).toBe(true);
+	});
+
 	it("excludes legacy keys that live in a project layer from removal, with a notice", async () => {
 		// Legacy key arrives via the project settings capability (.claude/settings.json),
 		// not the global agentDir config.yml.
@@ -320,6 +337,30 @@ describe("applyMigration", () => {
 		expect(byId.get("legacy-bash-2")?.action).toBe("allow");
 		expect(byId.get("legacy-bash-3")?.action).toBe("deny");
 		expect(byId.size).toBe(4);
+	});
+
+	it("folds a legacy dynamic file into the user file and removes it", async () => {
+		fs.mkdirSync(path.join(home, ".omp", "agent"), { recursive: true });
+		fs.writeFileSync(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: old1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+		);
+		fs.writeFileSync(
+			userRulesFile,
+			YAML.stringify(
+				{ rules: [{ id: "keep-me", tool: "read", match: { path: "src/**" }, action: "allow" }] },
+				null,
+				2,
+			),
+		);
+
+		const settings = await Settings.init({ agentDir, cwd });
+		const plan = planMigration(settings, cwd, home);
+		await applyMigration(plan, cwd, home);
+
+		const userRules = loadRuleLayers(cwd, home).rules.filter(rule => rule.layer === "user");
+		expect(userRules.map(rule => rule.id)).toEqual(["keep-me", "old1"]);
+		expect(fs.existsSync(path.join(home, ".omp", "agent", "permissions.dynamic.yml"))).toBe(false);
 	});
 
 	it("refuses to apply before settings are initialized, without writing rules", async () => {

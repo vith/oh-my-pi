@@ -247,7 +247,7 @@ export interface RuleMatch {
 	specificity: number;
 }
 
-const LAYER_RANK: Record<RuleLayer, number> = { dynamic: 0, project: 1, user: 2, legacy: 3, curated: 4 };
+const LAYER_RANK: Record<RuleLayer, number> = { project: 0, user: 1, legacy: 2, curated: 4 };
 
 /**
  * Best whole-command rule match (spec §3.1 step 2): match class, then

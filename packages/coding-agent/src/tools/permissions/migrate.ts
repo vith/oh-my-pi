@@ -11,7 +11,7 @@ import {
 import { type ApprovalPolicy, normalizePolicy } from "../approval";
 import { normalizeBashApprovalPattern } from "../bash";
 import { legacyBashPattern, POSTURE_KEY, type Posture, postureFromApprovalMode } from "./engine";
-import { type RuleAction, ruleFiles, writeDynamicRule } from "./rules";
+import { foldLegacyDynamicRules, type RuleAction, ruleFiles, writeUserRule } from "./rules";
 
 /**
  * One-shot migration of legacy permission settings (`tools.approvalMode`,
@@ -157,6 +157,26 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 	if (removeSettings.length > 0) {
 		notices.push(`Legacy settings key(s) ${removeSettings.join(", ")} will be removed from config.`);
 	}
+	// The pre-merge engine wrote remembered rules to a separate dynamic file.
+	// The loader folds them at read time; migration physically merges the
+	// file into the user file and removes it.
+	const legacyFile = ruleFiles(cwd, home).legacyDynamic;
+	if (fs.existsSync(legacyFile)) {
+		let legacyCount = 0;
+		try {
+			const doc = YAML.parse(fs.readFileSync(legacyFile, "utf8")) as { rules?: unknown } | null;
+			if (doc !== null && typeof doc === "object" && Array.isArray(doc.rules)) {
+				legacyCount = doc.rules.length;
+			}
+		} catch {
+			legacyCount = 0;
+		}
+		if (legacyCount > 0) {
+			notices.push(
+				`Fold ${legacyCount} remembered rule(s) from the legacy dynamic rules file (${legacyFile}) into the user rules file.`,
+			);
+		}
+	}
 
 	return {
 		rules,
@@ -193,7 +213,7 @@ export async function applyMigration(plan: MigrationPlan, cwd: string, home?: st
 			reason?: string;
 			ttl?: number;
 		};
-		await writeDynamicRule(userFile, { ...record, layer: "user" });
+		await writeUserRule(userFile, { ...record, layer: "user" });
 	}
 
 	for (const key of plan.removeSettings) {
@@ -203,6 +223,11 @@ export async function applyMigration(plan: MigrationPlan, cwd: string, home?: st
 		globalSettings.set(plan.postureSetting.key, plan.postureSetting.value);
 	}
 	await globalSettings.flush();
+	// Finish the pre-merge dynamic-file transition: fold any leftover
+	// remembered rules into the user file and remove the legacy file. The
+	// loader already reads them as user-layer rules, so this only changes
+	// where they physically live.
+	await foldLegacyDynamicRules(cwd, home);
 }
 
 /**

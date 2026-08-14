@@ -102,7 +102,7 @@ function queuedDialogUi(indices: Array<number | undefined>, requests: Permission
 function compoundFixture() {
 	const home = tempHome();
 	write(
-		path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+		path.join(home, ".omp", "agent", "permissions.yml"),
 		"rules:\n  - id: echo-all\n    tool: bash\n    match: { command: 'echo *' }\n    action: allow\n",
 	);
 	return { home, ctx: fakeCtx(home), decision: evaluateBashCommand("git log -n 5 && echo hi", fakeCtx(home)) };
@@ -171,7 +171,7 @@ describe("buildCandidates", () => {
 		expect(all.length).toBeGreaterThan(0);
 		for (const cand of all) {
 			const parsed = YAML.parse(cand.yaml);
-			const rule = normalizeRule(parsed, "dynamic");
+			const rule = normalizeRule(parsed, "user");
 			expect(rule).not.toBeNull();
 			expect(rule?.action).toBe(cand.rule.action);
 		}
@@ -237,7 +237,7 @@ describe("rememberCompound", () => {
 	}
 
 	async function writtenCommands(ctx: EngineContext): Promise<Array<Record<string, unknown>>> {
-		const file = ruleFiles(ctx.cwd, ctx.home).dynamic;
+		const file = ruleFiles(ctx.cwd, ctx.home).user;
 		if (!fs.existsSync(file)) return [];
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		return doc.rules.map(rule => rule.match as Record<string, unknown>);
@@ -368,7 +368,7 @@ describe("rememberCompound", () => {
 		expect(remembered).toBeDefined();
 		const commands = (await writtenCommands(ctx)).map(match => match.command).sort();
 		expect(commands).toEqual(["git log *", "git status *"]);
-		const file = ruleFiles(ctx.cwd, ctx.home).dynamic;
+		const file = ruleFiles(ctx.cwd, ctx.home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		const ids = doc.rules.map(rule => rule.id as string);
 		expect(new Set(ids).size).toBe(2);
@@ -451,7 +451,7 @@ describe("promptForDecision", () => {
 		expect(requests).toHaveLength(1);
 	});
 
-	it("writes a dynamic rule when a candidate is remembered", async () => {
+	it("writes a remembered rule to the user file", async () => {
 		const home = tempHome();
 		const { ui } = queuedSelectUi(["Allow & remember…", "Exact: git status -s"]);
 		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
@@ -459,7 +459,7 @@ describe("promptForDecision", () => {
 		expect(res.policy).toBe("allow");
 		expect(res.remembered?.match).toEqual({ command: "git status -s" });
 
-		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const file = ruleFiles(fakeCtx(home).cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		const written = doc.rules.find(r => (r.match as Record<string, unknown>).command === "git status -s");
 		expect(written).toBeDefined();
@@ -474,7 +474,7 @@ describe("promptForDecision", () => {
 		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("deny");
 
-		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const file = ruleFiles(fakeCtx(home).cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		const written = doc.rules.find(r => (r.match as Record<string, unknown>).command === "git status -s");
 		expect(written).toBeDefined();
@@ -491,7 +491,7 @@ describe("promptForDecision", () => {
 		const second = await promptForDecision(ui, "bash", { command: "git" }, decision, ctx);
 		expect(second.policy).toBe("allow");
 
-		const file = ruleFiles(ctx.cwd, home).dynamic;
+		const file = ruleFiles(ctx.cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		const commands = doc.rules.map(r => (r.match as Record<string, unknown>).command);
 		expect(commands).toContain("git");
@@ -524,7 +524,7 @@ describe("promptForDecision", () => {
 		const res = await promptForDecision(ui, "bash", { command: "echo a b", pty: true }, decision, fakeCtx(home));
 		expect(res.policy).toBe("allow");
 
-		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const file = ruleFiles(fakeCtx(home).cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		const written = doc.rules.find(r => (r.match as Record<string, unknown>).command === "echo a b");
 		expect(written).toBeDefined();
@@ -644,7 +644,7 @@ describe("promptForDecision", () => {
 		expect(res.policy).toBe("deny");
 		expect(res.remembered).toBeUndefined();
 		// No rule was written: the fixture's echo rule is the only one left.
-		const file = ruleFiles(ctx.cwd, ctx.home).dynamic;
+		const file = ruleFiles(ctx.cwd, ctx.home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["echo *"]);
 	});
@@ -678,7 +678,7 @@ describe("promptForDecision", () => {
 		expect(requests[0]?.options.map(option => option.label)).toEqual([...COMPOUND_ACTIONS]);
 		expect(requests[1]?.checklist).toBe(true);
 		expect(requests[1]?.options.map(option => option.label)).toEqual(["git log *", "Write checked allow rules (1)"]);
-		const file = ruleFiles(ctx.cwd, ctx.home).dynamic;
+		const file = ruleFiles(ctx.cwd, ctx.home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toContain("git log *");
 	});
@@ -697,7 +697,7 @@ describe("promptForDecision", () => {
 		const labels = scope.options.map(option => option.label);
 		expect(labels).toEqual(["Exact: git branch -a", "Pattern: git branch *", "Custom…"]);
 		expect(labels).not.toContain("Tool: bash always");
-		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const file = ruleFiles(fakeCtx(home).cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["git branch *"]);
 	});
@@ -724,7 +724,7 @@ describe("promptForDecision", () => {
 		// the placeholder is the recommended first-token glob (spec §5.1:
 		// "narrower or wider than the first-token pattern")
 		expect(placeholder).toBe("git branch *");
-		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const file = ruleFiles(fakeCtx(home).cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["git branch -a *"]);
 	});
@@ -755,7 +755,7 @@ describe("promptForDecision", () => {
 		expect(res.remembered?.match).toEqual({ arg: "*" });
 		const labels = requests[1]!.options.map(option => option.label);
 		expect(labels[3]).toBe("Tool: read always"); // [Exact, Pattern, Custom…, Tool always]
-		const file = ruleFiles(fakeCtx(home).cwd, home).dynamic;
+		const file = ruleFiles(fakeCtx(home).cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.some(rule => rule.tool === "read" && (rule.match as Record<string, unknown>).arg === "*")).toBe(
 			true,
@@ -838,7 +838,7 @@ describe("promptForDecision", () => {
 		expect(res.remembered?.action).toBe("deny");
 		expect(requests).toHaveLength(4);
 		expect(requests[3]?.options.map(option => option.label)).toContain("Deny exact: git status -s");
-		const file = ruleFiles(ctx.cwd, home).dynamic;
+		const file = ruleFiles(ctx.cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.some(rule => (rule.match as Record<string, unknown>).command === "git status -s")).toBe(true);
 	});
@@ -949,7 +949,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		});
 		expect(res.policy).toBe("allow");
 		expect(res.remembered?.id).toBe("s-allow");
-		const file = ruleFiles(ctx.cwd, home).dynamic;
+		const file = ruleFiles(ctx.cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.some(r => r.id === "s-allow")).toBe(true);
 	});
@@ -972,7 +972,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		});
 		expect(res.policy).toBe("deny");
 		expect(res.remembered?.id).toBe("s-deny");
-		const file = ruleFiles(ctx.cwd, home).dynamic;
+		const file = ruleFiles(ctx.cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
 		expect(doc.rules.some(r => r.id === "s-deny")).toBe(true);
 	});
@@ -1024,7 +1024,7 @@ describe("renderAllowSuggestion", () => {
 		const yaml = text.slice(
 			text.indexOf("To allow this call, add rule:\n") + "To allow this call, add rule:\n".length,
 		);
-		const rule = normalizeRule(YAML.parse(yaml), "dynamic");
+		const rule = normalizeRule(YAML.parse(yaml), "user");
 		expect(rule).not.toBeNull();
 		expect(rule!.tool).toBe("bash");
 		expect(rule!.action).toBe("allow");
@@ -1037,7 +1037,7 @@ describe("renderAllowSuggestion", () => {
 		const yaml = text.slice(
 			text.indexOf("To allow this call, add rule:\n") + "To allow this call, add rule:\n".length,
 		);
-		const rule = normalizeRule(YAML.parse(yaml), "dynamic");
+		const rule = normalizeRule(YAML.parse(yaml), "user");
 		expect(rule).not.toBeNull();
 		expect(rule!.tool).toBe("read");
 		expect(rule!.action).toBe("allow");
@@ -1045,11 +1045,11 @@ describe("renderAllowSuggestion", () => {
 	});
 
 	it("a shell-control bash command is never given a rule suggestion, even with a deny", () => {
-		// dynamic file: deny bash "python3 *". R1 degrades allow winners on
+		// user file: deny bash "python3 *". R1 degrades allow winners on
 		// shell-control commands, so no rule could unblock this call.
 		const home = tempHome();
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			path.join(home, ".omp", "agent", "permissions.yml"),
 			"rules:\n  - id: deny-py\n    tool: bash\n    match: { command: 'python3 *' }\n    action: deny\n",
 		);
 		const text = renderAllowSuggestion("bash", { command: "python3 -c'x'" }, fakeCtx(home));
@@ -1059,10 +1059,10 @@ describe("renderAllowSuggestion", () => {
 	});
 
 	it("includes the beating rule YAML and why", () => {
-		// dynamic files: deny bash "* | head *" + allow bash "git branch * | head *"
+		// user files: deny bash "* | head *" + allow bash "git branch * | head *"
 		const home = tempHome();
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			path.join(home, ".omp", "agent", "permissions.yml"),
 			"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * | head *' }\n    action: allow\n",
 		);
 		const text = renderAllowSuggestion("bash", { command: "git branch -a | head -20" }, fakeCtx(home));
@@ -1073,10 +1073,10 @@ describe("renderAllowSuggestion", () => {
 	});
 
 	it("with no override explains the dead end", () => {
-		// dynamic file: deny bash "* | head *" only
+		// user file: deny bash "* | head *" only
 		const home = tempHome();
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			path.join(home, ".omp", "agent", "permissions.yml"),
 			"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* | head *' }\n    action: deny\n",
 		);
 		const text = renderAllowSuggestion("bash", { command: "git branch -a | head -20" }, fakeCtx(home));
@@ -1084,11 +1084,11 @@ describe("renderAllowSuggestion", () => {
 	});
 
 	it("a non-bash deny tie never suggests a rule that cannot win", () => {
-		// dynamic files: deny read { path: 'src/x.ts' } + allow read { path: 'src/x.ts' } —
+		// user files: deny read { path: 'src/x.ts' } + allow read { path: 'src/x.ts' } —
 		// equal class and specificity, so deny wins ties.
 		const home = tempHome();
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			path.join(home, ".omp", "agent", "permissions.yml"),
 			"rules:\n  - id: deny-read\n    tool: read\n    match: { path: 'src/x.ts' }\n    action: deny\n  - id: allow-read\n    tool: read\n    match: { path: 'src/x.ts' }\n    action: allow\n",
 		);
 		const text = renderAllowSuggestion("read", { path: "src/x.ts" }, fakeCtx(home));
@@ -1097,11 +1097,11 @@ describe("renderAllowSuggestion", () => {
 	});
 
 	it("a non-bash allow that strictly beats the deny is suggested", () => {
-		// dynamic files: deny read { path: 'src/**' } + allow read { path: 'src/x.ts' } —
+		// user files: deny read { path: 'src/**' } + allow read { path: 'src/x.ts' } —
 		// the exact allow is more specific than the glob deny.
 		const home = tempHome();
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			path.join(home, ".omp", "agent", "permissions.yml"),
 			"rules:\n  - id: deny-read-glob\n    tool: read\n    match: { path: 'src/**' }\n    action: deny\n  - id: allow-read-exact\n    tool: read\n    match: { path: 'src/x.ts' }\n    action: allow\n",
 		);
 		const text = renderAllowSuggestion("read", { path: "src/x.ts" }, fakeCtx(home));
@@ -1122,11 +1122,11 @@ describe("buildDialogLines", () => {
 	});
 
 	it("renders summary, operator prefixes, and safe-tail dimming", () => {
-		// dynamic rule file: allow bash "echo *" — the middle piece of the
+		// user rule file: allow bash "echo *" — the middle piece of the
 		// compound rides the rule; the two git pieces have no rule (prompt).
 		const home = tempHome();
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			path.join(home, ".omp", "agent", "permissions.yml"),
 			"rules:\n  - id: echo-all\n    tool: bash\n    match: { command: 'echo *' }\n    action: allow\n",
 		);
 		const ctx = fakeCtx(home);
@@ -1143,14 +1143,14 @@ describe("buildDialogLines", () => {
 		expect(tailSeg?.dim).toBe(true);
 		// status text per v3 wording
 		expect(JSON.stringify(lines)).toContain("no rule");
-		expect(JSON.stringify(lines)).toContain("allowed · remembered this session");
+		expect(JSON.stringify(lines)).toContain("allowed · user rule echo-all");
 	});
 });
 
 describe("pieceStatusText", () => {
 	it("denied variants always read denied, with or without a rule", () => {
 		expect(pieceStatusText({ text: "git push", policy: "deny" })).toEqual({ text: "denied", style: "accent" });
-		expect(pieceStatusText({ text: "git push", policy: "deny", ruleId: "deny-push", layer: "dynamic" })).toEqual({
+		expect(pieceStatusText({ text: "git push", policy: "deny", ruleId: "deny-push", layer: "user" })).toEqual({
 			text: "denied",
 			style: "accent",
 		});
@@ -1166,8 +1166,8 @@ describe("pieceStatusText", () => {
 
 	it("allow variants name the rule layer when one matched", () => {
 		expect(pieceStatusText({ text: "echo hi", policy: "allow" })).toEqual({ text: "allowed" });
-		expect(pieceStatusText({ text: "echo hi", policy: "allow", ruleId: "dyn-echo", layer: "dynamic" })).toEqual({
-			text: "allowed · remembered this session",
+		expect(pieceStatusText({ text: "echo hi", policy: "allow", ruleId: "dyn-echo", layer: "user" })).toEqual({
+			text: "allowed · user rule dyn-echo",
 			style: "muted",
 		});
 		expect(pieceStatusText({ text: "echo hi", policy: "allow", ruleId: "proj-echo", layer: "project" })).toEqual({

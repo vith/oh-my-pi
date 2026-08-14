@@ -51,7 +51,7 @@ describe("suggestRules", () => {
 		const suggestions = await suggestRules("git push", fakeCtx(), fakeRegistry());
 		expect(suggestions).toHaveLength(2);
 		for (const suggestion of suggestions) {
-			expect(normalizeRule({ ...suggestion.rule, layer: "dynamic" }, "dynamic")).not.toBeNull();
+			expect(normalizeRule({ ...suggestion.rule, layer: "user" }, "user")).not.toBeNull();
 		}
 		expect(suggestions[0]?.rule.tool).toBe("bash");
 		expect(suggestions[0]?.rule.action).toBe("allow");
@@ -204,7 +204,7 @@ describe("Suggestion shape", () => {
 		expect(suggestions).toHaveLength(1);
 		const suggestion: Suggestion = suggestions[0]!;
 		expect(suggestion.rule).not.toHaveProperty("layer");
-		const roundTripped = normalizeRule({ ...suggestion.rule, layer: "dynamic" }, "dynamic");
+		const roundTripped = normalizeRule({ ...suggestion.rule, layer: "user" }, "user");
 		expect(roundTripped).not.toBeNull();
 		expect(roundTripped?.reason).toBe("codegen");
 	});
