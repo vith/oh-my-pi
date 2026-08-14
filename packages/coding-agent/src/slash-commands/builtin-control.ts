@@ -72,14 +72,16 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "permissions",
-		description: "Inspect and manage permission rules (list, show, add, remove, edit, test, log, status, migrate)",
+		description:
+			"Inspect and manage permission rules (list, show, add, remove, edit, clear, test, log, status, migrate)",
 		acpDescription: "Manage permission rules",
-		acpInputHint: "<list|show|add|remove|edit|test|log|status|migrate>",
+		acpInputHint: "<list|show|add|remove|edit|clear|test|log|status|migrate>",
 		subcommands: [
 			{ name: "list", description: "List merged permission rules by layer with audit match counts" },
 			{ name: "show", description: "Show a rule's details and last audit hits", usage: "<id>" },
 			{ name: "add", description: "Add a rule to the user layer", usage: "<yaml>" },
-			{ name: "remove", description: "Remove a rule from the user layer", usage: "<id>" },
+			{ name: "remove", description: "Remove rule(s) from the user layer", usage: "<id> [<id>...]" },
+			{ name: "clear", description: "Clear file-backed permission rules", usage: "[--project]" },
 			{ name: "edit", description: "Replace a user-layer rule by id", usage: "<id> <yaml>" },
 			{ name: "test", description: "Dry-run a bash command against the permission engine", usage: '"<command>"' },
 			{ name: "log", description: "Show recent permission audit entries" },

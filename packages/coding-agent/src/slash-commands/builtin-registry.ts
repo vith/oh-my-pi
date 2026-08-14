@@ -5,6 +5,7 @@ import {
 	buildArgumentCompletions,
 	buildDirectoryArgumentCompletions,
 	buildMcpArgumentCompletions,
+	buildPermissionsArgumentCompletions,
 	buildStaticInlineHint,
 	buildSubcommandInlineHint,
 } from "./builtin-completions";
@@ -75,7 +76,9 @@ function materializeTuiBuiltinSlashCommand(
 		materialized.getArgumentCompletions =
 			cmd.name === "mcp" && runtime
 				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
-				: buildArgumentCompletions(cmd.subcommands);
+				: cmd.name === "permissions" && runtime
+					? buildPermissionsArgumentCompletions(cmd.subcommands, runtime)
+					: buildArgumentCompletions(cmd.subcommands);
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();

@@ -6,6 +6,9 @@
 
 ### Added
 
+- `/permissions clear` wipes the file-backed rule layers (dynamic + user by default; the repo-committed project layer only with an explicit `--project`).
+- `/permissions remove` accepts multiple rule ids in one call.
+- `/permissions` tab-completes rule ids after `show`/`remove`/`edit` (user-layer ids for the editing subcommands).
 - Permission rules resolve by match class and specificity: exact-structure beats covering, most specific wins, deny wins ties, curated hard-denies absolute (spec §3.1).
 - Curated safe-consumer exemption: `git log *` covers `git log … | head -1`; exec-capable stages still require rules.
 - Approval dialog v3: one compound dialog (piece list = command), per-piece drill-down, remember checklists with glob editing, deny-error override suggestions.
