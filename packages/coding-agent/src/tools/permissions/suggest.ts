@@ -1,42 +1,39 @@
 /**
- * Model-decided approval recommendation (spec §5.3): a one-shot side
- * completion on the session's active model that (a) recommends which action
- * the approval dialog should preselect — auto-mode-with-confirmation — and
- * (b) optionally proposes allow/deny rules appended to the dialog as extra
- * options. The recommendation always runs; the rule suggestions are gated by
- * `permissions.llmSuggestions`. Every failure path degrades silently to an
- * empty result, so the mechanical candidates always remain the floor and a
- * failing recommendation simply leaves the dialog unpreselected.
+ * Model-decided approval choices (spec §5.3): a one-shot side completion on
+ * the session's active model that proposes up to 3 choices for the approval
+ * dialog, ordered by likely user desire. The first choice preselects the
+ * dialog's action — auto-mode-with-confirmation — and the rest are offered
+ * as alternative options (the extra options are gated by
+ * `permissions.llmSuggestions`). Every failure path degrades silently to an
+ * empty result, so the dialog's own candidates always remain the floor and a
+ * failing suggestion simply leaves the dialog unpreselected.
  */
 import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
-import { CURATED_ALLOW_TOOLS } from "./curated";
 import type { EngineContext } from "./engine";
-import { loadRuleLayers, normalizeRule, type PermissionRule } from "./rules";
 import suggestionSystemPrompt from "./suggest.prompt.md" with { type: "text" };
 
-/** One LLM-proposed rule plus the model's stated rationale for it. */
-export interface Suggestion {
-	rule: Omit<PermissionRule, "layer">;
-	rationale: string;
-}
-
-/** The remember scopes a recommendation can target; `once` = no rule. */
-export type RecommendationScope = "once" | "exact" | "pattern" | "tool";
-
-/** The model's recommended action for a pending call — what gets preselected. */
-export interface Recommendation {
+/** One complete dialog option: what to do with the call, in the user's likely order of desire. */
+export interface SuggestionChoice {
 	action: "allow" | "deny";
-	scope: RecommendationScope;
+	/**
+	 * Save a rule so this call never prompts again. `false` = run once
+	 * without remembering. The pattern-vs-exact decision is separate: when
+	 * remembering, include `pattern` to cover a family, omit it to remember
+	 * the exact call.
+	 */
+	remember: boolean;
+	/** The glob when remembering a family: command glob for bash, path glob for file tools. */
+	pattern?: string;
+	/** One short line: why this choice. */
 	reason?: string;
 }
 
-/** The full provider outcome: the recommendation plus any proposed rules. */
+/** The full provider outcome: an ordered list of choices; the first preselects. */
 export interface SuggestResult {
-	suggestions: Suggestion[];
-	recommendation?: Recommendation;
+	choices: SuggestionChoice[];
 }
 
 /** One prompt unit handed to the provider: the tool, its raw args, and display text. */
@@ -51,18 +48,18 @@ export interface SuggestionUnit {
 
 export type SuggestionProvider = (unit: SuggestionUnit) => Promise<SuggestResult>;
 
-/** Side requests are bounded: hard timeout, capped token budget, at most 3 rules. */
+/** Side requests are bounded: hard timeout, capped token budget, at most 3 choices. */
 const SUGGEST_TIMEOUT_MS = 30000;
 // Reasoning models (e.g. opencode-go deepseek-v4-flash) spend most of the
 // budget thinking before emitting the JSON; 256 tokens was entirely consumed
-// by reasoning (stopReason "length", zero text) so no recommendation ever
-// landed. 2048 leaves room for ~1k reasoning tokens plus the response.
+// by reasoning (stopReason "length", zero text) so no choice ever landed.
+// 2048 leaves room for ~1k reasoning tokens plus the response.
 const SUGGEST_MAX_TOKENS = 2048;
-const SUGGEST_MAX_SUGGESTIONS = 3;
+const SUGGEST_MAX_CHOICES = 3;
 
 const LLM_SUGGESTIONS_KEY = "permissions.llmSuggestions";
 
-/** The rule-suggestion gate: `permissions.llmSuggestions` (defaults to off). Rules only — the recommendation always runs. */
+/** The extra-choice gate: `permissions.llmSuggestions` (defaults to off). The first choice always preselects. */
 function suggestionsEnabled(ctx: EngineContext): boolean {
 	return ctx.settings.get(LLM_SUGGESTIONS_KEY) !== false;
 }
@@ -76,10 +73,10 @@ function resolveSuggestionModel(registry: ModelRegistry): Model<Api> | undefined
 	return registry.getAvailable()[0];
 }
 
-const EMPTY_RESULT: SuggestResult = { suggestions: [] };
+const EMPTY_RESULT: SuggestResult = { choices: [] };
 
 /**
- * Fire the one-shot recommendation completion for a pending call.
+ * Fire the one-shot choice completion for a pending call.
  *
  * Any failure — no model, no API key, provider error, timeout, abort, or
  * unparseable output — degrades to an empty result (silently; debug-logged
@@ -237,25 +234,19 @@ async function suggestWithModel(
 }
 
 /**
- * The user message: the pending call (tool + args), the cwd, and a summary
- * of current rules so the model never proposes duplicates.
+ * The user message: the pending call (tool + args) and the cwd. No rule
+ * context — a prompt only fires when no existing rule matched, so there is
+ * nothing to avoid duplicating.
  */
 function buildSuggestionPrompt(unit: SuggestionUnit, ctx: EngineContext): string {
-	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
 	const lines = [
 		`Pending call: ${unit.text}`,
 		`Tool: ${unit.tool}`,
 		`Arguments: ${JSON.stringify(unit.args)}`,
 		`Cwd: ${ctx.cwd}`,
 	];
-	if (rules.length > 0) {
-		lines.push("Current rules:");
-		for (const rule of rules) {
-			lines.push(`- ${rule.tool} ${JSON.stringify(rule.match)} -> ${rule.action}`);
-		}
-	}
-	// Rule suggestions are gated; the recommendation always runs.
-	if (!suggestionsEnabled(ctx)) lines.push("Do not include a rules array in your response.");
+	// The extra choices are gated; the first choice (the preselection) always runs.
+	if (!suggestionsEnabled(ctx)) lines.push("Provide exactly one choice.");
 	return lines.join("\n");
 }
 
@@ -263,26 +254,28 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Validate the model's `recommendation` object; malformed → undefined. */
-function parseRecommendation(value: unknown): Recommendation | undefined {
+/** Validate one model choice; malformed → undefined. */
+function parseChoice(value: unknown): SuggestionChoice | undefined {
 	if (!isRecord(value)) return undefined;
 	const action = value.action;
 	if (action !== "allow" && action !== "deny") return undefined;
-	const scope = value.scope;
-	if (scope !== "once" && scope !== "exact" && scope !== "pattern" && scope !== "tool") return undefined;
-	const recommendation: Recommendation = { action, scope };
-	if (typeof value.reason === "string" && value.reason.length > 0) recommendation.reason = value.reason;
-	return recommendation;
+	if (typeof value.remember !== "boolean") return undefined;
+	const choice: SuggestionChoice = { action, remember: value.remember };
+	if (typeof value.pattern === "string" && value.pattern.length > 0) choice.pattern = value.pattern;
+	if (typeof value.reason === "string" && value.reason.length > 0) choice.reason = value.reason;
+	return choice;
 }
 
 /**
- * Parse the model's JSON object: `{ recommendation?, rules? }`, validating
- * each record and capping rules at 3. Malformed output degrades to an empty
- * result.
+ * Parse the model's JSON object: `{ choices: [...] }`, validating each record
+ * and capping the list at 3. Without `includeExtraChoices` (the
+ * `permissions.llmSuggestions` gate) only the first choice is kept — it is
+ * the preselection; the rest are extra dialog options. Malformed output
+ * degrades to an empty result.
  */
 function parseSuggestResponse(
 	content: AssistantMessage["content"],
-	includeRules: boolean,
+	includeExtraChoices: boolean,
 	stopReason: string | undefined,
 ): SuggestResult {
 	let text = "";
@@ -312,46 +305,27 @@ function parseSuggestResponse(
 		});
 		return EMPTY_RESULT;
 	}
-
-	const result: SuggestResult = { suggestions: [] };
-	const recommendation = parseRecommendation(parsed.recommendation);
-	if (recommendation !== undefined) {
-		result.recommendation = recommendation;
-	} else if (parsed.recommendation !== undefined) {
-		logger.debug("permission-suggest: malformed recommendation in model response", {
-			reason: "bad-recommendation",
-			recommendation: JSON.stringify(parsed.recommendation).slice(0, 200),
+	if (!Array.isArray(parsed.choices)) {
+		logger.debug("permission-suggest: model response carries no choices array", {
+			reason: "no-choices",
+			text: jsonText.slice(0, 200),
 		});
-	} else {
-		logger.debug("permission-suggest: model response carries no recommendation", { reason: "no-recommendation" });
+		return EMPTY_RESULT;
 	}
-	if (!includeRules || !Array.isArray(parsed.rules)) return result;
 
-	for (const record of parsed.rules) {
-		if (result.suggestions.length >= SUGGEST_MAX_SUGGESTIONS) break;
-		const rule = normalizeRule(record, "user");
-		if (rule === null) continue;
-		// Read-only tools are curated-allowlisted; a deny suggestion for one can
-		// never take effect and only confuses the user.
-		if (rule.action === "deny" && (CURATED_ALLOW_TOOLS as readonly string[]).includes(rule.tool)) continue;
-		// bash has no tool-wide scope in the dialog (the yolo knob is
-		// hand-edited only): a tool-wide allow suggestion would append an
-		// option that silently allows every future command. Denies of the
-		// same shape stay — they are a legitimate defensive policy.
-		if (rule.action === "allow" && rule.tool === "bash" && rule.match.command === "*") continue;
-		result.suggestions.push({ rule: withoutLayer(rule), rationale: rule.reason ?? "" });
+	const result: SuggestResult = { choices: [] };
+	for (const record of parsed.choices) {
+		if (result.choices.length >= SUGGEST_MAX_CHOICES) break;
+		const choice = parseChoice(record);
+		if (choice !== undefined) {
+			result.choices.push(choice);
+		} else {
+			logger.debug("permission-suggest: malformed choice in model response", {
+				reason: "bad-choice",
+				choice: JSON.stringify(record).slice(0, 200),
+			});
+		}
 	}
+	if (!includeExtraChoices && result.choices.length > 1) result.choices = result.choices.slice(0, 1);
 	return result;
-}
-
-function withoutLayer(rule: PermissionRule): Omit<PermissionRule, "layer"> {
-	const stripped: Omit<PermissionRule, "layer"> = {
-		id: rule.id,
-		tool: rule.tool,
-		match: rule.match,
-		action: rule.action,
-	};
-	if (rule.reason !== undefined) stripped.reason = rule.reason;
-	if (rule.ttl !== undefined) stripped.ttl = rule.ttl;
-	return stripped;
 }

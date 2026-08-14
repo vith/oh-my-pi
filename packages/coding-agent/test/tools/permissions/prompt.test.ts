@@ -24,7 +24,11 @@ import {
 	sessionRuleKey,
 	sessionRules,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/session-rules";
-import type { Suggestion, SuggestionUnit, SuggestResult } from "@oh-my-pi/pi-coding-agent/tools/permissions/suggest";
+import type {
+	SuggestionChoice,
+	SuggestionUnit,
+	SuggestResult,
+} from "@oh-my-pi/pi-coding-agent/tools/permissions/suggest";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 
@@ -978,14 +982,14 @@ describe("promptForDecision", () => {
 });
 
 describe("promptForDecision with a suggestionsProvider", () => {
-	const allowSuggestion: Suggestion = {
-		rule: { id: "s-allow", tool: "bash", match: { command: "git status -s" }, action: "allow", reason: "read-only" },
-		rationale: "read-only",
+	const onceChoice: SuggestionChoice = { action: "allow", remember: false };
+	const allowChoice: SuggestionChoice = {
+		action: "allow",
+		remember: true,
+		pattern: "git status -s",
+		reason: "read-only",
 	};
-	const denySuggestion: Suggestion = {
-		rule: { id: "s-deny", tool: "bash", match: { command: "git push" }, action: "deny", reason: "risky" },
-		rationale: "risky",
-	};
+	const denyChoice: SuggestionChoice = { action: "deny", remember: true, pattern: "git push", reason: "risky" };
 
 	function capturingDialogUi(captured: { request?: PermissionDialogRequest }, pickIndex: number | undefined) {
 		return {
@@ -1003,14 +1007,12 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		const ui = capturingDialogUi(captured, 0); // "Allow all pending once"
 		const firedUnits: SuggestionUnit[] = [];
 		// `echo a` covers the first pending piece (not the whole compound
-		// string), so the filter keeps it.
-		const suggestion: Suggestion = {
-			rule: { id: "s-piece", tool: "bash", match: { command: "echo a" }, action: "allow", reason: "x" },
-			rationale: "x",
-		};
+		// string), so the filter keeps it. The first choice preselects; the
+		// second is the appended alternative.
+		const pieceChoice: SuggestionChoice = { action: "allow", remember: true, pattern: "echo a", reason: "x" };
 		const provider = async (unit: SuggestionUnit): Promise<SuggestResult> => {
 			firedUnits.push(unit);
-			return { suggestions: [suggestion] };
+			return { choices: [onceChoice, pieceChoice] };
 		};
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
 		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
@@ -1036,7 +1038,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 				return 0; // "Allow once"
 			},
 		} as unknown as ExtensionUIContext;
-		const provider = vi.fn(async (): Promise<SuggestResult> => ({ suggestions: [] }));
+		const provider = vi.fn(async (): Promise<SuggestResult> => ({ choices: [] }));
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a")] });
 		const res = await promptForDecision(ui, "bash", { command: "echo a" }, decision, fakeCtx(tempHome()), {
 			suggestionsProvider: provider,
@@ -1061,17 +1063,17 @@ describe("promptForDecision with a suggestionsProvider", () => {
 				return 5;
 			},
 		} as unknown as ExtensionUIContext;
-		const provider = async (): Promise<SuggestResult> => ({ suggestions: [allowSuggestion] });
+		const provider = async (): Promise<SuggestResult> => ({ choices: [onceChoice, allowChoice] });
 		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
 		const ctx = fakeCtx(home);
 		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, ctx, {
 			suggestionsProvider: provider,
 		});
 		expect(res.policy).toBe("allow");
-		expect(res.remembered?.id).toBe("s-allow");
+		expect(res.remembered?.id).toBe("remember-bash-pattern-git-status-s-allow");
 		const file = ruleFiles(ctx.cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
-		expect(doc.rules.some(r => r.id === "s-allow")).toBe(true);
+		expect(doc.rules.some(r => r.id === "remember-bash-pattern-git-status-s-allow")).toBe(true);
 	});
 
 	it("picking a suggested deny option resolves to deny and remembers it", async () => {
@@ -1085,17 +1087,17 @@ describe("promptForDecision with a suggestionsProvider", () => {
 				return 5;
 			},
 		} as unknown as ExtensionUIContext;
-		const provider = async (): Promise<SuggestResult> => ({ suggestions: [denySuggestion] });
+		const provider = async (): Promise<SuggestResult> => ({ choices: [onceChoice, denyChoice] });
 		const decision = fakeDecision({ pieces: [pendingPiece("git push")] });
 		const ctx = fakeCtx(home);
 		const res = await promptForDecision(ui, "bash", { command: "git push" }, decision, ctx, {
 			suggestionsProvider: provider,
 		});
 		expect(res.policy).toBe("deny");
-		expect(res.remembered?.id).toBe("s-deny");
+		expect(res.remembered?.id).toBe("remember-bash-pattern-git-push-deny");
 		const file = ruleFiles(ctx.cwd, home).user;
 		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
-		expect(doc.rules.some(r => r.id === "s-deny")).toBe(true);
+		expect(doc.rules.some(r => r.id === "remember-bash-pattern-git-push-deny")).toBe(true);
 	});
 
 	it("provider failure degrades to the base options and no preselection", async () => {
@@ -1116,7 +1118,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 	it("does not fire the provider for forced prompts", async () => {
 		const captured: { request?: PermissionDialogRequest } = {};
 		const ui = capturingDialogUi(captured, 0);
-		const provider = vi.fn(async (): Promise<SuggestResult> => ({ suggestions: [] }));
+		const provider = vi.fn(async (): Promise<SuggestResult> => ({ choices: [] }));
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a")] });
 		await promptForDecision(ui, "bash", { command: "echo a" }, decision, fakeCtx(tempHome()), {
 			includeCandidates: false,
@@ -1129,20 +1131,20 @@ describe("promptForDecision with a suggestionsProvider", () => {
 	it("an appended option index maps back to the suggestion label", async () => {
 		const captured: { request?: PermissionDialogRequest } = {};
 		const ui = capturingDialogUi(captured, 5);
-		const provider = async (): Promise<SuggestResult> => ({ suggestions: [allowSuggestion] });
+		const provider = async (): Promise<SuggestResult> => ({ choices: [onceChoice, allowChoice] });
 		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
 		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(tempHome()), {
 			suggestionsProvider: provider,
 		});
 		expect(res.policy).toBe("allow");
-		expect(res.remembered?.id).toBe("s-allow");
+		expect(res.remembered?.id).toBe("remember-bash-pattern-git-status-s-allow");
 	});
 
 	it("suggestions that cannot match the pending call are dropped", async () => {
 		const requests: PermissionDialogRequest[] = [];
 		const { ui } = queuedDialogUi([0], requests); // Allow once
-		// denySuggestion matches `git push` — not the pending `git status -s`.
-		const provider = async (): Promise<SuggestResult> => ({ suggestions: [denySuggestion] });
+		// denyChoice matches `git push` — not the pending `git status -s`.
+		const provider = async (): Promise<SuggestResult> => ({ choices: [onceChoice, denyChoice] });
 		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
 		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(tempHome()), {
 			suggestionsProvider: provider,
@@ -1152,16 +1154,54 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		expect(suggestionOptions.map(option => option.label)).not.toContain("Deny bash: git push");
 	});
 
+	it("a deny choice for a curated read-only tool is never offered", async () => {
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Allow once
+		// The deny matches the pending call but can never take effect on a
+		// curated read-only tool; the allow of the same shape survives.
+		const provider = async (): Promise<SuggestResult> => ({
+			choices: [
+				onceChoice,
+				{ action: "deny", remember: true, pattern: "/etc/passwd", reason: "secret" },
+				{ action: "allow", remember: true, pattern: "/etc/passwd", reason: "fine" },
+			],
+		});
+		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
+		const res = await promptForDecision(ui, "read", { path: "/etc/passwd" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		const suggestionOptions = await resolveLazy(requests[0]!.suggestions!);
+		const labels = suggestionOptions.map(option => option.label);
+		expect(labels).toContain("Allow read: /etc/passwd");
+		expect(labels).not.toContain("Deny read: /etc/passwd");
+	});
+
+	it("an allow-everything bash pattern is never offered; the deny of the same shape stays", async () => {
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Allow once
+		const provider = async (): Promise<SuggestResult> => ({
+			choices: [
+				onceChoice,
+				{ action: "allow", remember: true, pattern: "*" },
+				{ action: "deny", remember: true, pattern: "*" },
+				{ action: "allow", remember: true, pattern: "git status *" },
+			],
+		});
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		const labels = (await resolveLazy(requests[0]!.suggestions!)).map(option => option.label);
+		expect(labels).toEqual(["Deny bash: *", "Allow bash: git status *"]);
+	});
+
 	it("compound suggestions matching any pending piece survive the whole-call filter", async () => {
 		const requests: PermissionDialogRequest[] = [];
 		const { ui } = queuedDialogUi([0], requests); // Allow all pending once
 		const matching = async (): Promise<SuggestResult> => ({
-			suggestions: [
-				{
-					rule: { id: "s-piece", tool: "bash", match: { command: "echo a" }, action: "allow", reason: "x" },
-					rationale: "x",
-				},
-			],
+			choices: [onceChoice, { action: "allow", remember: true, pattern: "echo a", reason: "x" }],
 		});
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
 		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
@@ -1173,12 +1213,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		const keptOptions = await resolveLazy(requests[0]!.suggestions!);
 		expect(keptOptions.map(option => option.label)).toContain("Allow bash: echo a");
 		const notMatching = async (): Promise<SuggestResult> => ({
-			suggestions: [
-				{
-					rule: { id: "s-other", tool: "bash", match: { command: "echo c" }, action: "allow", reason: "x" },
-					rationale: "x",
-				},
-			],
+			choices: [onceChoice, { action: "allow", remember: true, pattern: "echo c", reason: "x" }],
 		});
 		const requests2: PermissionDialogRequest[] = [];
 		const { ui: ui2 } = queuedDialogUi([0], requests2);
@@ -1195,12 +1230,11 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		expect(droppedOptions.map(option => option.label)).not.toContain("Allow bash: echo c");
 	});
 
-	it("the model's recommendation preselects the matching decision-page option", async () => {
+	it("the first choice preselects the matching decision-page option", async () => {
 		const captured: { request?: PermissionDialogRequest } = {};
 		const ui = capturingDialogUi(captured, 0); // scripted pick wins regardless
 		const provider = async (): Promise<SuggestResult> => ({
-			suggestions: [],
-			recommendation: { action: "deny", scope: "pattern", reason: "risky" },
+			choices: [{ action: "deny", remember: true, reason: "risky" }],
 		});
 		const decision = fakeDecision({ pieces: [pendingPiece("git push")] });
 		const res = await promptForDecision(ui, "bash", { command: "git push" }, decision, fakeCtx(tempHome()), {
@@ -1211,12 +1245,11 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		expect(await resolveLazy(captured.request!.preselect!)).toBe(4);
 	});
 
-	it("a remember recommendation falls back to Allow once when remember is dropped", async () => {
+	it("a remember choice falls back to Allow once when remember is dropped", async () => {
 		const captured: { request?: PermissionDialogRequest } = {};
 		const ui = capturingDialogUi(captured, 0);
 		const provider = async (): Promise<SuggestResult> => ({
-			suggestions: [],
-			recommendation: { action: "allow", scope: "pattern", reason: "repeatable" },
+			choices: [{ action: "allow", remember: true, reason: "repeatable" }],
 		});
 		// eval: exact-only candidates → remember options dropped.
 		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
@@ -1228,12 +1261,11 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		expect(await resolveLazy(captured.request!.preselect!)).toBe(0);
 	});
 
-	it("the model's recommendation preselects the compound option", async () => {
+	it("the first choice preselects the compound option", async () => {
 		const captured: { request?: PermissionDialogRequest } = {};
 		const ui = capturingDialogUi(captured, 0);
 		const provider = async (): Promise<SuggestResult> => ({
-			suggestions: [],
-			recommendation: { action: "deny", scope: "once", reason: "no" },
+			choices: [{ action: "deny", remember: false, reason: "no" }],
 		});
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
 		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
@@ -1244,7 +1276,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		expect(await resolveLazy(captured.request!.preselect!)).toBe(3);
 	});
 
-	it("the recommended scope preselects the matching scope-page candidate", async () => {
+	it("a remember-exact choice preselects the matching scope-page candidate", async () => {
 		const home = tempHome();
 		// First call is the decision page (1 = Allow & remember…), second the
 		// scope page (pick the preselected candidate).
@@ -1258,8 +1290,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			},
 		} as unknown as ExtensionUIContext;
 		const provider = async (): Promise<SuggestResult> => ({
-			suggestions: [],
-			recommendation: { action: "allow", scope: "exact", reason: "one-off" },
+			choices: [{ action: "allow", remember: true, reason: "one-off" }],
 		});
 		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
 		const res = await promptForDecision(queued, "bash", { command: "git status -s" }, decision, fakeCtx(home), {

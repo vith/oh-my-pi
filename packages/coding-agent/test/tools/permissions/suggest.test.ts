@@ -3,10 +3,8 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import * as piAi from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { EngineContext } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
-import { normalizeRule } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
 import {
 	createSuggestionProvider,
-	type Suggestion,
 	type SuggestionUnit,
 	suggestRules,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/suggest";
@@ -44,81 +42,92 @@ function assistantJson(text: string) {
 	return { stopReason: "stop", content: [{ type: "text", text }] } as never;
 }
 
-const RULES_ONLY = { suggestions: [] };
-const RECOMMENDED_ALLOW_ONCE = {
-	suggestions: [],
-	recommendation: { action: "allow" as const, scope: "once" as const },
-};
+const EMPTY_CHOICES = { choices: [] };
+const RECOMMENDED_ALLOW_ONCE = { choices: [{ action: "allow" as const, remember: false }] };
 
 afterEach(() => {
 	vi.restoreAllMocks();
 });
 
 describe("suggestRules", () => {
-	it("returns the recommendation and validated suggestions parsed from the model's JSON", async () => {
+	it("parses the model's choices in order", async () => {
 		vi.spyOn(piAi, "completeSimple").mockResolvedValue(
 			assistantJson(
-				'{"recommendation":{"action":"allow","scope":"pattern","reason":"safe push"},"rules":[{"tool":"bash","match":{"command":"git push"},"action":"allow","reason":"safe push"},{"tool":"bash","match":{"command":"git *"},"action":"deny","reason":"untrusted git"}]}',
+				'{"choices":[{"action":"allow","remember":true,"pattern":"git push","reason":"safe push"},{"action":"deny","remember":true,"pattern":"git *","reason":"untrusted git"}]}',
 			),
 		);
 		const result = await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry());
-		expect(result.recommendation).toEqual({ action: "allow", scope: "pattern", reason: "safe push" });
-		expect(result.suggestions).toHaveLength(2);
-		for (const suggestion of result.suggestions) {
-			expect(normalizeRule({ ...suggestion.rule, layer: "user" }, "user")).not.toBeNull();
-		}
-		expect(result.suggestions[0]?.rule.tool).toBe("bash");
-		expect(result.suggestions[0]?.rule.action).toBe("allow");
-		expect(result.suggestions[0]?.rule.match).toEqual({ command: "git push" });
-		expect(result.suggestions[0]?.rationale).toBe("safe push");
-		expect(result.suggestions[1]?.rule.action).toBe("deny");
-	});
-
-	it("caps suggestions at 3 even when the model returns more", async () => {
-		const records = Array.from({ length: 6 }, (_, index) => ({
-			tool: "bash",
-			match: { command: `cmd ${index}` },
+		expect(result.choices).toHaveLength(2);
+		expect(result.choices[0]).toEqual({
 			action: "allow",
-		}));
-		vi.spyOn(piAi, "completeSimple").mockResolvedValue(
-			assistantJson(JSON.stringify({ recommendation: { action: "allow", scope: "once" }, rules: records })),
-		);
-		const result = await suggestRules(unit("bash", { command: "cmd" }), fakeCtx(), fakeRegistry());
-		expect(result.suggestions).toHaveLength(3);
+			remember: true,
+			pattern: "git push",
+			reason: "safe push",
+		});
+		expect(result.choices[1]?.action).toBe("deny");
 	});
 
-	it("keeps a valid recommendation and degrades malformed ones to none", async () => {
+	it("caps choices at 3 even when the model returns more", async () => {
+		const records = Array.from({ length: 6 }, (_, index) => ({
+			action: "allow",
+			remember: true,
+			pattern: `cmd ${index}`,
+		}));
+		vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson(JSON.stringify({ choices: records })));
+		const result = await suggestRules(unit("bash", { command: "cmd" }), fakeCtx(), fakeRegistry());
+		expect(result.choices).toHaveLength(3);
+	});
+
+	it("keeps valid choices and degrades malformed ones to none", async () => {
 		vi.spyOn(piAi, "completeSimple").mockResolvedValue(
-			assistantJson('{"recommendation":{"action":"maybe","scope":"once"},"rules":[]}'),
+			assistantJson('{"choices":[{"action":"maybe","remember":true}]}'),
 		);
 		const result = await suggestRules(unit("bash", { command: "cmd" }), fakeCtx(), fakeRegistry());
-		expect(result.recommendation).toBeUndefined();
+		expect(result.choices).toEqual([]);
 
 		vi.spyOn(piAi, "completeSimple").mockResolvedValue(
-			assistantJson('{"recommendation":{"action":"allow","scope":"weekly"},"rules":[]}'),
+			assistantJson('{"choices":[{"action":"allow","remember":"yes"}]}'),
 		);
-		expect(
-			(await suggestRules(unit("bash", { command: "cmd" }), fakeCtx(), fakeRegistry())).recommendation,
-		).toBeUndefined();
+		expect((await suggestRules(unit("bash", { command: "cmd" }), fakeCtx(), fakeRegistry())).choices).toEqual([]);
 
 		vi.spyOn(piAi, "completeSimple").mockResolvedValue(
-			assistantJson('{"recommendation":{"action":"deny","scope":"tool","reason":"dangerous"},"rules":[]}'),
+			assistantJson('{"choices":[{"action":"deny","remember":true,"pattern":"*","reason":"dangerous"}]}'),
 		);
-		expect((await suggestRules(unit("bash", { command: "cmd" }), fakeCtx(), fakeRegistry())).recommendation).toEqual({
-			action: "deny",
-			scope: "tool",
-			reason: "dangerous",
-		});
+		expect((await suggestRules(unit("bash", { command: "cmd" }), fakeCtx(), fakeRegistry())).choices).toEqual([
+			{ action: "deny", remember: true, pattern: "*", reason: "dangerous" },
+		]);
+	});
+
+	it("drops malformed records and keeps valid ones", async () => {
+		vi.spyOn(piAi, "completeSimple").mockResolvedValue(
+			assistantJson(
+				'{"choices":[{"action":"allow","remember":true,"pattern":"git push","reason":"ok"},{"action":"nope","remember":true},{"remember":"x"}]}',
+			),
+		);
+		const result = await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry());
+		expect(result.choices).toHaveLength(1);
+		expect(result.choices[0]?.action).toBe("allow");
 	});
 
 	it("degrades to an empty result when the response is not a JSON object", async () => {
 		vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson("sure, just allow it"));
-		expect(await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry())).toEqual(RULES_ONLY);
+		expect(await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry())).toEqual(
+			EMPTY_CHOICES,
+		);
+	});
+
+	it("degrades to an empty result when the response carries no choices array", async () => {
+		vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"recommendation":{"action":"allow"}}'));
+		expect(await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry())).toEqual(
+			EMPTY_CHOICES,
+		);
 	});
 
 	it("degrades to an empty result when completeSimple rejects", async () => {
 		vi.spyOn(piAi, "completeSimple").mockRejectedValue(new Error("provider down"));
-		expect(await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry())).toEqual(RULES_ONLY);
+		expect(await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry())).toEqual(
+			EMPTY_CHOICES,
+		);
 	});
 
 	it("degrades to an empty result when the provider reports a stopReason of error", async () => {
@@ -127,35 +136,13 @@ describe("suggestRules", () => {
 			errorMessage: "rate limited",
 			content: [],
 		} as never);
-		expect(await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry())).toEqual(RULES_ONLY);
-	});
-
-	it("drops malformed records and keeps valid ones", async () => {
-		vi.spyOn(piAi, "completeSimple").mockResolvedValue(
-			assistantJson(
-				'{"rules":[{"tool":"bash","match":{"command":"git push"},"action":"allow","reason":"ok"},{"tool":"","match":{},"action":"allow"},{"action":"allow"}]}',
-			),
+		expect(await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry())).toEqual(
+			EMPTY_CHOICES,
 		);
-		const result = await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry());
-		expect(result.suggestions).toHaveLength(1);
-		expect(result.suggestions[0]?.rule.tool).toBe("bash");
 	});
 
-	it("never suggests denying curated read-only tools", async () => {
-		vi.spyOn(piAi, "completeSimple").mockResolvedValue(
-			assistantJson(
-				'{"rules":[{"tool":"read","match":{"path":"/etc/passwd"},"action":"deny","reason":"secret"},{"tool":"read","match":{"path":"src/**"},"action":"allow","reason":"fine"},{"tool":"bash","match":{"command":"rm -rf /"},"action":"deny","reason":"dangerous"}]}',
-			),
-		);
-		const result = await suggestRules(unit("read", { path: "/etc/passwd" }), fakeCtx(), fakeRegistry());
-		expect(result.suggestions).toHaveLength(2);
-		expect(result.suggestions.some(s => s.rule.action === "deny" && s.rule.tool === "read")).toBe(false);
-		expect(result.suggestions.some(s => s.rule.action === "allow" && s.rule.tool === "read")).toBe(true);
-		expect(result.suggestions.some(s => s.rule.tool === "bash" && s.rule.action === "deny")).toBe(true);
-	});
-
-	it("sends the imported system prompt with the call, cwd, and current rules", async () => {
-		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"rules":[]}'));
+	it("sends the imported system prompt with the call, cwd, and the ordered decision structure", async () => {
+		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"choices":[]}'));
 		await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry(), "session-1");
 		const request = spy.mock.calls[0]?.[1] as { systemPrompt?: string[]; messages?: Array<{ content: string }> };
 		expect(request?.systemPrompt).toBeDefined();
@@ -167,23 +154,22 @@ describe("suggestRules", () => {
 		expect(systemPrompt).toContain('"*" matches any run of characters INCLUDING "/"');
 		expect(systemPrompt).toContain('the space before "*" is literal');
 		expect(systemPrompt).toContain('A leading "~" in a path pattern');
-		// And the dialog's scope rules: no tool-wide bash.
-		expect(systemPrompt).toContain('Never recommend "tool" scope for bash');
-		// The three decisions are made in order, and saving a rule is the
+		// The three decisions are made in order, and remembering is the
 		// default for repeatable calls — the model must not dodge rules to
 		// avoid duplicating the dialog's own candidates (issue 16).
-		expect(systemPrompt.indexOf("1. Allow or deny?")).toBeLessThan(systemPrompt.indexOf("2. Save a rule or not?"));
-		expect(systemPrompt.indexOf("2. Save a rule or not?")).toBeLessThan(
-			systemPrompt.indexOf("3. If saving a rule, what pattern?"),
+		expect(systemPrompt.indexOf("1. Allow or deny?")).toBeLessThan(systemPrompt.indexOf("2. Remember it or not?"));
+		expect(systemPrompt.indexOf("2. Remember it or not?")).toBeLessThan(
+			systemPrompt.indexOf("3. If remembering: pattern or exact?"),
 		);
 		expect(systemPrompt).toContain("A human should not have to approve");
+		// The dialog's own candidate shapes are UI, not prompt context — the
+		// model must not be steered away from proposing them (issue 16).
+		expect(systemPrompt).not.toContain("Mechanical");
 		const userMessage = request.messages?.[0]?.content ?? "";
 		expect(userMessage).toContain("git push");
 		expect(userMessage).toContain("Tool: bash");
 		expect(userMessage).toContain('Arguments: {"command":"git push"}');
 		expect(userMessage).toContain("/tmp/suggest-proj");
-		// The dialog's own candidate shapes are UI, not prompt context — the
-		// model must not be steered away from proposing them (issue 16).
 		expect(userMessage).not.toContain("Mechanical candidates");
 		expect(userMessage).not.toContain("- Exact:");
 		expect(userMessage).not.toContain("- Pattern:");
@@ -209,28 +195,12 @@ describe("suggestRules", () => {
 		expect(options?.forceReasoningOff).not.toBe(true);
 	});
 
-	it("never surfaces a tool-wide bash allow suggestion", async () => {
-		const spy = vi
-			.spyOn(piAi, "completeSimple")
-			.mockResolvedValue(
-				assistantJson(
-					'{"rules":[{"tool":"bash","match":{"command":"*"},"action":"allow"},{"tool":"bash","match":{"command":"*"},"action":"deny"},{"tool":"bash","match":{"command":"git status *"},"action":"allow"}]}',
-				),
-			);
-		const result = await suggestRules(unit("bash", { command: "git status" }), fakeCtx(), fakeRegistry());
-		expect(spy).toHaveBeenCalledTimes(1);
-		const tools = result.suggestions.map(s => `${s.rule.action} ${s.rule.match.command}`);
-		// The yolo-knob allow is dropped; the same-shape deny and the family
-		// allow survive.
-		expect(tools).toEqual(["deny *", "allow git status *"]);
-	});
-
 	it("composes the caller signal with the hard timeout and degrades to an empty result when aborted", async () => {
 		const controller = new AbortController();
 		controller.abort();
 		const spy = vi.spyOn(piAi, "completeSimple").mockImplementation((_model, _context, options) => {
 			if (options?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
-			return Promise.resolve(assistantJson('{"rules":[]}'));
+			return Promise.resolve(assistantJson('{"choices":[]}'));
 		});
 		const result = await suggestRules(
 			unit("bash", { command: "git push" }),
@@ -239,7 +209,7 @@ describe("suggestRules", () => {
 			undefined,
 			controller.signal,
 		);
-		expect(result).toEqual(RULES_ONLY);
+		expect(result).toEqual(EMPTY_CHOICES);
 		const options = spy.mock.calls[0]?.[2] as { signal?: AbortSignal };
 		expect(options?.signal).toBeDefined();
 		expect(options?.signal).not.toBe(controller.signal); // composed, not the raw caller signal
@@ -247,19 +217,19 @@ describe("suggestRules", () => {
 	});
 
 	it("still supplies a timeout signal when the caller passes none", async () => {
-		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"rules":[]}'));
+		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"choices":[]}'));
 		await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry());
 		const options = spy.mock.calls[0]?.[2] as { signal?: AbortSignal };
 		expect(options?.signal).toBeDefined();
 		expect(options?.signal?.aborted).toBe(false);
 	});
 
-	it("the llmSuggestions gate drops the rules but keeps the recommendation and the request", async () => {
+	it("the llmSuggestions gate keeps only the first choice (the preselection) and the request", async () => {
 		const spy = vi
 			.spyOn(piAi, "completeSimple")
 			.mockResolvedValue(
 				assistantJson(
-					'{"recommendation":{"action":"allow","scope":"once","reason":"fine"},"rules":[{"tool":"bash","match":{"command":"git push"},"action":"allow"}]}',
+					'{"choices":[{"action":"allow","remember":false,"reason":"fine"},{"action":"allow","remember":true,"pattern":"git push"}]}',
 				),
 			);
 		const result = await suggestRules(
@@ -267,17 +237,16 @@ describe("suggestRules", () => {
 			fakeCtx({ llmSuggestions: false }),
 			fakeRegistry(),
 		);
-		expect(result.recommendation).toEqual({ action: "allow", scope: "once", reason: "fine" });
-		expect(result.suggestions).toEqual([]);
+		expect(result.choices).toEqual([{ action: "allow", remember: false, reason: "fine" }]);
 		expect(spy).toHaveBeenCalledTimes(1);
 		const request = spy.mock.calls[0]?.[1] as { messages?: Array<{ content: string }> };
-		expect(request.messages?.[0]?.content ?? "").toContain("Do not include a rules array");
+		expect(request.messages?.[0]?.content ?? "").toContain("Provide exactly one choice.");
 	});
 });
 
 describe("createSuggestionProvider", () => {
 	it("binds the session model and sessionId into each call", async () => {
-		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"rules":[]}'));
+		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"choices":[]}'));
 		const provider = createSuggestionProvider(fakeCtx(), fakeRegistry(), "session-9", fakeModel);
 		await provider(unit("bash", { command: "git status" }));
 		expect(spy).toHaveBeenCalledTimes(1);
@@ -287,41 +256,26 @@ describe("createSuggestionProvider", () => {
 	});
 
 	it("resolves a model from the registry when none is bound", async () => {
-		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"rules":[]}'));
+		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"choices":[]}'));
 		const provider = createSuggestionProvider(fakeCtx(), fakeRegistry());
 		await provider(unit("bash", { command: "git status" }));
 		expect(spy).toHaveBeenCalledTimes(1);
 		expect(spy.mock.calls[0]?.[0]).toBe(fakeModel);
 	});
 
-	it("still fires for the recommendation when the rules gate is off", async () => {
+	it("still fires for the preselection when the choices gate is off", async () => {
 		const spy = vi
 			.spyOn(piAi, "completeSimple")
-			.mockResolvedValue(assistantJson('{"recommendation":{"action":"allow","scope":"once"}}'));
+			.mockResolvedValue(assistantJson('{"choices":[{"action":"allow","remember":false}]}'));
 		const provider = createSuggestionProvider(fakeCtx({ llmSuggestions: false }), fakeRegistry(), "s", fakeModel);
 		expect(await provider(unit("bash", { command: "git status" }))).toEqual(RECOMMENDED_ALLOW_ONCE);
 		expect(spy).toHaveBeenCalledTimes(1);
 	});
 
 	it("degrades to an empty result without calling the model when no model is available", async () => {
-		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"rules":[]}'));
+		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"choices":[]}'));
 		const provider = createSuggestionProvider(fakeCtx(), fakeRegistry(null), "s");
-		expect(await provider(unit("bash", { command: "git status" }))).toEqual(RULES_ONLY);
+		expect(await provider(unit("bash", { command: "git status" }))).toEqual(EMPTY_CHOICES);
 		expect(spy).not.toHaveBeenCalled();
-	});
-});
-
-describe("Suggestion shape", () => {
-	it("produces rules that writeDynamicRule-compatible round-trip through normalizeRule", async () => {
-		vi.spyOn(piAi, "completeSimple").mockResolvedValue(
-			assistantJson('{"rules":[{"tool":"write","match":{"path":"src/**"},"action":"allow","reason":"codegen"}]}'),
-		);
-		const result = await suggestRules(unit("write", { path: "src/x.ts" }), fakeCtx(), fakeRegistry());
-		expect(result.suggestions).toHaveLength(1);
-		const suggestion: Suggestion = result.suggestions[0]!;
-		expect(suggestion.rule).not.toHaveProperty("layer");
-		const roundTripped = normalizeRule({ ...suggestion.rule, layer: "user" }, "user");
-		expect(roundTripped).not.toBeNull();
-		expect(roundTripped?.reason).toBe("codegen");
 	});
 });
