@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-wire",
-  "version": "17.3.1+vith-fork.147.e4cf13962d",
+  "version": "17.3.1+vith-fork.151.32c3750af8",
   "description": "Shared wire protocol types for Oh My Pi packages",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
