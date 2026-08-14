@@ -2,13 +2,22 @@
 
 ## [Unreleased]
 
-## [17.3.1+vith-fork.136.4b7d383011] - 2026-08-14
+### Added
+
+- `/permissions remove` removes rules from any file-backed layer (dynamic, user, or — with `--project` — repo-committed project rules); tab completion after `remove` covers the removable layers and labels each id with its layer.
+
+## [17.3.1+vith-fork.142.d1177a301b] - 2026-08-14
 
 ### Added
 
 - `/permissions clear` wipes the file-backed rule layers (dynamic + user by default; the repo-committed project layer only with an explicit `--project`).
 - `/permissions remove` accepts multiple rule ids in one call.
 - `/permissions` tab-completes rule ids after `show`/`remove`/`edit` (user-layer ids for the editing subcommands).
+
+## [17.3.1+vith-fork.136.4b7d383011] - 2026-08-14
+
+### Added
+
 - Permission rules resolve by match class and specificity: exact-structure beats covering, most specific wins, deny wins ties, curated hard-denies absolute (spec §3.1).
 - Curated safe-consumer exemption: `git log *` covers `git log … | head -1`; exec-capable stages still require rules.
 - Approval dialog v3: one compound dialog (piece list = command), per-piece drill-down, remember checklists with glob editing, deny-error override suggestions.
