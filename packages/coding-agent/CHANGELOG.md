@@ -4,8 +4,13 @@
 
 ### Added
 
+- New global posture `permissions.projectWrites` (settings UI, Permissions group): overrides the default posture for write tools (`edit`, `write`, `ast_edit`) whose target path resolves inside the project directory. `allow` auto-approves project-scoped writes; `prompt`/`deny` behave like the general posture. Unconfigured, it falls back to `permissions.default`.
 - Merged the dynamic layer into the user layer: remembered approval-dialog rules now write to `~/.omp/agent/permissions.yml` like hand-added rules, with two file-backed layers (project, user) total. Rules left in the legacy `permissions.dynamic.yml` still load (folded into the user layer) and `/permissions migrate` physically merges and removes the file.
 - `/permissions remove` removes rules from any file-backed layer (user, or — with `--project` — repo-committed project rules); tab completion after `remove` covers the removable layers and labels each id with its layer.
+
+### Changed
+
+- `permissions.llmSuggestions` now defaults to **off**: the one-shot model rule-suggestion side request is opt-in (`permissions.llmSuggestions: true`).
 
 ## [17.3.1+vith-fork.142.d1177a301b] - 2026-08-14
 

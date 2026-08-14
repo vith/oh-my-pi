@@ -76,7 +76,7 @@ export function ruleFiles(cwd: string, home?: string): { project: string; user: 
  * Walk up from `cwd`, returning the nearest directory that contains a
  * `.omp/permissions.yml` file, or `cwd` itself when none does.
  */
-function findNearestProjectRoot(cwd: string): string {
+export function findNearestProjectRoot(cwd: string): string {
 	let currentDir = path.resolve(cwd);
 	while (true) {
 		try {

@@ -693,3 +693,79 @@ describe("denyOverrideSuggestion (spec §5.2)", () => {
 		}
 	});
 });
+
+describe("project-writes posture (permissions.projectWrites)", () => {
+	const makeDir = () => fs.mkdtempSync(path.join(os.tmpdir(), `perm-projectwrites-${Snowflake.next()}-`));
+	const projectCwd = (base: string) => path.join(base, "proj");
+	const insidePath = (base: string) => path.join(projectCwd(base), "src", "a.ts");
+
+	it("configured allow auto-approves write tools inside the project root", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: insidePath(base) }, c).policy).toBe("allow");
+			expect(evaluatePermission(tool("write"), { path: insidePath(base) }, c).policy).toBe("allow");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("configured deny blocks writes inside the project root", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "deny" }, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: insidePath(base) }, c).policy).toBe("deny");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("paths outside the project root keep the general posture", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: path.join(base, "outside", "a.ts") }, c).policy).toBe(
+				"prompt",
+			);
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("relative and ~-prefixed paths resolve against cwd/home", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: "src/a.ts" }, c).policy).toBe("allow");
+			// ~/… resolves into the home dir (a sibling of proj) → outside the
+			// project root → general posture.
+			expect(evaluatePermission(tool("edit"), { path: "~/x.ts" }, c).policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("unconfigured falls back to the general posture", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({}, projectCwd(base));
+			expect(evaluatePermission(tool("edit"), { path: insidePath(base) }, c).policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("non-write tools are unaffected by the project-writes posture", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("bash"), { command: "echo hi" }, c).policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+	it("ast_edit paths array is contained like a single path", () => {
+		const base = makeDir();
+		try {
+			const c = ctx({ "permissions.projectWrites": "allow" }, projectCwd(base));
+			expect(evaluatePermission(tool("ast_edit"), { ops: [], paths: [insidePath(base)] }, c).policy).toBe("allow");
+		} finally {
+			removeSyncWithRetries(base);
+		}
+	});
+});
