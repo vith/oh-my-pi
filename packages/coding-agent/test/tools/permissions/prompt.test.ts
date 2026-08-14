@@ -632,6 +632,7 @@ describe("promptForDecision", () => {
 			"Allow & remember…",
 			"Deny",
 			"Deny & remember…",
+			"Back to all pieces",
 		]);
 	});
 
@@ -765,6 +766,55 @@ describe("promptForDecision", () => {
 		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
 		const requests: PermissionDialogRequest[] = [];
 		const { ui } = queuedDialogUi([3, 0], requests); // drill-down → Back (index 0)
+		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
+		expect(res.policy).toBe("deny");
+		expect(res.remembered).toBeUndefined();
+		expect(requests).toHaveLength(2);
+		expect(requests[1]?.title).toBe("Decide per piece");
+	});
+
+	it("drill-down Back to all pieces returns to the piece selector", async () => {
+		const ctx = fakeCtx(tempHome());
+		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
+		const requests: PermissionDialogRequest[] = [];
+		// drill-down → "git log -n 5" → Back to all pieces (per-piece index 4)
+		// → selector again → Back (index 0) leaves the remainder undecided.
+		const { ui } = queuedDialogUi([3, 1, 4, 0], requests);
+		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
+		expect(res.policy).toBe("deny");
+		expect(requests).toHaveLength(4);
+		expect(requests[1]?.title).toBe("Decide per piece");
+		// The per-piece dialog carries the 5th "Back to all pieces" option.
+		expect(requests[2]?.options.map(option => option.label)).toEqual([
+			"Allow once",
+			"Allow & remember…",
+			"Deny",
+			"Deny & remember…",
+			"Back to all pieces",
+		]);
+		// Choosing it re-enters the selector with the piece still listed.
+		expect(requests[3]?.title).toBe("Decide per piece");
+		expect(requests[3]?.options.map(option => option.label)).toEqual(["Back", "git log -n 5", "echo hi"]);
+	});
+
+	it("drill-down Back to all pieces allows deciding the other piece first", async () => {
+		const ctx = fakeCtx(tempHome());
+		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
+		const requests: PermissionDialogRequest[] = [];
+		// drill-down → "git log -n 5" → Back to all pieces → "echo hi" →
+		// Allow once → "git log -n 5" → Allow once → all decided, call allowed.
+		const { ui } = queuedDialogUi([3, 1, 4, 2, 0, 1, 0], requests);
+		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
+		expect(res.policy).toBe("allow");
+		expect(requests).toHaveLength(7);
+		expect(requests[3]?.title).toBe("Decide per piece");
+	});
+
+	it("esc in the piece selector with remainders still denies", async () => {
+		const ctx = fakeCtx(tempHome());
+		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([3, undefined], requests); // drill-down → esc
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("deny");
 		expect(res.remembered).toBeUndefined();

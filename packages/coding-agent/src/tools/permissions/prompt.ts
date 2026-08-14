@@ -613,6 +613,9 @@ async function writeRememberedRule(rule: Omit<PermissionRule, "layer">, ctx: Eng
 	await writeDynamicRule(ruleFiles(ctx.cwd, ctx.home).dynamic, { ...rule, layer: "dynamic" });
 }
 
+/** PromptUnit outcome: a normal resolution, or the drill-down's back-to-selector signal. */
+type PromptUnitResult = PromptResolution | { policy: "back" };
+
 /** Prompt for one unit (a pending bash piece, the whole call, or a whole PTY command). */
 async function promptUnit(
 	ui: ExtensionUIContext,
@@ -622,7 +625,8 @@ async function promptUnit(
 	ctx: EngineContext,
 	opts: PromptForDecisionOptions,
 	pieces: PieceEvaluation[] | undefined,
-): Promise<PromptResolution> {
+	backLabel?: string,
+): Promise<PromptUnitResult> {
 	const title = opts.title ?? defaultTitle(toolName);
 
 	if (opts.includeCandidates === false) {
@@ -648,10 +652,12 @@ async function promptUnit(
 	const metaLines = dialogMetadataLines(toolName, opts);
 	const lines: (string | PermissionDialogLine)[] = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
 	if (rememberDisabled) lines.push("", BASH_SHELL_CONTROL_NOTE);
+	const baseOptions = rememberDisabled ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER];
+	const options = backLabel !== undefined ? [...baseOptions, backLabel] : baseOptions;
 	const chosen = await chooseLabel(
 		ui,
 		dialogTitle(ui, title, metaLines),
-		rememberDisabled ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER],
+		options,
 		lines,
 		suggestionsPromise?.then(result => result.options),
 	);
@@ -682,6 +688,8 @@ async function promptUnit(
 			return { policy: "deny", remembered: rule.rule };
 		}
 		default: {
+			// Drill-down navigation: return to the piece selector, undecided.
+			if (backLabel !== undefined && chosen === backLabel) return { policy: "back" };
 			// A suggestion option picked from the dialog: remember its rule and
 			// resolve with its action. Unknown labels still fail closed.
 			if (chosen !== undefined && suggestionsPromise !== undefined) {
@@ -783,6 +791,7 @@ async function drillDownPieces(
 	ctx: EngineContext,
 	opts: PromptForDecisionOptions,
 ): Promise<PromptResolution> {
+	const BACK_TO_ALL_PIECES = "Back to all pieces";
 	let remembered: Omit<PermissionRule, "layer"> | undefined;
 	const remaining = [...pendingPieces];
 	while (remaining.length > 0) {
@@ -791,7 +800,12 @@ async function drillDownPieces(
 		const index = remaining.findIndex(piece => piece.text === picked);
 		if (index < 0) break;
 		const [piece] = remaining.splice(index, 1);
-		const resolution = await promptUnit(ui, "bash", { command: piece.text }, decision, ctx, opts, [piece]);
+		const resolution = await promptUnit(ui, "bash", { command: piece.text }, decision, ctx, opts, [piece], BACK_TO_ALL_PIECES);
+		if (resolution.policy === "back") {
+			// Back to all pieces: return the piece to the selector, undecided.
+			remaining.splice(index, 0, piece);
+			continue;
+		}
 		if (resolution.policy === "deny") {
 			// fail closed: a denied piece denies the whole call, carrying any
 			// rule remembered for it
