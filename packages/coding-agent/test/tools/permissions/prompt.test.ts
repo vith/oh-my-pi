@@ -16,6 +16,7 @@ import {
 	promptForDecision,
 	rememberCompound,
 	renderAllowSuggestion,
+	resolveLazy,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/prompt";
 import { normalizeRule, ruleFiles } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
 import {
@@ -92,12 +93,24 @@ function pendingPiece(text: string): PieceEvaluation {
 	return { text, policy: "prompt" };
 }
 
+/**
+ * Mirror the real permission dialog (issue 13): the lazy suggestion/preselect
+ * starters fire when the dialog is presented. Assertions resolve the same
+ * fields via `resolveLazy` — the memoized starter returns the shared request
+ * either way.
+ */
+function mountDialog(request: PermissionDialogRequest): void {
+	void resolveLazy(request.suggestions);
+	void resolveLazy(request.preselect);
+}
+
 /** Fake UI whose `showPermissionDialog` returns scripted indices, recording every request. */
 function queuedDialogUi(indices: Array<number | undefined>, requests: PermissionDialogRequest[] = []) {
 	const ui = {
 		...noopUi(),
 		showPermissionDialog: async (request: PermissionDialogRequest) => {
 			requests.push(request);
+			mountDialog(request);
 			return indices.length > 0 ? indices.shift() : undefined;
 		},
 	} as unknown as ExtensionUIContext;
@@ -979,6 +992,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			...noopUi(),
 			showPermissionDialog: async (request: PermissionDialogRequest) => {
 				captured.request = request;
+				mountDialog(request);
 				return pickIndex;
 			},
 		} as unknown as ExtensionUIContext;
@@ -1005,10 +1019,35 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		expect(res.policy).toBe("allow");
 		expect(firedUnits).toEqual([{ tool: "bash", args: { command: "echo a && echo b" }, text: "echo a && echo b" }]);
 		expect(captured.request?.suggestions).toBeDefined();
-		const options = await captured.request!.suggestions!;
+		const options = await resolveLazy(captured.request!.suggestions!);
 		expect(options).toHaveLength(1);
 		expect(options[0]?.label).toContain("Allow bash");
 		expect(options[0]?.description).toContain("echo a");
+	});
+
+	it("defers the provider until the dialog is presented (issue 13: queued dialogs keep their budget)", async () => {
+		const captured: { request?: PermissionDialogRequest } = {};
+		// This fake captures the request but never "mounts" it — exactly the
+		// queued-dialog state. The provider must not have fired yet.
+		const ui = {
+			...noopUi(),
+			showPermissionDialog: async (request: PermissionDialogRequest) => {
+				captured.request = request;
+				return 0; // "Allow once"
+			},
+		} as unknown as ExtensionUIContext;
+		const provider = vi.fn(async (): Promise<SuggestResult> => ({ suggestions: [] }));
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		expect(provider).not.toHaveBeenCalled();
+		// Presenting the dialog (firing the lazy fields) starts exactly one
+		// request, shared by the suggestions list and the preselection.
+		await resolveLazy(captured.request!.suggestions!);
+		await resolveLazy(captured.request!.preselect!);
+		expect(provider).toHaveBeenCalledTimes(1);
 	});
 
 	it("picking a suggested allow option remembers its rule", async () => {
@@ -1070,8 +1109,8 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			suggestionsProvider: provider,
 		});
 		expect(res.policy).toBe("allow");
-		expect(await captured.request!.suggestions!).toEqual([]);
-		expect(await captured.request!.preselect!).toBeUndefined();
+		expect(await resolveLazy(captured.request!.suggestions!)).toEqual([]);
+		expect(await resolveLazy(captured.request!.preselect!)).toBeUndefined();
 	});
 
 	it("does not fire the provider for forced prompts", async () => {
@@ -1109,7 +1148,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			suggestionsProvider: provider,
 		});
 		expect(res.policy).toBe("allow");
-		const suggestionOptions = await requests[0]!.suggestions!;
+		const suggestionOptions = await resolveLazy(requests[0]!.suggestions!);
 		expect(suggestionOptions.map(option => option.label)).not.toContain("Deny bash: git push");
 	});
 
@@ -1131,7 +1170,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		expect(res.policy).toBe("allow");
 		// `echo a` does not match the whole compound string, but it covers the
 		// first pending piece — the option stays.
-		const keptOptions = await requests[0]!.suggestions!;
+		const keptOptions = await resolveLazy(requests[0]!.suggestions!);
 		expect(keptOptions.map(option => option.label)).toContain("Allow bash: echo a");
 		const notMatching = async (): Promise<SuggestResult> => ({
 			suggestions: [
@@ -1152,7 +1191,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			{ suggestionsProvider: notMatching },
 		);
 		expect(res2.policy).toBe("allow");
-		const droppedOptions = await requests2[0]!.suggestions!;
+		const droppedOptions = await resolveLazy(requests2[0]!.suggestions!);
 		expect(droppedOptions.map(option => option.label)).not.toContain("Allow bash: echo c");
 	});
 
@@ -1169,7 +1208,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		});
 		expect(res.policy).toBe("allow");
 		// Deny & remember… = index 4 of [Allow once, Allow for this session, Allow & remember…, Deny, Deny & remember…]
-		expect(await captured.request!.preselect!).toBe(4);
+		expect(await resolveLazy(captured.request!.preselect!)).toBe(4);
 	});
 
 	it("a remember recommendation falls back to Allow once when remember is dropped", async () => {
@@ -1186,7 +1225,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		});
 		expect(res.policy).toBe("allow");
 		// [Allow once, Deny] — Allow once is index 0.
-		expect(await captured.request!.preselect!).toBe(0);
+		expect(await resolveLazy(captured.request!.preselect!)).toBe(0);
 	});
 
 	it("the model's recommendation preselects the compound option", async () => {
@@ -1202,7 +1241,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		});
 		expect(res.policy).toBe("allow");
 		// Deny all pending = index 3 of [Allow all once, Allow all session, Allow all & remember…, Deny all, Drill down].
-		expect(await captured.request!.preselect!).toBe(3);
+		expect(await resolveLazy(captured.request!.preselect!)).toBe(3);
 	});
 
 	it("the recommended scope preselects the matching scope-page candidate", async () => {
@@ -1230,7 +1269,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		expect(res.remembered?.match).toEqual({ command: "git status -s" });
 		// The scope page preselect resolves to the Exact candidate (index 0),
 		// overriding the Pattern fallback.
-		expect(await requests[1]!.preselect!).toBe(0);
+		expect(await resolveLazy(requests[1]!.preselect!)).toBe(0);
 	});
 });
 

@@ -10,6 +10,7 @@
  */
 import { Container, Loader, Markdown, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import type { PermissionDialogLine, PermissionDialogOption } from "../../extensibility/extensions";
+import { resolveLazy } from "../../tools/permissions/prompt";
 import { getMarkdownTheme, theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import { DynamicBorder } from "./dynamic-border";
@@ -81,8 +82,10 @@ export class PermissionDialogComponent extends Container {
 			 * Resolves to the row to preselect once the model's recommendation
 			 * lands. Applied only while the dialog is untouched (no key pressed,
 			 * not settled); resolving `undefined` keeps the current selection.
+			 * May be a starter function invoked on mount: queued dialogs begin
+			 * their recommendation when presented (issue 13).
 			 */
-			preselect?: Promise<number | undefined>;
+			preselect?: Promise<number | undefined> | (() => Promise<number | undefined>);
 			/** Checklist mode: space toggles toggleable options. */
 			checklist?: boolean;
 			/** Edit mode: `e` on a row settles and reports the row (caller maps the sentinel). */
@@ -90,7 +93,7 @@ export class PermissionDialogComponent extends Container {
 			onEdit?: (index: number) => void;
 			/** Checklist summary line computed from the current checked array; empty string hides it. */
 			previewFor?: (checked: boolean[]) => string;
-			suggestions?: Promise<PermissionDialogOption[]>;
+			suggestions?: Promise<PermissionDialogOption[]> | (() => Promise<PermissionDialogOption[]>);
 			ui?: TUI;
 		},
 	) {
@@ -120,7 +123,10 @@ export class PermissionDialogComponent extends Container {
 		this.#listContainer = new Container();
 		this.addChild(this.#listContainer);
 		if (opts?.suggestions !== undefined) {
-			this.#attachSuggestions(opts.suggestions, opts.ui);
+			// Lazy starters begin the model request at mount — the dialog is
+			// presented (dequeued) here, so queued dialogs keep their full
+			// timeout budget and never overlap a sibling request (issue 13).
+			this.#attachSuggestions(resolveLazy(opts.suggestions), opts.ui);
 		}
 		this.addChild(new Spacer(1));
 		if (opts?.previewFor !== undefined) {
@@ -136,7 +142,7 @@ export class PermissionDialogComponent extends Container {
 		this.#renderLines();
 		this.#renderPreview();
 		if (opts?.preselect !== undefined) {
-			void opts.preselect
+			void resolveLazy(opts.preselect)
 				.then(index => {
 					// The model's recommendation lands while the user may
 					// already have chosen or moved — never override an

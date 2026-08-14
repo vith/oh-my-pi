@@ -163,9 +163,12 @@ export interface PermissionDialogRequest {
 	/**
 	 * Resolves to the row to preselect once the model's recommendation lands.
 	 * Applied only while the dialog is untouched (no key pressed, not settled);
-	 * resolving `undefined` keeps the current selection.
+	 * resolving `undefined` keeps the current selection. May be a starter
+	 * function the dialog invokes on mount: queued dialogs then begin their
+	 * recommendation when presented instead of at gate time, keeping the full
+	 * timeout budget and never overlapping a sibling dialog's request.
 	 */
-	preselect?: Promise<number | undefined>;
+	preselect?: Promise<number | undefined> | (() => Promise<number | undefined>);
 	/** Help line shown at the bottom; defaults to the standard navigate/select/cancel text. */
 	helpText?: string;
 	/** Checklist mode: space toggles toggleable options. */
@@ -178,8 +181,9 @@ export interface PermissionDialogRequest {
 	 * Task 11 (§5.3): asynchronously appended LLM-suggested rules. The dialog
 	 * shows a spinner while the promise is pending and appends the options when
 	 * it settles; suggestions that resolve after the user chose are dropped.
+	 * May be a starter function the dialog invokes on mount (see `preselect`).
 	 */
-	suggestions?: Promise<PermissionDialogOption[]>;
+	suggestions?: Promise<PermissionDialogOption[]> | (() => Promise<PermissionDialogOption[]>);
 }
 
 export interface ExtensionAskDialogOption {

@@ -151,7 +151,16 @@ async function suggestWithModel(
 			},
 		);
 
-		if (response.stopReason === "error") return EMPTY_RESULT;
+		if (response.stopReason === "error") {
+			// The provider rejected the side request (e.g. a sibling dialog's
+			// suggestion already in flight). Visible at debug so a missing
+			// preselection is diagnosable instead of silently empty.
+			logger.debug("permission-suggest: suggestion request failed", {
+				reason: "provider-error",
+				error: response.errorMessage ?? "provider returned an error stop reason",
+			});
+			return EMPTY_RESULT;
+		}
 		return parseSuggestResponse(response.content, suggestionsEnabled(ctx));
 	} catch (error) {
 		logger.debug("permission-suggest: suggestion request failed", {
@@ -242,13 +251,32 @@ function parseSuggestResponse(content: AssistantMessage["content"], includeRules
 	try {
 		parsed = JSON.parse(jsonText);
 	} catch {
+		logger.debug("permission-suggest: suggestion response is not valid JSON", {
+			reason: "bad-json",
+			text: jsonText.slice(0, 200),
+		});
 		return EMPTY_RESULT;
 	}
-	if (!isRecord(parsed)) return EMPTY_RESULT;
+	if (!isRecord(parsed)) {
+		logger.debug("permission-suggest: suggestion response is not an object", {
+			reason: "bad-shape",
+			text: jsonText.slice(0, 200),
+		});
+		return EMPTY_RESULT;
+	}
 
 	const result: SuggestResult = { suggestions: [] };
 	const recommendation = parseRecommendation(parsed.recommendation);
-	if (recommendation !== undefined) result.recommendation = recommendation;
+	if (recommendation !== undefined) {
+		result.recommendation = recommendation;
+	} else if (parsed.recommendation !== undefined) {
+		logger.debug("permission-suggest: malformed recommendation in model response", {
+			reason: "bad-recommendation",
+			recommendation: JSON.stringify(parsed.recommendation).slice(0, 200),
+		});
+	} else {
+		logger.debug("permission-suggest: model response carries no recommendation", { reason: "no-recommendation" });
+	}
 	if (!includeRules || !Array.isArray(parsed.rules)) return result;
 
 	for (const record of parsed.rules) {

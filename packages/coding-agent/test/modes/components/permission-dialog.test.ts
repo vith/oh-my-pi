@@ -159,6 +159,52 @@ describe("PermissionDialogComponent", () => {
 		expect(selected).toEqual([1]);
 	});
 
+	it("fires a lazy suggestion starter on mount and appends its options (issue 13)", async () => {
+		const selected: number[] = [];
+		const starter = vi.fn(
+			async (): Promise<PermissionDialogOption[]> => [
+				{ label: "Allow bash: git push", description: "action: allow" },
+			],
+		);
+		const component = new PermissionDialogComponent(
+			"Allow tool: bash",
+			[],
+			[{ label: "Allow once" }],
+			index => selected.push(index),
+			() => {},
+			{ suggestions: starter },
+		);
+		// Construction is presentation: the queued dialog's budget starts here.
+		expect(starter).toHaveBeenCalledTimes(1);
+		await starter.mock.results[0]?.value;
+		// Flush the component's .then chain.
+		await Bun.sleep(0);
+		const out = render(component);
+		expect(out).not.toContain("Suggesting rules…");
+		expect(out).toContain("2. Allow bash: git push");
+		component.handleInput("j");
+		component.handleInput("j");
+		component.handleInput(ENTER);
+		expect(selected).toEqual([1]);
+	});
+
+	it("fires a lazy preselect starter on mount and applies the recommendation (issue 13)", async () => {
+		const selected: number[] = [];
+		const starter = vi.fn(async (): Promise<number | undefined> => 1);
+		const component = new PermissionDialogComponent(
+			"Approve this command?",
+			[],
+			[{ label: "Allow once" }, { label: "Deny" }],
+			index => selected.push(index),
+			() => {},
+			{ preselect: starter },
+		);
+		expect(starter).toHaveBeenCalledTimes(1);
+		await starter.mock.results[0]?.value;
+		component.handleInput(ENTER);
+		expect(selected).toEqual([1]);
+	});
+
 	it("drops suggestions that resolve after the user already chose", async () => {
 		const deferred = Promise.withResolvers<PermissionDialogOption[]>();
 		const component = new PermissionDialogComponent(
