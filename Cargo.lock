@@ -4780,7 +4780,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "17.3.1+vith-fork.142.d1177a301b"
+version = "17.3.1+vith-fork.147.e4cf13962d"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -4849,7 +4849,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "17.3.1+vith-fork.142.d1177a301b"
+version = "17.3.1+vith-fork.147.e4cf13962d"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -4934,7 +4934,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "17.3.1+vith-fork.142.d1177a301b"
+version = "17.3.1+vith-fork.147.e4cf13962d"
 dependencies = [
  "async-trait",
  "libc",
@@ -4946,7 +4946,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "17.3.1+vith-fork.142.d1177a301b"
+version = "17.3.1+vith-fork.147.e4cf13962d"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5017,7 +5017,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "17.3.1+vith-fork.142.d1177a301b"
+version = "17.3.1+vith-fork.147.e4cf13962d"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -5045,7 +5045,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "17.3.1+vith-fork.142.d1177a301b"
+version = "17.3.1+vith-fork.147.e4cf13962d"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -5060,7 +5060,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "17.3.1+vith-fork.142.d1177a301b"
+version = "17.3.1+vith-fork.147.e4cf13962d"
 dependencies = [
  "dashmap",
  "globset",

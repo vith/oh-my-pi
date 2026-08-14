@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.1+vith-fork.147.e4cf13962d] - 2026-08-14
+
 ### Added
 
 - `/permissions remove` removes rules from any file-backed layer (dynamic, user, or — with `--project` — repo-committed project rules); tab completion after `remove` covers the removable layers and labels each id with its layer.

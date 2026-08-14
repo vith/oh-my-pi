@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/hashline",
-  "version": "17.3.1+vith-fork.142.d1177a301b",
+  "version": "17.3.1+vith-fork.147.e4cf13962d",
   "description": "Hashline: a compact, line-anchored patch language and applier. Pluggable FS/IO so it works over disk, in-memory, or any custom backend.",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",

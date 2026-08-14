@@ -29,7 +29,7 @@ export const Shell = nativeBindings.Shell;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
-export const __piNativesV17_3_1_vith_fork_142_d1177a301b = nativeBindings.__piNativesV17_3_1_vith_fork_142_d1177a301b;
+export const __piNativesV17_3_1_vith_fork_147_e4cf13962d = nativeBindings.__piNativesV17_3_1_vith_fork_147_e4cf13962d;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
