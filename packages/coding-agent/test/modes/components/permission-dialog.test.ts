@@ -51,8 +51,30 @@ describe("PermissionDialogComponent", () => {
 		expect(out).toContain("command: git push");
 	});
 
-	it("enter selects the highlighted option; j/k and arrows move; esc cancels", () => {
-		const selected: number[] = [];
+	it("first navigation from no selection is direction-aware: j → row 0, k → last row", () => {
+		const make = (selected: number[]) =>
+			new PermissionDialogComponent(
+				"Allow tool: bash",
+				[],
+				[{ label: "Allow once" }, { label: "Allow & remember…" }, { label: "Deny" }],
+				index => selected.push(index),
+				() => {},
+			);
+		// j/down from -1 lands on the first row.
+		const downSelected: number[] = [];
+		const down = make(downSelected);
+		down.handleInput("j");
+		down.handleInput(ENTER);
+		expect(downSelected).toEqual([0]);
+		// k/up from -1 treats the selection as just-before-start: last row.
+		const upSelected: number[] = [];
+		const up = make(upSelected);
+		up.handleInput("k");
+		up.handleInput(ENTER);
+		expect(upSelected).toEqual([2]);
+	});
+
+	it("enter selects the highlighted option; j/k and arrows move; esc cancels", () => {		const selected: number[] = [];
 		let cancelled = 0;
 		const component = new PermissionDialogComponent(
 			"Allow tool: bash",

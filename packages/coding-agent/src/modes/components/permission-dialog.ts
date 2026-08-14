@@ -237,7 +237,13 @@ export class PermissionDialogComponent extends Container {
 
 	#moveSelection(delta: number): void {
 		if (this.#options.length === 0) return;
-		this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex + delta, this.#options.length - 1));
+		if (this.#selectedIndex < 0) {
+			// No-selection start: j/down lands on the first row; k/up treats -1
+			// as just-before-start and wraps to the last row.
+			this.#selectedIndex = delta < 0 ? this.#options.length - 1 : 0;
+		} else {
+			this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex + delta, this.#options.length - 1));
+		}
 		this.#renderList();
 	}
 
