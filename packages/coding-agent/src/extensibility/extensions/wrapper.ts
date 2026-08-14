@@ -180,8 +180,23 @@ function blockedByPolicyError(
 			? `Tool "${toolName}" is blocked by user policy.\n` +
 				`To allow: remove "tools.approval.${toolName}: deny" from config.`
 			: `Tool "${toolName}" is blocked: ${decision.reason ?? "denied by permission policy"}`;
-	if (args !== undefined && (decision.source === "posture" || decision.source === "rule")) {
-		return new Error(`${base}\n${renderAllowSuggestion(toolName, args, engineCtx)}`);
+	// Bash tool-declared denies short-circuit the engine walk's source to
+	// "tool" (the tool approval re-emits the engine decision), so a bash rule
+	// deny only re-opens the gate via its ruleId. Curated hard-denies carry no
+	// ruleId and stay suggestion-free, as do tool/user-source denies. The
+	// suggestion judges the DENIED PIECE, not the whole compound command:
+	// piece-level allow overrides only match their own piece text.
+	const deniedPiece = decision.pieces?.find(piece => piece.policy === "deny");
+	const bashRuleDeny = toolName === "bash" && decision.ruleId !== undefined;
+	if (
+		args !== undefined &&
+		(decision.source === "posture" || decision.source === "rule" || bashRuleDeny)
+	) {
+		const suggestionArgs =
+			deniedPiece !== undefined && toolName === "bash"
+				? { ...(args as Record<string, unknown>), command: deniedPiece.text }
+				: args;
+		return new Error(`${base}\n${renderAllowSuggestion(toolName, suggestionArgs, engineCtx)}`);
 	}
 	return new Error(base);
 }

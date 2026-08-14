@@ -199,4 +199,48 @@ describe("wrapper approval gate resolves through the permission engine", () => {
 		expect(record?.ruleId).toBe("deny-npm");
 		expect(record?.layer).toBe("project");
 	});
+
+	it("rule-denied bash calls carry the allow suggestion keyed to the denied piece", async () => {
+		// An exact deny matches the piece but NOT the whole compound command, so
+		// a dead-end suggestion proves the wrapper passed the denied PIECE text
+		// to renderAllowSuggestion — whole-command text would find no deny and
+		// fall back to the posture first-candidate suggestion instead.
+		fs.mkdirSync(path.join(cwd, ".omp"), { recursive: true });
+		fs.writeFileSync(
+			path.join(cwd, ".omp", "permissions.yml"),
+			"rules:\n  - id: deny-push-exact\n    tool: bash\n    match: { command: 'git push origin main' }\n    action: deny\n",
+		);
+		const settings = approvalSettings({});
+		let message = "";
+		try {
+			await bashTool().execute("deny-suggest-piece", { command: "git push origin main && echo hi" }, undefined, undefined, {
+				settings,
+				sessionManager,
+				home: tempDir,
+			} as unknown as AgentToolContext);
+		} catch (err) {
+			message = err instanceof Error ? err.message : String(err);
+		}
+		expect(message).toMatch(/Denied: piece "git push origin main"/);
+		expect(message).toMatch(/no allow rule can override the matching deny/);
+		expect(message).not.toContain("To allow this call, add rule:");
+	});
+
+	it("curated hard-denies stay suggestion-free", async () => {
+		// rm -rf / carries no ruleId, so the bash suggestion gate stays closed:
+		// the error names the curated deny and nothing more.
+		const settings = approvalSettings({});
+		let message = "";
+		try {
+			await bashTool().execute("curated-deny", { command: "rm -rf /" }, undefined, undefined, {
+				settings,
+				home: tempDir,
+			} as AgentToolContext);
+		} catch (err) {
+			message = err instanceof Error ? err.message : String(err);
+		}
+		expect(message).toMatch(/blocked/i);
+		expect(message).not.toContain("To allow this call, add rule:");
+		expect(message).not.toContain("no allow rule can override");
+	});
 });
