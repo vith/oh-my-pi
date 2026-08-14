@@ -148,19 +148,35 @@ async function buildMcpRemoveCompletions(
 }
 
 /** /permissions subcommands whose argument is a rule id (per their `usage: "<id>"`). */
-const PERMISSION_RULE_ID_SUBCOMMANDS: Readonly<Record<string, "user" | "all">> = {
+const PERMISSION_RULE_ID_SUBCOMMANDS: Readonly<Record<string, "all" | "personal" | "user">> = {
 	show: "all",
-	remove: "user",
+	remove: "personal",
 	edit: "user",
 };
+
+/** Human label for a rule layer in completion descriptions. */
+function permissionLayerLabel(layer: string): string {
+	switch (layer) {
+		case "dynamic":
+			return "dynamic · engine-written";
+		case "project":
+			return "project · repo-committed";
+		case "user":
+			return "user · hand-written";
+		default:
+			return layer;
+	}
+}
 
 /**
  * Build getArgumentCompletions for /permissions. Delegates to the generic
  * declarative subcommand completer while the subcommand name itself is still
  * being typed, then switches to rule-id completion (sourced from the
  * file-backed rule layers) once a recognized id-taking subcommand is
- * followed by a space. `remove` and `edit` only ever succeed against
- * user-layer rules, so they complete user-layer ids only; `show` accepts any
+ * followed by a space. `remove` completes the removable personal layers
+ * (dynamic + user) and, after an explicit `--project` flag, project ids too
+ * — the flag itself is offered while typing it. `edit` only ever succeeds
+ * against user-layer rules, so it completes those only; `show` accepts any
  * file-backed id. Subcommands with a different argument shape (add, test,
  * clear, ...) get no argument completion.
  */
@@ -176,16 +192,39 @@ export function buildPermissionsArgumentCompletions(
 		const rawSubcommand = argumentPrefix.slice(0, spaceIndex);
 		const idScope = PERMISSION_RULE_ID_SUBCOMMANDS[rawSubcommand.toLowerCase()];
 		if (idScope === undefined) return null;
-		const idPrefix = argumentPrefix.slice(spaceIndex + 1).toLowerCase();
+
+		let argPrefix = argumentPrefix.slice(spaceIndex + 1);
+		let includeProject = false;
+		if (rawSubcommand.toLowerCase() === "remove") {
+			const flagMatch = /^(--project|project)\s+/u.exec(argPrefix);
+			if (flagMatch !== null) {
+				includeProject = true;
+				argPrefix = argPrefix.slice(flagMatch[0].length);
+			} else if (argPrefix.trim().startsWith("-")) {
+				// Typing the flag: offer it before any ids.
+				return [
+					{
+						value: `${rawSubcommand} --project `,
+						label: "--project",
+						description: "Also allow removing repo-committed project rules",
+					},
+				];
+			}
+		}
+		const idPrefix = argPrefix.toLowerCase();
 
 		const { rules } = loadRuleLayers(runtime.ctx.sessionManager.getCwd());
 		const matches: AutocompleteItem[] = rules
-			.filter(rule => idScope !== "user" || rule.layer === "user")
+			.filter(rule => {
+				if (idScope === "user") return rule.layer === "user";
+				if (idScope === "personal") return includeProject || rule.layer !== "project";
+				return true;
+			})
 			.filter(rule => rule.id.toLowerCase().startsWith(idPrefix))
 			.map(rule => ({
-				value: `${rawSubcommand} ${rule.id} `,
+				value: `${rawSubcommand}${includeProject ? " --project" : ""} ${rule.id} `,
 				label: rule.id,
-				description: `${rule.tool} ${JSON.stringify(rule.match)} → ${rule.action} (${rule.layer})`,
+				description: `${rule.tool} ${JSON.stringify(rule.match)} → ${rule.action} (${permissionLayerLabel(rule.layer)})`,
 			}));
 		return matches.length > 0 ? matches : null;
 	};
