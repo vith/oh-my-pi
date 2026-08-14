@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-ai",
-  "version": "17.3.4+vith-fork.208.a62dc8e9b8",
+  "version": "17.3.4+vith-fork.211.a35a067a20",
   "description": "Unified LLM API with automatic model discovery and provider configuration",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
