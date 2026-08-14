@@ -142,11 +142,24 @@ async function suggestWithModel(
 				? AbortSignal.any([AbortSignal.timeout(SUGGEST_TIMEOUT_MS), signal])
 				: AbortSignal.timeout(SUGGEST_TIMEOUT_MS);
 
+		const requestStartedAt = performance.now();
+		const userMessage = buildSuggestionPrompt(unit, ctx);
+		logger.debug("permission-suggest: request", {
+			pendingCall: unit.text,
+			model: `${model.provider}/${model.id}`,
+			maxTokens: SUGGEST_MAX_TOKENS,
+			timeoutMs: SUGGEST_TIMEOUT_MS,
+			reasoning:
+				model.api.startsWith("openai-") || model.api.startsWith("azure-openai-") ? Effort.Minimal : undefined,
+			systemPrompt: suggestionSystemPrompt,
+			userMessage,
+		});
+
 		const response = await completeSimple(
 			model,
 			{
 				systemPrompt: [suggestionSystemPrompt],
-				messages: [{ role: "user", content: buildSuggestionPrompt(unit, ctx), timestamp: Date.now() }],
+				messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
 			},
 			{
 				apiKey: registry.resolver(model, sessionId),
@@ -165,6 +178,30 @@ async function suggestWithModel(
 				signal: requestSignal,
 			},
 		);
+
+		// Full wire view for debugging the recommendation (input logged at
+		// request time): stop reason, usage, and every content block —
+		// including the thinking trace — verbatim.
+		logger.debug("permission-suggest: response", {
+			pendingCall: unit.text,
+			model: `${model.provider}/${model.id}`,
+			stopReason: response.stopReason,
+			errorMessage: response.errorMessage ?? undefined,
+			elapsedMs: Math.round(performance.now() - requestStartedAt),
+			usage: (response as { usage?: unknown }).usage,
+			content: response.content.map(block => {
+				switch (block.type) {
+					case "text":
+						return { type: block.type, text: block.text };
+					case "thinking":
+						return { type: block.type, thinking: block.thinking };
+					case "redactedThinking":
+						return { type: block.type, data: block.data };
+					default:
+						return { type: block.type };
+				}
+			}),
+		});
 
 		if (response.stopReason === "error") {
 			// The provider rejected the side request (e.g. a sibling dialog's
