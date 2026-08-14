@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omptype",
-  "version": "17.3.4+vith-fork.182.76bcefc6a8",
+  "version": "17.3.4+vith-fork.185.e4bfe0c087",
   "description": "ArkType-compatible runtime schema validation with lazy JIT compilation",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
