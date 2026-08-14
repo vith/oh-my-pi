@@ -12,13 +12,15 @@ import * as path from "node:path";
  * compile it, so a checkout whose addon predates the version bump embeds a
  * stale addon and the binary dies at startup with a sentinel mismatch.
  *
- * Version shape: `<nearest vX.Y.Z tag, patch+1>+<identifier>.<commits since
- * the tag>.<HEAD short hash>`, default identifier `vith-fork` (override via
- * OMP_FORK_IDENTIFIER). The commit count and short hash make the version
- * deterministic per commit: every new commit since the tag bumps the count,
- * so re-running after committing more changes always produces a distinct
- * version, and the hash disambiguates diverged checkouts. Syncing upstream to
- * a newer tag moves the base patch and resets the count.
+ * Version shape: `<nearest vX.Y.Z tag>+<identifier>.<commits since the
+ * tag>.<HEAD short hash>`, default identifier `vith-fork` (override via
+ * OMP_FORK_IDENTIFIER). The core is the exact upstream tag the fork is based
+ * on — never a fabricated bump — so `omp --version` never pretends to be an
+ * upstream release that does not exist. The commit count and short hash make
+ * the version deterministic per commit: every new commit since the tag bumps
+ * the count, so re-running after committing more changes always produces a
+ * distinct version, and the hash disambiguates diverged checkouts. Syncing
+ * upstream to a newer tag moves the base and resets the count.
  *
  * Pipeline: pre-flight → derive → bump version files → regenerate lockfiles →
  * `bun run check` → commit the bump → build natives → verify sentinel → clear
@@ -43,12 +45,6 @@ function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false ${args}`;
 }
 
-function bumpPatch(version: string): string {
-	const match = version.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)$/);
-	if (!match) throw new Error(`Cannot bump non-numeric version: ${version}`);
-	return `${Number(match[1])}.${Number(match[2])}.${Number(match[3]) + 1}`;
-}
-
 /**
  * Git state the fork version is derived from.
  */
@@ -64,15 +60,16 @@ export interface ForkGitInfo {
 /**
  * Derive the fork version for the current commit.
  *
- * The core is the nearest upstream tag's patch+1 (or the current core version
- * when no tag is reachable). The build metadata is
+ * The core is the nearest upstream tag verbatim (or the current core version
+ * when no tag is reachable) — the fork never bumps the patch, so the version
+ * states exactly which upstream release it is based on. The build metadata is
  * `<identifier>.<commits since the tag>.<HEAD short hash>`, so the version is
  * deterministic per commit: new commits since the tag bump the count, and the
  * hash disambiguates two checkouts that share a count (e.g. after a sync).
  */
 export function deriveForkVersion(git: ForkGitInfo, currentVersion: string, identifier: string): string {
 	const base = git.tagVersion ?? currentVersion.split("+")[0];
-	return `${bumpPatch(base)}+${identifier}.${git.commitsSince}.${git.shortHash}`;
+	return `${base}+${identifier}.${git.commitsSince}.${git.shortHash}`;
 }
 
 /** The napi export name the loader validates, e.g. `__piNativesV17_2_13_vith_fork`. */
@@ -164,9 +161,11 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	// 2. Derive the fork version: nearest upstream tag (or the current core
-	// version when no tag is reachable), patch+1, then `+identifier.commitCount.shortHash`
-	// so the version is deterministic per commit.
+	// 2. Derive the fork version: nearest upstream tag verbatim (or the
+	// current core version when no tag is reachable), then
+	// `+identifier.commitCount.shortHash` so the version is deterministic per
+	// commit. The core is never bumped: the version must state the exact
+	// upstream release the fork is based on.
 	const tag = await nearestTagVersion();
 	const revList = tag
 		? await $`git rev-list --count ${`v${tag}`}..HEAD`.quiet()
