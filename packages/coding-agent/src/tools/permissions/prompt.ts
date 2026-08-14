@@ -38,6 +38,7 @@ import {
 	type PieceEvaluation,
 } from "./engine";
 import { type PermissionRule, type RuleAction, ruleFiles, writeUserRule } from "./rules";
+import { addSessionRule, sessionRuleKey } from "./session-rules";
 import { extractSubCommands } from "./split";
 import type { Recommendation, RecommendationScope, Suggestion, SuggestionProvider, SuggestResult } from "./suggest";
 
@@ -88,6 +89,7 @@ export interface PromptForDecisionOptions {
 }
 
 const ALLOW_ONCE = "Allow once";
+const ALLOW_SESSION = "Allow for this session";
 const ALLOW_REMEMBER = "Allow & remember…";
 const DENY = "Deny";
 const DENY_REMEMBER = "Deny & remember…";
@@ -95,6 +97,7 @@ const APPROVE = "Approve";
 
 /** v3 compound-dialog actions (spec §5.1): one dialog for the whole call. */
 const ALLOW_ALL_ONCE = "Allow all pending once";
+const ALLOW_ALL_SESSION = "Allow all for this session";
 const ALLOW_ALL_REMEMBER = "Allow all & remember…";
 const DENY_ALL = "Deny all pending";
 const DRILL_DOWN = "Decide per piece →";
@@ -113,7 +116,7 @@ const BASH_SHELL_CONTROL_NOTE =
  * remembered rule would only ever match an identical call.
  */
 const EXACT_ONLY_REMEMBER_NOTE =
-	"Remembering this call would only match an identical call — no pattern scope applies to this tool.";
+	"Remembering this call would only match an identical call — no pattern scope applies to this tool. Allow for this session has the same reach, without writing a rule.";
 
 /** Whether the prompt unit's bash command carries unanalyzable shell control (remember rules cannot suppress it). */
 function bashRememberDisabled(args: unknown): boolean {
@@ -816,11 +819,13 @@ async function promptUnit(
 	// Shell-control bash commands cannot be suppressed by a remembered rule,
 	// and tools whose candidates are exact-only (one-shot code tools like
 	// eval) can only remember an identical call — drop the remember options
-	// for both and say why.
+	// for both and say why. "Allow for this session" is an in-memory rule:
+	// it survives exact-only tools (an identical re-run is exactly what it
+	// covers) but is useless under shell control, where rule-backed allows
+	// degrade to a prompt (R1) — so it drops there too.
 	const rememberDisabled = bashRememberDisabled(unitArgs);
 	const exactOnlyRemember =
 		candidates.length > 0 && candidates.every(candidateItem => candidateItem.scope === "exact");
-	const rememberUseless = rememberDisabled || exactOnlyRemember;
 	const metaLines = dialogMetadataLines(toolName, opts);
 	const lines: (string | PermissionDialogLine)[] = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
 	if (rememberDisabled) {
@@ -828,7 +833,11 @@ async function promptUnit(
 	} else if (exactOnlyRemember) {
 		lines.push("", EXACT_ONLY_REMEMBER_NOTE);
 	}
-	const baseOptions = rememberUseless ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER];
+	const baseOptions = rememberDisabled
+		? [ALLOW_ONCE, DENY]
+		: exactOnlyRemember
+			? [ALLOW_ONCE, ALLOW_SESSION, DENY]
+			: [ALLOW_ONCE, ALLOW_SESSION, ALLOW_REMEMBER, DENY, DENY_REMEMBER];
 	const options = backLabel !== undefined ? [...baseOptions, backLabel] : baseOptions;
 	// The model's recommendation preselects the decision-page option when it
 	// lands; until then the dialog shows no selection (auto-mode-with-
@@ -852,6 +861,16 @@ async function promptUnit(
 				return { policy: "allow" };
 			case DENY:
 				return { policy: "deny" };
+			case ALLOW_SESSION: {
+				// In-memory session-scoped allow: the pattern candidate when
+				// available (covers the call family for the rest of the
+				// session), else the exact one. Nothing is written to disk.
+				const allow = candidates.filter(candidateItem => candidateItem.rule.action === "allow");
+				const recommended = allow.find(candidateItem => candidateItem.scope === "pattern") ?? allow[0];
+				if (recommended === undefined) return { policy: "deny" };
+				addSessionRule(sessionRuleKey(ctx), sessionRule(recommended.rule));
+				return { policy: "allow" };
+			}
 			case ALLOW_REMEMBER: {
 				const rule = await chooseCandidate(
 					ui,
@@ -895,6 +914,15 @@ async function promptUnit(
 			}
 		}
 	}
+}
+
+/**
+ * Give a remember-scoped candidate rule its session-layer identity: same
+ * match, action, and reason, but a `session-` id so audit attribution and
+ * the store display read as ephemeral rather than file-backed.
+ */
+function sessionRule(rule: Omit<PermissionRule, "layer">): Omit<PermissionRule, "layer"> {
+	return { ...rule, id: `session-${rule.id.replace(/^remember-/u, "")}` };
 }
 
 /** Compound remember dialog (spec §5.1): per-piece first-token glob checklist with live YAML preview. */
@@ -1084,7 +1112,7 @@ export async function promptForDecision(
 	const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));
 	const baseOptions = rememberDisabled
 		? [ALLOW_ALL_ONCE, DENY_ALL]
-		: [ALLOW_ALL_ONCE, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
+		: [ALLOW_ALL_ONCE, ALLOW_ALL_SESSION, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
 	// The model's recommendation preselects the compound option when it
 	// lands; until then no selection. Esc on the remember checklist returns
 	// here.
@@ -1105,6 +1133,22 @@ export async function promptForDecision(
 				return { policy: "allow" };
 			case DENY_ALL:
 				return { policy: "deny" };
+			case ALLOW_ALL_SESSION: {
+				// One in-memory session rule per pending piece (first-token
+				// globs), mirroring the remember checklist without any disk
+				// write.
+				for (const piece of pendingPieces) {
+					const rule = candidate(
+						"bash",
+						"allow",
+						"pattern",
+						{ command: firstTokenPattern(piece.text) },
+						firstTokenPattern(piece.text),
+					).rule;
+					addSessionRule(sessionRuleKey(ctx), sessionRule(rule));
+				}
+				return { policy: "allow" };
+			}
 			case ALLOW_ALL_REMEMBER: {
 				const rule = await rememberCompound(ui, pendingPieces, "allow", ctx);
 				if (rule === SCOPE_BACK) continue; // back to the compound decision page

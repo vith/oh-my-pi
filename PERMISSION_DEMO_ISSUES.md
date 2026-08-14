@@ -110,13 +110,23 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   cwd mismatch (worktree path vs main checkout path, project vs user layer);
   glob too narrow for the actual path. Verify with `permissions list`.
 
-## 8. No "Allow for this session" option
+## 8. No "Allow for this session" option — FIXED
 
 - **Repro:** any prompt; the decision page offers Allow once / Allow &
   remember… / Deny / Deny & remember… only.
 - **Expected:** a session-scoped allow (e.g. "Allow for this session")
   that permits the call for the rest of the session without writing a
   persistent rule. Design: in-memory session-layer rule(s), not file-backed.
+- **Fixed (committed, not merged/built):** "Allow for this session" on the
+  decision page and "Allow all for this session" on the compound page write
+  in-memory `session`-layer rules (store: `session-rules.ts`, keyed by
+  session id, cwd fallback; engine pool rank 3 = above file rules, below
+  curated). Options drop the session entry under shell control (R1 makes
+  rule-backed allows useless there) but keep it for exact-only tools (an
+  identical re-run is exactly what it covers). Nothing is written to disk.
+  Precedence note: a same-shape user deny still beats a session allow
+  (deny-wins-ties is the safety default); a more-specific session allow
+  (e.g. exact) overrides a broader deny, per spec §3.1.
 
 ## 9. Custom glob editor accepts patterns that can never match the call
 

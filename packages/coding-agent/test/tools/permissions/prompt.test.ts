@@ -8,7 +8,7 @@ import type {
 	EngineDecision,
 	PieceEvaluation,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
-import { evaluateBashCommand } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
+import { evaluateBashCommand, evaluatePermission } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
 import {
 	buildCandidates,
 	buildDialogLines,
@@ -18,12 +18,18 @@ import {
 	renderAllowSuggestion,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/prompt";
 import { normalizeRule, ruleFiles } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
+import {
+	clearSessionRules,
+	sessionRuleKey,
+	sessionRules,
+} from "@oh-my-pi/pi-coding-agent/tools/permissions/session-rules";
 import type { Suggestion, SuggestResult } from "@oh-my-pi/pi-coding-agent/tools/permissions/suggest";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 
 const tempHomes: string[] = [];
 afterEach(() => {
+	clearSessionRules();
 	for (const dir of tempHomes.splice(0)) {
 		removeSyncWithRetries(dir);
 	}
@@ -108,9 +114,18 @@ function compoundFixture() {
 	return { home, ctx: fakeCtx(home), decision: evaluateBashCommand("git log -n 5 && echo hi", fakeCtx(home)) };
 }
 
+/** User-layer rules written by a dialog flow, as their match objects. */
+async function writtenCommands(ctx: EngineContext): Promise<Array<Record<string, unknown>>> {
+	const file = ruleFiles(ctx.cwd, ctx.home).user;
+	if (!fs.existsSync(file)) return [];
+	const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
+	return doc.rules.map(rule => rule.match as Record<string, unknown>);
+}
+
 /** The v3 compound actions, in dialog order. */
 const COMPOUND_ACTIONS = [
 	"Allow all pending once",
+	"Allow all for this session",
 	"Allow all & remember…",
 	"Deny all pending",
 	"Decide per piece →",
@@ -234,13 +249,6 @@ describe("rememberCompound", () => {
 				return onRequest(request);
 			},
 		} as unknown as ExtensionUIContext;
-	}
-
-	async function writtenCommands(ctx: EngineContext): Promise<Array<Record<string, unknown>>> {
-		const file = ruleFiles(ctx.cwd, ctx.home).user;
-		if (!fs.existsSync(file)) return [];
-		const doc = YAML.parse(await Bun.file(file).text()) as { rules: Array<Record<string, unknown>> };
-		return doc.rules.map(rule => rule.match as Record<string, unknown>);
 	}
 
 	it("builds first-token globs, preselects the write option, writes the checked rules", async () => {
@@ -444,7 +452,7 @@ describe("promptForDecision", () => {
 
 	it("stops after a compound deny-all", async () => {
 		const requests: PermissionDialogRequest[] = [];
-		const { ui } = queuedDialogUi([2], requests); // Deny all pending
+		const { ui } = queuedDialogUi([3], requests); // Deny all pending
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
 		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()));
 		expect(res.policy).toBe("deny");
@@ -611,7 +619,7 @@ describe("promptForDecision", () => {
 
 	it("Deny all pending denies the call", async () => {
 		const { ctx, decision } = compoundFixture();
-		const { ui } = queuedDialogUi([2]); // Deny all pending
+		const { ui } = queuedDialogUi([3]); // Deny all pending
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("deny");
 	});
@@ -621,7 +629,7 @@ describe("promptForDecision", () => {
 		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
 		expect(decision.pieces?.filter(piece => piece.policy === "prompt")).toHaveLength(2);
 		const requests: PermissionDialogRequest[] = [];
-		const { ui } = queuedDialogUi([3, 1, 2], requests); // drill-down → "git log -n 5" → Deny once
+		const { ui } = queuedDialogUi([4, 1, 3], requests); // drill-down → "git log -n 5" → Deny once
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("deny");
 		expect(requests).toHaveLength(3);
@@ -630,6 +638,7 @@ describe("promptForDecision", () => {
 		expect(requests[1]?.options.map(option => option.label)).toEqual(["Back", "git log -n 5", "echo hi"]);
 		expect(requests[2]?.options.map(option => option.label)).toEqual([
 			"Allow once",
+			"Allow for this session",
 			"Allow & remember…",
 			"Deny",
 			"Deny & remember…",
@@ -649,11 +658,11 @@ describe("promptForDecision", () => {
 		expect(doc.rules.map(rule => (rule.match as Record<string, unknown>).command)).toEqual(["echo *"]);
 	});
 
-	it("PTY calls keep the single-unit flow with the old option set", async () => {
+	it("PTY calls keep the single-unit flow with the full option set", async () => {
 		const { ui, calls } = queuedSelectUi(["Allow once"]);
-		// A non-compound PTY command is one prompt unit with the old four
-		// options (compound PTY commands drop the remember options — covered
-		// separately below).
+		// A non-compound PTY command is one prompt unit with the five
+		// single-unit options (compound PTY commands drop the remember
+		// options — covered separately below).
 		const decision = fakeDecision({ pieces: [pendingPiece("echo a b")] });
 		const res = await promptForDecision(
 			ui,
@@ -664,14 +673,20 @@ describe("promptForDecision", () => {
 		);
 		expect(res.policy).toBe("allow");
 		expect(calls).toHaveLength(1);
-		expect(calls[0]).toEqual(["Allow once", "Allow & remember…", "Deny", "Deny & remember…"]);
+		expect(calls[0]).toEqual([
+			"Allow once",
+			"Allow for this session",
+			"Allow & remember…",
+			"Deny",
+			"Deny & remember…",
+		]);
 	});
 
 	it("Allow all & remember… writes a first-token glob rule per pending piece", async () => {
 		const { ctx, decision } = compoundFixture();
 		expect(decision.pieces?.filter(piece => piece.policy === "prompt")).toHaveLength(1);
 		const requests: PermissionDialogRequest[] = [];
-		const { ui } = queuedDialogUi([1, 1], requests); // Allow all & remember… → write option
+		const { ui } = queuedDialogUi([2, 1], requests); // Allow all & remember… → write option
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("allow");
 		expect(res.remembered?.match).toEqual({ command: "git log *" });
@@ -686,7 +701,7 @@ describe("promptForDecision", () => {
 	it("single-piece scope: Pattern is preselected, Custom… is offered, bash has no Tool always", async () => {
 		const home = tempHome();
 		const requests: PermissionDialogRequest[] = [];
-		const { ui } = queuedDialogUi([1, 1], requests); // Allow & remember… → Pattern (preselected)
+		const { ui } = queuedDialogUi([2, 1], requests); // Allow & remember… → Pattern (preselected)
 		const decision = fakeDecision({ pieces: [pendingPiece("git branch -a")] });
 		const res = await promptForDecision(ui, "bash", { command: "git branch -a" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("allow");
@@ -714,7 +729,7 @@ describe("promptForDecision", () => {
 			},
 			showPermissionDialog: async () => {
 				dialogCalls += 1;
-				return dialogCalls === 1 ? 1 : 2; // Allow & remember… → Custom…
+				return 2; // Allow & remember… → Custom…
 			},
 			input: async (_title: string, current?: string) => {
 				placeholder = current ?? "";
@@ -747,7 +762,7 @@ describe("promptForDecision", () => {
 			},
 			showPermissionDialog: async () => {
 				dialogCalls += 1;
-				return dialogCalls === 1 ? 1 : 2; // Allow & remember… → Custom…
+				return 2; // Allow & remember… → Custom…
 			},
 			input: async () => {
 				inputCalls += 1;
@@ -775,7 +790,7 @@ describe("promptForDecision", () => {
 			...noopUi(),
 			showPermissionDialog: async () => {
 				dialogCalls += 1;
-				if (dialogCalls === 1) return 1; // Allow & remember…
+				if (dialogCalls === 1) return 2; // Allow & remember…
 				if (dialogCalls === 2) return 2; // Custom…
 				return undefined; // esc on the decision page after the back
 			},
@@ -794,7 +809,7 @@ describe("promptForDecision", () => {
 	it("Tool always is offered for read-only tools", async () => {
 		const home = tempHome();
 		const requests: PermissionDialogRequest[] = [];
-		const { ui } = queuedDialogUi([1, 0], requests); // Allow & remember… → Exact call
+		const { ui } = queuedDialogUi([2, 0], requests); // Allow & remember… → Exact call
 		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
 		const res = await promptForDecision(ui, "read", { path: "src/x.ts" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("allow");
@@ -809,7 +824,7 @@ describe("promptForDecision", () => {
 		// tool-wide candidate (regression: label lookup, not raw index).
 		const home = tempHome();
 		const requests: PermissionDialogRequest[] = [];
-		const { ui } = queuedDialogUi([1, 3], requests); // Allow & remember… → last option (Tool: read always)
+		const { ui } = queuedDialogUi([2, 3], requests); // Allow & remember… → last option (Tool: read always)
 		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
 		const res = await promptForDecision(ui, "read", { path: "src/x.ts" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("allow");
@@ -828,7 +843,7 @@ describe("promptForDecision", () => {
 		const ctx = fakeCtx(tempHome());
 		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
 		const requests: PermissionDialogRequest[] = [];
-		const { ui } = queuedDialogUi([3, 0], requests); // drill-down → Back (index 0)
+		const { ui } = queuedDialogUi([4, 0], requests); // drill-down → Back (index 0)
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("deny");
 		expect(res.remembered).toBeUndefined();
@@ -842,7 +857,7 @@ describe("promptForDecision", () => {
 		const requests: PermissionDialogRequest[] = [];
 		// drill-down → "git log -n 5" → Back to all pieces (per-piece index 4)
 		// → selector again → Back (index 0) leaves the remainder undecided.
-		const { ui } = queuedDialogUi([3, 1, 4, 0], requests);
+		const { ui } = queuedDialogUi([4, 1, 5, 0], requests);
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("deny");
 		expect(requests).toHaveLength(4);
@@ -850,6 +865,7 @@ describe("promptForDecision", () => {
 		// The per-piece dialog carries the 5th "Back to all pieces" option.
 		expect(requests[2]?.options.map(option => option.label)).toEqual([
 			"Allow once",
+			"Allow for this session",
 			"Allow & remember…",
 			"Deny",
 			"Deny & remember…",
@@ -866,7 +882,7 @@ describe("promptForDecision", () => {
 		const requests: PermissionDialogRequest[] = [];
 		// drill-down → "git log -n 5" → Back to all pieces → "echo hi" →
 		// Allow once → "git log -n 5" → Allow once → all decided, call allowed.
-		const { ui } = queuedDialogUi([3, 1, 4, 2, 0, 1, 0], requests);
+		const { ui } = queuedDialogUi([4, 1, 5, 2, 0, 1, 0], requests);
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("allow");
 		expect(requests).toHaveLength(7);
@@ -877,7 +893,7 @@ describe("promptForDecision", () => {
 		const ctx = fakeCtx(tempHome());
 		const decision = evaluateBashCommand("git log -n 5 && echo hi", ctx);
 		const requests: PermissionDialogRequest[] = [];
-		const { ui } = queuedDialogUi([3, undefined], requests); // drill-down → esc
+		const { ui } = queuedDialogUi([4, undefined], requests); // drill-down → esc
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("deny");
 		expect(res.remembered).toBeUndefined();
@@ -893,7 +909,7 @@ describe("promptForDecision", () => {
 		// 0 = Back) → per-piece dialog (3 = "Deny & remember…") → deny
 		// candidate scope (0 = "Deny exact: git status -s").
 		const requests: PermissionDialogRequest[] = [];
-		const { ui } = queuedDialogUi([3, 1, 3, 0], requests);
+		const { ui } = queuedDialogUi([4, 1, 4, 0], requests);
 		const res = await promptForDecision(ui, "bash", { command: "git status -s && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("deny");
 		expect(res.remembered?.match).toEqual({ command: "git status -s" });
@@ -944,6 +960,7 @@ describe("promptForDecision", () => {
 		expect(requests).toHaveLength(1);
 		expect(requests[0]?.options.map(option => option.label)).toEqual([
 			"Allow once",
+			"Allow for this session",
 			"Allow & remember…",
 			"Deny",
 			"Deny & remember…",
@@ -1005,8 +1022,8 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			...noopUi(),
 			showPermissionDialog: async (request: PermissionDialogRequest) => {
 				captured.request = request;
-				// 4 base options, then the appended suggestion — index 4.
-				return 4;
+				// 5 base options, then the appended suggestion — index 5.
+				return 5;
 			},
 		} as unknown as ExtensionUIContext;
 		const provider = async (): Promise<SuggestResult> => ({ suggestions: [allowSuggestion] });
@@ -1029,7 +1046,8 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			...noopUi(),
 			showPermissionDialog: async (request: PermissionDialogRequest) => {
 				captured.request = request;
-				return 4;
+				// 5 base options, then the appended suggestion — index 5.
+				return 5;
 			},
 		} as unknown as ExtensionUIContext;
 		const provider = async (): Promise<SuggestResult> => ({ suggestions: [denySuggestion] });
@@ -1075,7 +1093,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 
 	it("an appended option index maps back to the suggestion label", async () => {
 		const captured: { request?: PermissionDialogRequest } = {};
-		const ui = capturingDialogUi(captured, 4);
+		const ui = capturingDialogUi(captured, 5);
 		const provider = async (): Promise<SuggestResult> => ({ suggestions: [allowSuggestion] });
 		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
 		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(tempHome()), {
@@ -1154,8 +1172,8 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			suggestionsProvider: provider,
 		});
 		expect(res.policy).toBe("allow");
-		// Deny & remember… = index 3 of [Allow once, Allow & remember…, Deny, Deny & remember…]
-		expect(await captured.request!.preselect!).toBe(3);
+		// Deny & remember… = index 4 of [Allow once, Allow for this session, Allow & remember…, Deny, Deny & remember…]
+		expect(await captured.request!.preselect!).toBe(4);
 	});
 
 	it("a remember recommendation falls back to Allow once when remember is dropped", async () => {
@@ -1187,8 +1205,8 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			suggestionsProvider: provider,
 		});
 		expect(res.policy).toBe("allow");
-		// Deny all pending = index 2 of [Allow all…, Allow all & remember…, Deny all, Drill down].
-		expect(await captured.request!.preselect!).toBe(2);
+		// Deny all pending = index 3 of [Allow all once, Allow all session, Allow all & remember…, Deny all, Drill down].
+		expect(await captured.request!.preselect!).toBe(3);
 	});
 
 	it("the recommended scope preselects the matching scope-page candidate", async () => {
@@ -1201,7 +1219,7 @@ describe("promptForDecision with a suggestionsProvider", () => {
 			...noopUi(),
 			showPermissionDialog: async (request: PermissionDialogRequest) => {
 				requests.push(request);
-				return calls++ === 0 ? 1 : 0;
+				return calls++ === 0 ? 2 : 0;
 			},
 		} as unknown as ExtensionUIContext;
 		const provider = async (): Promise<SuggestResult> => ({
@@ -1398,7 +1416,7 @@ describe("dialog preselection and back navigation", () => {
 		const home = tempHome();
 		const requests: PermissionDialogRequest[] = [];
 		// Allow & remember… → esc on the scope page → Allow once
-		const { ui } = queuedDialogUi([1, undefined, 0], requests);
+		const { ui } = queuedDialogUi([2, undefined, 0], requests);
 		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
 		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("allow");
@@ -1410,7 +1428,7 @@ describe("dialog preselection and back navigation", () => {
 		const home = tempHome();
 		const requests: PermissionDialogRequest[] = [];
 		// Deny & remember… → esc on scope → esc on the decision page → deny
-		const { ui } = queuedDialogUi([3, undefined, undefined], requests);
+		const { ui } = queuedDialogUi([4, undefined, undefined], requests);
 		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
 		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("deny");
@@ -1425,7 +1443,7 @@ describe("dialog preselection and back navigation", () => {
 		const res = await promptForDecision(ui, "eval", { code: "console.log(1)" }, decision, fakeCtx(home));
 		expect(res.policy).toBe("allow");
 		const request = requests[0]!;
-		expect(request.options.map(option => option.label)).toEqual(["Allow once", "Deny"]);
+		expect(request.options.map(option => option.label)).toEqual(["Allow once", "Allow for this session", "Deny"]);
 		expect(JSON.stringify(request.lines)).toContain("only match an identical call");
 	});
 	it("compound decision page has no preselection without a model recommendation", async () => {
@@ -1444,11 +1462,83 @@ describe("dialog preselection and back navigation", () => {
 		const requests: PermissionDialogRequest[] = [];
 		// Allow all & remember… → esc on the checklist (back to the compound
 		// page) → esc on the compound page → deny
-		const { ui } = queuedDialogUi([1, undefined, undefined], requests);
+		const { ui } = queuedDialogUi([2, undefined, undefined], requests);
 		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
 		expect(res.policy).toBe("deny");
 		expect(requests).toHaveLength(3);
 		expect(requests[1]?.helpText).toContain("space/enter toggle");
 		expect(JSON.stringify(requests[1]?.lines)).toContain("[x] rows are written as rules");
+	});
+});
+
+describe("session allow (bug 8)", () => {
+	it("Allow for this session covers the call for the rest of the session and writes nothing", async () => {
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([1], requests); // Allow for this session
+		const decision = fakeDecision({ pieces: [pendingPiece("git status -s")] });
+		const res = await promptForDecision(ui, "bash", { command: "git status -s" }, decision, ctx);
+		expect(res.policy).toBe("allow");
+		expect(res.remembered).toBeUndefined();
+		// No file rule was written.
+		expect(await writtenCommands(ctx)).toEqual([]);
+		// The session store now carries it (pattern candidate → `git status *`).
+		const stored = sessionRules(sessionRuleKey(ctx));
+		expect(stored).toHaveLength(1);
+		expect(stored[0]).toMatchObject({ layer: "session", action: "allow", tool: "bash" });
+		expect(stored[0]?.match).toEqual({ command: "git status *" });
+		// The engine honors it for the rest of the session…
+		expect(evaluatePermission({ name: "bash" }, { command: "git status -sb" }, ctx).policy).toBe("allow");
+		// …but not for unrelated calls.
+		expect(evaluatePermission({ name: "bash" }, { command: "git push" }, ctx).policy).toBe("prompt");
+	});
+
+	it("exact-only tools keep the session option and it covers an identical re-run", async () => {
+		const home = tempHome();
+		const ctx = fakeCtx(home);
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([1], requests); // Allow for this session
+		const decision = fakeDecision({ policy: "prompt", pieces: undefined });
+		const res = await promptForDecision(ui, "eval", { code: "console.log(1)" }, decision, ctx);
+		expect(res.policy).toBe("allow");
+		expect(requests[0]?.options.map(option => option.label)).toEqual([
+			"Allow once",
+			"Allow for this session",
+			"Deny",
+		]);
+		expect(await writtenCommands(ctx)).toEqual([]);
+		expect(evaluatePermission({ name: "eval" }, { code: "console.log(1)" }, ctx).policy).toBe("allow");
+	});
+
+	it("shell-control bash drops the session option with the shell-control note", async () => {
+		const home = tempHome();
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Allow once
+		const decision = fakeDecision({ pieces: [pendingPiece("ls 2>/dev/null | head -5")] });
+		await promptForDecision(ui, "bash", { command: "ls 2>/dev/null | head -5" }, decision, fakeCtx(home));
+		expect(requests[0]?.options.map(option => option.label)).toEqual(["Allow once", "Deny"]);
+	});
+
+	it("Allow all for this session covers every pending piece without writing rules", async () => {
+		const { ctx, decision } = compoundFixture();
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([1], requests); // Allow all for this session
+		const res = await promptForDecision(ui, "bash", { command: "git log -n 5 && echo hi" }, decision, ctx);
+		expect(res.policy).toBe("allow");
+		expect(res.remembered).toBeUndefined();
+		// The fixture's echo rule is still the only file rule.
+		const written = await writtenCommands(ctx);
+		expect(written.map(rule => rule.command)).toEqual(["echo *"]);
+		// The only pending piece (`git log -n 5`; `echo hi` is file-allowed)
+		// got a session rule — a first-token glob.
+		const stored = sessionRules(sessionRuleKey(ctx));
+		expect(stored).toHaveLength(1);
+		expect(stored[0]?.match).toEqual({ command: "git log *" });
+		// The pending family is now allowed for the session; the file-allowed
+		// piece and unrelated calls behave as before.
+		expect(evaluatePermission({ name: "bash" }, { command: "git log --oneline -5" }, ctx).policy).toBe("allow");
+		expect(evaluatePermission({ name: "bash" }, { command: "echo hi there" }, ctx).policy).toBe("allow");
+		expect(evaluatePermission({ name: "bash" }, { command: "git push" }, ctx).policy).toBe("prompt");
 	});
 });

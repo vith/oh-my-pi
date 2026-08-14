@@ -7,6 +7,7 @@ import { type ApprovalPolicy, getToolDecision, normalizePolicy, type ResolvedApp
 import { bashApprovalPatternToRegExp, normalizeBashApprovalPattern } from "../bash";
 import { CURATED_ALLOW_TOOLS, isSafeConsumerStage, matchCuratedDeny } from "./curated";
 import { findNearestProjectRoot, loadRuleLayers, type PermissionRule, type RuleLayer } from "./rules";
+import { sessionRuleKey, sessionRules } from "./session-rules";
 import { extractSubCommands, isPipeline, isSinglePiece, parseCommand, type ShellPiece } from "./split";
 
 export type PermissionPolicy = "allow" | "deny" | "prompt";
@@ -38,6 +39,12 @@ export interface EngineContext {
 	settings: Pick<Settings, "get" | "isConfigured">;
 	cwd: string;
 	home?: string;
+	/**
+	 * Session-manager id, resolving the in-memory session rule layer
+	 * ("Allow for this session"). Absent in headless flows — the store falls
+	 * back to the cwd.
+	 */
+	sessionId?: string;
 }
 
 type DecisionSource = EngineDecision["source"];
@@ -332,7 +339,7 @@ export interface RuleMatch {
 	specificity: number;
 }
 
-const LAYER_RANK: Record<RuleLayer, number> = { project: 0, user: 1, legacy: 2, curated: 4 };
+const LAYER_RANK: Record<RuleLayer, number> = { project: 0, user: 1, legacy: 2, session: 3, curated: 4 };
 
 /**
  * Best whole-command rule match (spec §3.1 step 2): match class, then
@@ -581,7 +588,11 @@ function evaluatePermissionCore(
 	// control (ruling R1); `prompt` rules match any piece text (ruling R2).
 	const legacy = legacyBashPatterns(ctx.settings);
 	const legacyAllowActive = legacyAllowEnabled && command !== undefined && isSinglePiece(command);
-	const pool = [...legacy.filter(rule => rule.action !== "allow" || legacyAllowActive), ...rules];
+	const pool = [
+		...legacy.filter(rule => rule.action !== "allow" || legacyAllowActive),
+		...rules,
+		...sessionRules(sessionRuleKey(ctx)),
+	];
 	const best = resolveWholeCommandRule(pool, tool.name, args);
 	if (best !== undefined) {
 		const degraded = best.rule.action === "allow" && bashAllowDegradedByShellControl(tool.name, command);
@@ -875,7 +886,7 @@ export function nearMissLine(pieceText: string, ctx: EngineContext): string | un
 	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
 	let best: PermissionRule | undefined;
 	let bestSpecificity = 0;
-	for (const rule of rules) {
+	for (const rule of [...rules, ...sessionRules(sessionRuleKey(ctx))]) {
 		if (rule.tool !== "bash" && rule.tool !== "*") continue;
 		const pattern = rule.match.command;
 		if (typeof pattern !== "string" || isRegexWrapped(pattern)) continue;
@@ -936,7 +947,11 @@ export function denySuggestion(toolName: string, args: unknown, ctx: EngineConte
 	const legacy = legacyBashPatterns(ctx.settings);
 	const command = bashCommandArg(args);
 	const legacyAllowActive = toolName === "bash" && command !== undefined && isSinglePiece(command);
-	const pool = [...legacy.filter(rule => rule.action !== "allow" || legacyAllowActive), ...rules];
+	const pool = [
+		...legacy.filter(rule => rule.action !== "allow" || legacyAllowActive),
+		...rules,
+		...sessionRules(sessionRuleKey(ctx)),
+	];
 	const bestDeny = resolveWholeCommandRule(
 		pool.filter(rule => rule.action === "deny"),
 		toolName,

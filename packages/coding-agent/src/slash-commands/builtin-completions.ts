@@ -161,6 +161,8 @@ function permissionLayerLabel(layer: string): string {
 			return "project · repo-committed";
 		case "user":
 			return "user · personal";
+		case "session":
+			return "session · this session";
 		default:
 			return layer;
 	}

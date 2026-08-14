@@ -21,7 +21,12 @@ import { YAML } from "bun";
  * (wired into `/permissions migrate`) merges the file and removes it.
  */
 export type RuleAction = "allow" | "deny" | "prompt";
-export type RuleLayer = "project" | "user" | "curated" | "legacy";
+/**
+ * `session` is the in-memory "Allow for this session" layer: rules added by
+ * approval dialogs for the duration of one session, never written to disk
+ * (they live in the per-session store in session-rules.ts).
+ */
+export type RuleLayer = "project" | "user" | "curated" | "legacy" | "session";
 
 export interface PermissionRule {
 	/** Unique within its file; auto-generated when absent. */

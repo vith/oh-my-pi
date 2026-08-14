@@ -895,6 +895,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				settings: this.settings,
 				cwd: session?.sessionManager.getCwd() ?? this.sessionManager.getCwd(),
 				home: undefined,
+				// Resolves the in-memory session rule layer ("Allow for this
+				// session") for parked approvals of the focused session.
+				sessionId: session?.sessionManager.getSessionId(),
 			}),
 			// Spec §6.1: async LLM rule suggestions ride on the parked session's
 			// active model, mirroring the main dialog's Task 11 wiring; when the

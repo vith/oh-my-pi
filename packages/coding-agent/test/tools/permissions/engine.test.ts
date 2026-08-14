@@ -1,4 +1,4 @@
-import { describe, expect, it, test } from "bun:test";
+import { afterEach, describe, expect, it, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +15,11 @@ import {
 	resolveWholeCommandRule,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/engine";
 import type { PermissionRule } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
+import {
+	addSessionRule,
+	clearSessionRules,
+	sessionRuleKey,
+} from "@oh-my-pi/pi-coding-agent/tools/permissions/session-rules";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 const tool = (name: string, approval?: unknown) => ({ name, approval, formatApprovalDetails: undefined });
@@ -835,5 +840,94 @@ describe("posture allow vs unanalyzable residue (R1)", () => {
 	it("allow-all posture still denies curated patterns inside substitutions", () => {
 		const d = evaluateBashCommand("echo $(rm -rf /)", ctx({ "permissions.default": "allow" }));
 		expect(d.policy).toBe("deny");
+	});
+});
+
+describe("session rules (bug 8)", () => {
+	// The in-memory layer is module-global, keyed by session id (fallback:
+	// cwd). Every test cleans the store so later files start empty.
+	afterEach(() => clearSessionRules());
+
+	const sessionRule = (match: Record<string, unknown>): Omit<PermissionRule, "layer"> => ({
+		id: "session-echo",
+		tool: "bash",
+		match,
+		action: "allow",
+		reason: "approved for this session",
+	});
+
+	it("a session allow permits the same call again without a file rule", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-session-${Snowflake.next()}-`));
+		try {
+			const c = ctx({}, dir);
+			expect(evaluatePermission(tool("bash"), { command: "echo hi" }, c).policy).toBe("prompt");
+			addSessionRule(sessionRuleKey(c), sessionRule({ command: "echo hi" }));
+			const d = evaluatePermission(tool("bash"), { command: "echo hi" }, c);
+			expect(d).toMatchObject({ policy: "allow", layer: "session", ruleId: "session-echo" });
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a user deny beats a session allow of the same shape (deny-wins-ties)", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-session-${Snowflake.next()}-`));
+		try {
+			const c = ctx({}, dir);
+			write(
+				path.join(c.home, ".omp", "agent", "permissions.yml"),
+				"rules:\n  - id: deny-push\n    tool: bash\n    match: { command: 'git push *' }\n    action: deny\n",
+			);
+			addSessionRule(sessionRuleKey(c), sessionRule({ command: "git push *" }));
+			const d = evaluatePermission(tool("bash"), { command: "git push origin main" }, c);
+			expect(d.policy).toBe("deny");
+			expect(d.layer).toBe("user");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a more specific session allow beats a broader user deny (spec §3.1)", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-session-${Snowflake.next()}-`));
+		try {
+			const c = ctx({}, dir);
+			write(
+				path.join(c.home, ".omp", "agent", "permissions.yml"),
+				"rules:\n  - id: deny-push\n    tool: bash\n    match: { command: 'git push *' }\n    action: deny\n",
+			);
+			addSessionRule(sessionRuleKey(c), sessionRule({ command: "git push origin main" }));
+			const d = evaluatePermission(tool("bash"), { command: "git push origin main" }, c);
+			expect(d.policy).toBe("allow");
+			expect(d.layer).toBe("session");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("curated hard denies still beat a session allow", () => {
+		addSessionRule(sessionRuleKey(ctx()), sessionRule({ command: "rm -rf *" }));
+		const d = evaluateBashCommand("rm -rf /", ctx());
+		expect(d.policy).toBe("deny");
+		expect(d.layer).toBe("curated");
+	});
+
+	it("session rules are scoped to their session key", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-session-${Snowflake.next()}-`));
+		try {
+			addSessionRule(sessionRuleKey(ctx({}, dir)), sessionRule({ command: "echo hi" }));
+			// A different cwd (and no session id) is a different session.
+			expect(evaluatePermission(tool("bash"), { command: "echo hi" }, ctx({}, "/other/cwd")).policy).toBe("prompt");
+			expect(evaluatePermission(tool("bash"), { command: "echo hi" }, ctx({}, dir)).policy).toBe("allow");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rule-backed session allows still degrade under shell control (R1)", () => {
+		addSessionRule(sessionRuleKey(ctx()), sessionRule({ command: "echo *" }));
+		// A pipeline with `sh` carries shell control: the session allow must
+		// not silently vouch for it, exactly like a remembered file rule.
+		const d = evaluateBashCommand("echo a | sh", ctx());
+		expect(d.policy).toBe("prompt");
+		expect(d.layer).toBeUndefined();
 	});
 });

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Approval dialogs offer **"Allow for this session"** (and "Allow all for this session" for compound bash commands): the call — or every pending piece — is permitted for the rest of the session via an in-memory rule, without writing anything to disk. Session rules rank above file-backed rules but below curated hard denies; a same-shape user deny still wins (deny-wins-ties). The option is dropped under shell control, where rule-backed allows degrade to a prompt anyway, and kept for exact-only tools, where an identical re-run is the point.
 - New global posture `permissions.projectWrites` (settings UI, Permissions group): overrides the default posture for write tools (`edit`, `write`, `ast_edit`) whose target path resolves inside the project directory. `allow` auto-approves project-scoped writes; `prompt`/`deny` behave like the general posture. Unconfigured, it falls back to `permissions.default`.
 - Merged the dynamic layer into the user layer: remembered approval-dialog rules now write to `~/.omp/agent/permissions.yml` like hand-added rules, with two file-backed layers (project, user) total. Rules left in the legacy `permissions.dynamic.yml` still load (folded into the user layer) and `/permissions migrate` physically merges and removes the file.
 - `/permissions remove` removes rules from any file-backed layer (user, or — with `--project` — repo-committed project rules); tab completion after `remove` covers the removable layers and labels each id with its layer.
