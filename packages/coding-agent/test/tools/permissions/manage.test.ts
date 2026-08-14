@@ -200,6 +200,24 @@ describe("runPermissionCommand test", () => {
 		expect(output).not.toContain("class:");
 		expect(output).not.toContain("resolved:");
 	});
+
+	it("prints the piece-level deciding rule's class and specificity", async () => {
+		// A compound whose deny decided at the piece level (no whole-command
+		// winner) still attributes class/specificity to the deciding piece rule.
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: deny-echo\n    tool: bash\n    match: { command: 'echo *' }\n    action: deny\n",
+		);
+
+		const output = await runPermissionCommand('test "git log -n 5 && echo hi"', await ctx());
+
+		expect(output).toContain("decision: deny");
+		expect(output).toContain("piece: echo hi -> deny (deny-echo, dynamic)");
+		expect(output).toContain("piece class: exact-structure (specificity 1)");
+		// No whole-command winner exists for this compound: the plain class
+		// line stays absent.
+		expect(output).not.toContain("\nclass:");
+	});
 });
 
 describe("runPermissionCommand status/log/migrate", () => {

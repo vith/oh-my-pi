@@ -277,6 +277,20 @@ async function testCommand(rest: string, ctx: RunPermissionCommandContext): Prom
 			lines.push(`resolved: ${best.rule.id} beats ${otherMatches} other matches`);
 		}
 	}
+	// Piece-level attribution: when the decision came from a piece (a
+	// stage-level deny or a compound piece the deciding rule matched), report
+	// that piece rule's match class and specificity — the whole-command winner
+	// above either did not exist or did not decide.
+	const decidingPiece = decision.pieces?.find(piece => piece.policy === "deny" || piece.ruleId === decision.ruleId);
+	if (decidingPiece !== undefined && decidingPiece.ruleId !== undefined) {
+		const pieceRule = rules.find(rule => rule.id === decidingPiece.ruleId);
+		const piecePattern = pieceRule?.match.command;
+		if (typeof piecePattern === "string") {
+			lines.push(
+				`piece class: ${matchClassOf(piecePattern, decidingPiece.text)} (specificity ${patternSpecificity("command", piecePattern)})`,
+			);
+		}
+	}
 	return lines.join("\n");
 }
 
