@@ -177,9 +177,26 @@ describe("suggestRules", () => {
 		// The mechanical candidates the dialog offers on its own.
 		expect(userMessage).toContain("- Exact: git push");
 		expect(userMessage).toContain("- Pattern: git *");
-		const options = spy.mock.calls[0]?.[2] as { apiKey?: unknown; maxTokens?: number; signal?: AbortSignal };
+		const options = spy.mock.calls[0]?.[2] as {
+			apiKey?: unknown;
+			maxTokens?: number;
+			signal?: AbortSignal;
+			reasoning?: string;
+			disableReasoning?: boolean;
+			forceReasoningOff?: boolean;
+		};
 		expect(options?.apiKey).toBeDefined();
-		expect(options?.maxTokens).toBeLessThanOrEqual(512);
+		// Side requests stay bounded, but large enough for a reasoning model
+		// to think before answering (issue 14: 256 tokens were consumed by
+		// reasoning alone, so the JSON never arrived).
+		expect(options?.maxTokens).toBeGreaterThanOrEqual(512);
+		expect(options?.maxTokens).toBeLessThanOrEqual(2048);
+		// OpenAI-compat gateways default thinking ON when the effort field is
+		// omitted; pin the lowest effort so the model still reasons (its
+		// judgment decides the preselection) but with a bounded budget.
+		expect(options?.reasoning).toBe("minimal");
+		expect(options?.disableReasoning).not.toBe(true);
+		expect(options?.forceReasoningOff).not.toBe(true);
 	});
 
 	it("shows file-tool candidates as an exact path and a parent glob", async () => {

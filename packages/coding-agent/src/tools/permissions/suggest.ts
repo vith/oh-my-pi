@@ -9,6 +9,7 @@
  * failing recommendation simply leaves the dialog unpreselected.
  */
 import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import { CURATED_ALLOW_TOOLS } from "./curated";
@@ -50,9 +51,13 @@ export interface SuggestionUnit {
 
 export type SuggestionProvider = (unit: SuggestionUnit) => Promise<SuggestResult>;
 
-/** Side requests are bounded: 8s hard timeout, low token budget, at most 3 rules. */
-const SUGGEST_TIMEOUT_MS = 8000;
-const SUGGEST_MAX_TOKENS = 256;
+/** Side requests are bounded: hard timeout, capped token budget, at most 3 rules. */
+const SUGGEST_TIMEOUT_MS = 20000;
+// Reasoning models (e.g. opencode-go deepseek-v4-flash) spend most of the
+// budget thinking before emitting the JSON; 256 tokens was entirely consumed
+// by reasoning (stopReason "length", zero text) so no recommendation ever
+// landed. 2048 leaves room for ~1k reasoning tokens plus the response.
+const SUGGEST_MAX_TOKENS = 2048;
 const SUGGEST_MAX_SUGGESTIONS = 3;
 
 const LLM_SUGGESTIONS_KEY = "permissions.llmSuggestions";
@@ -146,7 +151,17 @@ async function suggestWithModel(
 			{
 				apiKey: registry.resolver(model, sessionId),
 				maxTokens: SUGGEST_MAX_TOKENS,
-				disableReasoning: true,
+				// OpenAI-compat gateways (e.g. opencode-go's Zen) default
+				// thinking ON when the effort field is omitted, and unbounded
+				// thinking can consume the whole token budget before the JSON
+				// arrives (issue 14: 256 tokens were all reasoning). Pin the
+				// lowest effort so the model still reasons — its judgment is
+				// the point of the side request — but with a bounded thinking
+				// budget. Other APIs (anthropic, google, bedrock) only think
+				// when explicitly requested, so nothing to pin there.
+				...(model.api.startsWith("openai-") || model.api.startsWith("azure-openai-")
+					? { reasoning: Effort.Minimal }
+					: {}),
 				signal: requestSignal,
 			},
 		);
@@ -161,7 +176,7 @@ async function suggestWithModel(
 			});
 			return EMPTY_RESULT;
 		}
-		return parseSuggestResponse(response.content, suggestionsEnabled(ctx));
+		return parseSuggestResponse(response.content, suggestionsEnabled(ctx), response.stopReason);
 	} catch (error) {
 		logger.debug("permission-suggest: suggestion request failed", {
 			reason: "request-failed",
@@ -237,7 +252,11 @@ function parseRecommendation(value: unknown): Recommendation | undefined {
  * each record and capping rules at 3. Malformed output degrades to an empty
  * result.
  */
-function parseSuggestResponse(content: AssistantMessage["content"], includeRules: boolean): SuggestResult {
+function parseSuggestResponse(
+	content: AssistantMessage["content"],
+	includeRules: boolean,
+	stopReason: string | undefined,
+): SuggestResult {
 	let text = "";
 	for (const block of content) {
 		if (block.type === "text") text += block.text;
@@ -253,6 +272,7 @@ function parseSuggestResponse(content: AssistantMessage["content"], includeRules
 	} catch {
 		logger.debug("permission-suggest: suggestion response is not valid JSON", {
 			reason: "bad-json",
+			stopReason,
 			text: jsonText.slice(0, 200),
 		});
 		return EMPTY_RESULT;
