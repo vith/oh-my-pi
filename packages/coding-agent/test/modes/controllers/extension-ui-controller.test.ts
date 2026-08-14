@@ -1,9 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import { Container, type OverlayOptions, setKeybindings } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "../../../src/config/keybindings";
 import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../src/extensibility/extensions";
 import { AskDialogComponent } from "../../../src/modes/components/ask-dialog";
 import { CustomEditor } from "../../../src/modes/components/custom-editor";
+import type { PermissionDialogComponent } from "../../../src/modes/components/permission-dialog";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "../../../src/modes/theme/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
@@ -62,6 +64,7 @@ function makeHarness() {
 		setFocus,
 		showOverlay,
 		fakeHandle,
+		ctx,
 		controller,
 		async init(): Promise<ExtensionUIContext> {
 			await controller.initHooksAndCustomTools();
@@ -315,5 +318,77 @@ describe("ExtensionUiController custom overlay", () => {
 			maxHeight: "100%",
 			margin: 0,
 		});
+	});
+});
+
+describe("permission dialog flow slots", () => {
+	const flushMicrotasks = async () => {
+		for (let i = 0; i < 3; i++) await Promise.resolve();
+	};
+
+	const renderDialog = (component: PermissionDialogComponent | undefined): string =>
+		component === undefined ? "" : stripVTControlCharacters(component.render(80).join("\n"));
+
+	const selectRow = (component: PermissionDialogComponent, row: number): void => {
+		for (let i = 0; i <= row; i++) component.handleInput("j");
+		component.handleInput("\n");
+	};
+
+	it("a permission flow's pages never interleave with another flow's dialog", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+
+		const requestA = { title: "A1: compound", options: [{ label: "allow" }, { label: "drill down" }] };
+		const requestB = { title: "B1: sibling call", options: [{ label: "allow" }] };
+		const requestA2 = { title: "A2: drill-down page", options: [{ label: "back" }, { label: "deny" }] };
+
+		const pageA1 = ui.showPermissionDialog!(requestA, { flowId: "flowA" });
+		expect(renderDialog(harness.ctx.permissionDialog)).toContain("A1: compound");
+
+		// A sibling approval parks while flow A is on screen: it queues.
+		const pageB1 = ui.showPermissionDialog!(requestB, { flowId: "flowB" });
+		expect(renderDialog(harness.ctx.permissionDialog)).toContain("A1: compound");
+
+		// The user answers page 1 of flow A ("drill down"): the flow continues
+		// to its own next page — the sibling's dialog must not slide in.
+		selectRow(harness.ctx.permissionDialog!, 1);
+		await flushMicrotasks();
+		expect(await pageA1).toBe(1);
+
+		const pageA2 = ui.showPermissionDialog!(requestA2, { flowId: "flowA" });
+		expect(renderDialog(harness.ctx.permissionDialog)).toContain("A2: drill-down page");
+		expect(renderDialog(harness.ctx.permissionDialog)).not.toContain("B1");
+
+		// Finish flow A (answer page 2, release the slot) — only then does the
+		// sibling's dialog present.
+		selectRow(harness.ctx.permissionDialog!, 1);
+		await flushMicrotasks();
+		expect(await pageA2).toBe(1);
+		expect(harness.ctx.permissionDialog).toBeUndefined();
+
+		ui.endPermissionFlow!("flowA");
+		await flushMicrotasks();
+		expect(renderDialog(harness.ctx.permissionDialog)).toContain("B1: sibling call");
+
+		selectRow(harness.ctx.permissionDialog!, 0);
+		expect(await pageB1).toBe(0);
+		ui.endPermissionFlow!("flowB");
+	});
+
+	it("single-page dialogs still advance the queue on settle", async () => {
+		const harness = makeHarness();
+		const ui = await harness.init();
+
+		const first = ui.showPermissionDialog!({ title: "first", options: [{ label: "ok" }] });
+		const second = ui.showPermissionDialog!({ title: "second", options: [{ label: "ok" }] });
+
+		selectRow(harness.ctx.permissionDialog!, 0);
+		await flushMicrotasks();
+		expect(await first).toBe(0);
+		// No flowId: the next queued dialog presents as soon as the first settles.
+		expect(renderDialog(harness.ctx.permissionDialog)).toContain("second");
+
+		selectRow(harness.ctx.permissionDialog!, 0);
+		expect(await second).toBe(0);
 	});
 });

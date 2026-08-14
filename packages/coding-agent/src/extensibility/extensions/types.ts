@@ -236,6 +236,14 @@ export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): 
 export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
 	timeout?: number;
+	/**
+	 * Dialog-flow identity: dialog calls carrying the same id belong to one
+	 * multi-page flow (a permission decision). While a flow's dialog is
+	 * presented, a follow-up page with the same id replaces it in place —
+	 * it never queues behind unrelated dialogs; the flow releases its slot
+	 * via `endPermissionFlow`.
+	 */
+	flowId?: string;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;
 	/** Invoked when the UI-managed timeout countdown starts */
@@ -334,6 +342,14 @@ export interface ExtensionUIContext {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;
+
+	/**
+	 * Release the dialog slot held by a permission dialog flow: called when a
+	 * multi-page flow (all its `showPermissionDialog` pages sharing a
+	 * `flowId`) completes, letting the next queued dialog present. Optional —
+	 * callers without a flow-aware UI rely on the single-page settle advance.
+	 */
+	endPermissionFlow?(flowId: string): void;
 
 	/** Show a notification to the user. */
 	notify(message: string, type?: "info" | "warning" | "error"): void;
