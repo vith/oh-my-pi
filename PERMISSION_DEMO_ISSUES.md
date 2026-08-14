@@ -18,12 +18,15 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
 - **Notes:** needs a decision-recommendation output from the provider plus
   preselection wiring (including the late-arrival case: preselect when
   suggestions land if the user hasn't moved yet).
-- **Fixed (2026-08-14):** deterministic preselection on every page — the
-  decision page preselects "Allow once" (compound: "Allow all pending
-  once"), the forced-prompt binary preselects "Approve", and the scope page
-  already preselected the Pattern candidate. With `permissions.llmSuggestions`
-  now off by default, the recommendation is the least-commitment action
-  (auto-mode-with-confirmation); the model-driven variant can layer on later.
+- **Fixed (2026-08-14, round 2):** preselection exists on every page, but
+  with the wrong mechanism — a deterministic least-commitment default
+  ("Allow once"). **Correction (round 3): the MODEL decides.** The side
+  completion now returns a `recommendation` (action + scope) that preselects
+  the matching option when it lands (dialog applies it unless the user has
+  already interacted); the scope page preselects the recommended scope.
+  `permissions.llmSuggestions` gates only the extra rule options — the
+  recommendation always runs. No recommendation (provider failure/off) ⇒ no
+  preselection, per the model-decides design.
 
 ## 2. `echo "hello from bash"` flagged as unanalyzable shell control
 
@@ -87,7 +90,7 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   decision page is the only cancel (denies). Scope help line documents
   "esc back".
 
-## 6. Concurrent pending approvals render out of order / detached from diffs
+## 6. Concurrent pending approvals render out of order / detached from diffs — PARTIALLY OPEN
 
 - **Repro:** two tool calls (SKILL.md edit, ISSUES.md edit) plus a todos
   update arrived together; the UI showed (SKILL.md edit diff) (ISSUES.md
@@ -97,6 +100,25 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   approving; further tool calls/messages in the turn do not render until
   earlier pending calls have been dealt with; the todos tree renders below
   the dialogs, not between a diff and its dialog.
+- **Fixed (2026-08-14, part 1):** the dialog mounts in the editor region
+  below the transcript, so any card rendered while it is open pushes the
+  approved diff off-screen. The event-controller now engages a transcript
+  hold when the first approval-gated call's `tool_execution_start`
+  dispatches and parks every later event FIFO until that call's
+  `tool_execution_end` (the wrapper only completes a gated call after its
+  dialog resolves; a prediction miss also ends promptly, so the hold cannot
+  stick). Parked events replay in order on release; a replayed gated start
+  re-engages the hold for its own dialog. Resulting order:
+  (diff)(dialog)(result)(diff)(dialog)(result)… — the todos tree renders
+  below the dialogs.
+- **STILL OPEN (2026-08-14):** the hold engages only when the gate
+  prediction (`#toolWillPromptForApproval`, a mirror of the wrapper's
+  `resolveApproval` inputs) fires. Prompts arising solely from engine file
+  rules — a rule with `action: prompt` posture — are NOT predicted, so
+  that class of dialog can still detach. Fix: extend the prediction to
+  also match loaded project/user rules against the call (`matchRule` over
+  the same inputs the engine uses). Tests:
+  `test/modes/controllers/event-controller-approval-hold.test.ts`.
 
 ## 7. Rule saved for worktree edits but prompt asked again
 
@@ -107,13 +129,23 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   cwd mismatch (worktree path vs main checkout path, project vs user layer);
   glob too narrow for the actual path. Verify with `permissions list`.
 
-## 8. No "Allow for this session" option
+## 8. No "Allow for this session" option — FIXED
 
 - **Repro:** any prompt; the decision page offers Allow once / Allow &
   remember… / Deny / Deny & remember… only.
 - **Expected:** a session-scoped allow (e.g. "Allow for this session")
   that permits the call for the rest of the session without writing a
   persistent rule. Design: in-memory session-layer rule(s), not file-backed.
+- **Fixed (committed, not merged/built):** "Allow for this session" on the
+  decision page and "Allow all for this session" on the compound page write
+  in-memory `session`-layer rules (store: `session-rules.ts`, keyed by
+  session id, cwd fallback; engine pool rank 3 = above file rules, below
+  curated). Options drop the session entry under shell control (R1 makes
+  rule-backed allows useless there) but keep it for exact-only tools (an
+  identical re-run is exactly what it covers). Nothing is written to disk.
+  Precedence note: a same-shape user deny still beats a session allow
+  (deny-wins-ties is the safety default); a more-specific session allow
+  (e.g. exact) overrides a broader deny, per spec §3.1.
 
 ## 9. Custom glob editor accepts patterns that can never match the call
 
@@ -128,25 +160,42 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   (b) path patterns expand `~` at match time (or the editor resolves to an
   absolute path before saving); (c) same validation applied to LLM
   suggestions.
+- **Fixed (2026-08-14):** the engine expands a leading `~` in path-key
+  patterns (and values) at match time — `~/.omp/**` rules now match absolute
+  call paths, and command keys never expand (`cd ~/x` stays literal). The
+  Custom… editor validates the edited glob against the pending call's value
+  before accepting: a pattern that cannot match this call (wrong subcommand
+  verb, glob narrower than the target) reopens the input with an error
+  notification until it matches or the user escs. LLM suggestions that
+  cannot match the pending call (checked against the call args, or any
+  pending piece for compound bash) are dropped instead of appended as
+  never-firing rule options. Also eliminates the most plausible remaining
+  cause of bug 7 (glob too narrow for the actual path).
 
-## 10. Are LLM rule suggestions real, and why are they never better?
+## 10. Are LLM rule suggestions real, and why are they never better? — FIXED
 
 - The pipeline exists: one-shot completion on the session model per pending
   call (`tools/permissions/suggest.ts`, gate `permissions.llmSuggestions`
-  default true), appended to the dialog behind a spinner; every failure
-  degrades silently to no suggestions. But the system prompt
-  (`suggest.prompt.md`) is thin — "Pending call: …", "Cwd: …", current
-  rules, "glob with *" — it never explains engine glob semantics (`*`
-  crosses `/`, no `~` expansion, whitespace normalization) or shows the
-  deterministic candidate shapes, so the model emits generic single-`*`
-  patterns ("worktree/*") that look no better than the mechanical
-  candidates. Nothing validates that a suggestion matches the pending call.
-- **Expected:** richer prompt (candidate shapes, glob semantics, exact call
-  text) + drop suggestions that don't match the pending call. Related to
-  bug 1 (model should also recommend the action, preselected).
-- **Decision (2026-08-14):** the fallback suggestion path is not worth
-  keeping on by default — flip `permissions.llmSuggestions` to default
-  **off** (keep the setting for opt-in).
+  default off, opt-in), appended to the dialog behind a spinner; every
+  failure degrades silently to no suggestions. The old system prompt was
+  thin — "Pending call: …", "Cwd: …", current rules, "glob with *" — it
+  never explained engine glob semantics or showed the deterministic
+  candidate shapes, so the model emitted generic single-`*` patterns that
+  looked no better than the mechanical candidates.
+- **Fixed (2026-08-14):** the provider contract now carries the tool name,
+  raw args, and display text (`SuggestionUnit`). The rewritten system
+  prompt spells out the engine's glob semantics (`*` crosses `/`; the
+  space before `*` is literal, so "git log *" is the family form; a
+  leading `~` in path patterns expands; case-sensitive, whitespace
+  literal), the match keys per tool (command/path/arg keys), the dialog's
+  scope rules (no tool-wide bash), and the at-most-3/must-match/preselect
+  rules. The user message adds Tool, Arguments, and the mechanical
+  candidates (exact + first-token glob for bash, exact + parent glob for
+  file tools) so the model aims above them. Suggestions that cannot match
+  the pending call are dropped (bug-9 fix) and a tool-wide bash *allow*
+  suggestion is refused outright — the yolo knob is hand-edited only.
+- Related to bug 1 (model should also recommend the action, preselected) —
+  that part ships independently of the opt-in rules gate.
 
 ## 11. Redirects/pipes flagged "unanalyzable" too aggressively
 

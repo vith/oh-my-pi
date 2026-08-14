@@ -62,6 +62,8 @@ export class PermissionDialogComponent extends Container {
 	#lastRenderWidth: number | undefined;
 	/** Set once the user chose or the dialog was dismissed; late suggestions are dropped. */
 	#settled = false;
+	/** Any key press marks the dialog as interacted; the late model preselection then stays off. */
+	#userInteracted = false;
 	#suggestionRow: Loader | Text | undefined;
 
 	constructor(
@@ -75,6 +77,12 @@ export class PermissionDialogComponent extends Container {
 			helpText?: string;
 			/** Row to preselect; -1/omitted = no selection (spec §5.1, Task 6's Pattern preselect). */
 			initialIndex?: number;
+			/**
+			 * Resolves to the row to preselect once the model's recommendation
+			 * lands. Applied only while the dialog is untouched (no key pressed,
+			 * not settled); resolving `undefined` keeps the current selection.
+			 */
+			preselect?: Promise<number | undefined>;
 			/** Checklist mode: space toggles toggleable options. */
 			checklist?: boolean;
 			/** Edit mode: `e` on a row settles and reports the row (caller maps the sentinel). */
@@ -127,6 +135,25 @@ export class PermissionDialogComponent extends Container {
 		this.#renderList();
 		this.#renderLines();
 		this.#renderPreview();
+		if (opts?.preselect !== undefined) {
+			void opts.preselect
+				.then(index => {
+					// The model's recommendation lands while the user may
+					// already have chosen or moved — never override an
+					// interacted dialog.
+					if (index === undefined || this.#settled || this.#userInteracted) return;
+					this.#selectedIndex = index;
+					this.#renderList();
+				})
+				.catch(() => {
+					// A failed recommendation leaves the initial selection.
+				})
+				.finally(() => {
+					// The TUI is event-driven with no heartbeat: the tree
+					// mutation above stays unpainted without a repaint request.
+					opts.ui?.requestRender();
+				});
+		}
 	}
 
 	/** Watch the suggestion promise: spinner row while pending, append on settle, drop after choice. */
@@ -179,6 +206,7 @@ export class PermissionDialogComponent extends Container {
 	}
 
 	handleInput(keyData: string): void {
+		this.#userInteracted = true;
 		if (matchesSelectCancel(keyData)) {
 			this.#settled = true;
 			this.#onCancel();

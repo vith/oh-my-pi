@@ -290,6 +290,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			settings: context?.autoApprove === true || settings === undefined ? autoApproveSettings(base) : base,
 			cwd: context?.sessionManager?.getCwd() ?? process.cwd(),
 			home: context?.home,
+			// Resolves the in-memory session rule layer ("Allow for this session").
+			sessionId: context?.sessionManager?.getSessionId(),
 		};
 	}
 

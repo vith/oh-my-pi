@@ -6,6 +6,7 @@
 
 ### Added
 
+- Approval dialogs offer **"Allow for this session"** (and "Allow all for this session" for compound bash commands): the call — or every pending piece — is permitted for the rest of the session via an in-memory rule, without writing anything to disk. Session rules rank above file-backed rules but below curated hard denies; a same-shape user deny still wins (deny-wins-ties). The option is dropped under shell control, where rule-backed allows degrade to a prompt anyway, and kept for exact-only tools, where an identical re-run is the point.
 - New global posture `permissions.projectWrites` (settings UI, Permissions group): overrides the default posture for write tools (`edit`, `write`, `ast_edit`) whose target path resolves inside the project directory. `allow` auto-approves project-scoped writes; `prompt`/`deny` behave like the general posture. Unconfigured, it falls back to `permissions.default`.
 - Merged the dynamic layer into the user layer: remembered approval-dialog rules now write to `~/.omp/agent/permissions.yml` like hand-added rules, with two file-backed layers (project, user) total. Rules left in the legacy `permissions.dynamic.yml` still load (folded into the user layer) and `/permissions migrate` physically merges and removes the file.
 - `/permissions remove` removes rules from any file-backed layer (user, or — with `--project` — repo-committed project rules); tab completion after `remove` covers the removable layers and labels each id with its layer.
@@ -13,11 +14,18 @@
 ### Changed
 
 - `permissions.llmSuggestions` now defaults to **off**: the one-shot model rule-suggestion side request is opt-in (`permissions.llmSuggestions: true`).
+- The opt-in LLM rule-suggestion provider now receives the full call (tool, raw args, display text) and a rewritten prompt: engine glob semantics (`*` crosses `/`, the space before `*` is literal, leading `~` expands), per-tool match keys, the dialog's scope rules, and the mechanical candidates the dialog already offers, so suggestions aim above them. Tool-wide bash allow suggestions are refused (the yolo knob is hand-edited only).
 - The allow-all posture (`permissions.default: allow`, legacy yolo) no longer prompts on unanalyzable bash residue (malformed substitutions, nesting past the analysis depth): the R1 degradation now applies to rule-backed allows only, while curated/rule denies inside substitutions still deny.
-- Approval dialogs preselect the recommended action: the decision page preselects "Allow once" (compound: "Allow all pending once", forced prompts: "Approve"), and the scope page keeps preselecting the Pattern candidate — auto-mode-with-confirmation.
+- Approval dialogs preselect the **model-recommended** action: a one-shot side completion on the session model returns a `recommendation` (action + remember scope) per pending call, and the dialog applies it as its preselection when it lands — unless the user already interacted — on both the decision page and the remember scope page (auto-mode-with-confirmation). The recommendation always runs; `permissions.llmSuggestions` gates only the extra rule options. A failing or missing recommendation leaves the dialog unpreselected.
 - Esc on the remember scope page (and the compound remember checklist) now returns to the decision page instead of denying the call; esc on the decision page is the only cancel.
 - Remember options are dropped (with an explanatory note) when every candidate scope is exact — one-shot code tools like eval can only remember an identical call.
 - The compound remember checklist no longer denies the call when Enter is pressed on a piece row: rows toggle (space or enter), only the "Write checked rules" button commits, and the help line documents the keys plus the `[x]` meaning.
+
+### Fixed
+
+- Concurrent approval prompts no longer detach from their diffs: while a permission dialog is open the transcript holds — later tool calls in the batch (and their results) park and replay in order once the dialog resolves, so the approved diff stays directly above its dialog and the todos tree renders below the dialogs, not between a diff and its prompt.
+- Path-key rule patterns now expand a leading `~` at match time: a remembered rule like `~/.omp/plugins/**` actually matches the absolute call path instead of silently never firing. Command keys never expand (`cd ~/x` stays literal text).
+- The Custom… glob editor validates the edited pattern against the pending call before accepting: a glob that cannot match this call reopens the input with an error notification (esc abandons the edit). LLM rule suggestions that cannot match the pending call are dropped instead of appended as never-firing options.
 
 ## [17.3.1+vith-fork.142.d1177a301b] - 2026-08-14
 

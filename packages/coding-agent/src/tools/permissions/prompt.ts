@@ -32,12 +32,15 @@ import {
 	type EngineDecision,
 	evaluateBashCommand,
 	hasBashApprovalShellControl,
+	matchPatternValue,
+	matchRule,
 	nearMissLine,
 	type PieceEvaluation,
 } from "./engine";
 import { type PermissionRule, type RuleAction, ruleFiles, writeUserRule } from "./rules";
+import { addSessionRule, sessionRuleKey } from "./session-rules";
 import { extractSubCommands } from "./split";
-import type { Suggestion } from "./suggest";
+import type { Recommendation, RecommendationScope, Suggestion, SuggestionProvider, SuggestResult } from "./suggest";
 
 /** A selectable rule candidate: the label the user sees, the YAML preview, and the rule to write. */
 export interface CandidateRule {
@@ -75,15 +78,18 @@ export interface PromptForDecisionOptions {
 	 */
 	includeCandidates?: boolean;
 	/**
-	 * Task 11 (§5.3): optional LLM rule-suggestion provider. Per pending unit
-	 * the flow fires it while the dialog is shown; suggestions append as extra
-	 * options behind the dialog's spinner. Any provider failure degrades to
-	 * candidates-only. Never called for forced prompts (`includeCandidates: false`).
+	 * Model-decided approval provider (spec §5.3): per pending unit the flow
+	 * fires it while the dialog is shown. Its recommendation preselects the
+	 * dialog option when it lands (auto-mode-with-confirmation); its rule
+	 * suggestions append as extra options behind the dialog's spinner. Any
+	 * provider failure degrades to candidates-only with no preselection.
+	 * Never called for forced prompts (`includeCandidates: false`).
 	 */
-	suggestionsProvider?: (piece: string) => Promise<Suggestion[]>;
+	suggestionsProvider?: SuggestionProvider;
 }
 
 const ALLOW_ONCE = "Allow once";
+const ALLOW_SESSION = "Allow for this session";
 const ALLOW_REMEMBER = "Allow & remember…";
 const DENY = "Deny";
 const DENY_REMEMBER = "Deny & remember…";
@@ -91,6 +97,7 @@ const APPROVE = "Approve";
 
 /** v3 compound-dialog actions (spec §5.1): one dialog for the whole call. */
 const ALLOW_ALL_ONCE = "Allow all pending once";
+const ALLOW_ALL_SESSION = "Allow all for this session";
 const ALLOW_ALL_REMEMBER = "Allow all & remember…";
 const DENY_ALL = "Deny all pending";
 const DRILL_DOWN = "Decide per piece →";
@@ -109,7 +116,7 @@ const BASH_SHELL_CONTROL_NOTE =
  * remembered rule would only ever match an identical call.
  */
 const EXACT_ONLY_REMEMBER_NOTE =
-	"Remembering this call would only match an identical call — no pattern scope applies to this tool.";
+	"Remembering this call would only match an identical call — no pattern scope applies to this tool. Allow for this session has the same reach, without writing a rule.";
 
 /** Whether the prompt unit's bash command carries unanalyzable shell control (remember rules cannot suppress it). */
 function bashRememberDisabled(args: unknown): boolean {
@@ -496,28 +503,112 @@ function unitPieceText(toolName: string, unitArgs: unknown): string {
 	return `${toolName} ${JSON.stringify(unitArgs)}`;
 }
 
-/** Shape the provider result for both the dialog options and label routing. */
-function resolveSuggestions(suggestions: Suggestion[]): {
+/** The provider result shaped for both the dialog options and label routing. */
+interface ResolvedSuggestions {
+	result: SuggestResult;
 	options: PermissionDialogOption[];
 	byLabel: Map<string, Suggestion>;
-} {
+}
+
+const EMPTY_SUGGESTIONS: ResolvedSuggestions = {
+	result: { suggestions: [] },
+	options: [],
+	byLabel: new Map<string, Suggestion>(),
+};
+
+/**
+ * Shape the provider result into dialog options. Suggestions that cannot
+ * match the pending call are dropped: accepting them would append options
+ * that write never-matching rules. A suggestion matches when its rule matches
+ * the call's args, or — for compound bash calls — any pending piece's command
+ * text (the rule may cover the piece needing approval without covering the
+ * whole compound string).
+ */
+function resolveSuggestions(
+	result: SuggestResult,
+	toolName: string,
+	args: unknown,
+	pendingPieces?: PieceEvaluation[],
+): ResolvedSuggestions {
+	const kept: Suggestion[] = [];
+	for (const suggestion of result.suggestions) {
+		const rule = { ...suggestion.rule, layer: "user" } as PermissionRule;
+		if (matchRule(rule, toolName, args)) {
+			kept.push(suggestion);
+		} else if (pendingPieces !== undefined && toolName === "bash") {
+			const matchesPiece = pendingPieces.some(piece => matchRule(rule, "bash", { command: piece.text }));
+			if (matchesPiece) kept.push(suggestion);
+		}
+	}
 	const seen = new Set<string>();
 	const options: PermissionDialogOption[] = [];
 	const byLabel = new Map<string, Suggestion>();
-	for (const suggestion of suggestions) {
+	for (const suggestion of kept) {
 		const label = suggestionLabel(suggestion);
 		if (seen.has(label)) continue; // duplicate labels would be unroutable
 		seen.add(label);
 		options.push({ label, description: renderCandidateYaml(suggestion.rule) });
 		byLabel.set(label, suggestion);
 	}
-	return { options, byLabel };
+	return { result: { ...result, suggestions: kept }, options, byLabel };
+}
+
+/**
+ * Map the model's recommendation to the decision-page option index; the
+ * recommended label not being offered (remember dropped) falls back to the
+ * same-polarity least-commitment action. `undefined` = no preselection.
+ */
+function decisionRecommendationIndex(
+	recommendation: Recommendation | undefined,
+	options: readonly string[],
+): number | undefined {
+	if (recommendation === undefined) return undefined;
+	const remember = recommendation.scope !== "once";
+	const label =
+		recommendation.action === "allow" ? (remember ? ALLOW_REMEMBER : ALLOW_ONCE) : remember ? DENY_REMEMBER : DENY;
+	const index = options.indexOf(label);
+	if (index >= 0) return index;
+	const fallback = recommendation.action === "allow" ? ALLOW_ONCE : DENY;
+	const fallbackIndex = options.indexOf(fallback);
+	return fallbackIndex >= 0 ? fallbackIndex : undefined;
+}
+
+/** Compound-page variant: allow-all-once / allow-all-remember / deny-all. */
+function compoundRecommendationIndex(
+	recommendation: Recommendation | undefined,
+	options: readonly string[],
+): number | undefined {
+	if (recommendation === undefined) return undefined;
+	const label =
+		recommendation.action === "deny"
+			? DENY_ALL
+			: recommendation.scope === "once"
+				? ALLOW_ALL_ONCE
+				: ALLOW_ALL_REMEMBER;
+	const index = options.indexOf(label);
+	if (index >= 0) return index;
+	const fallback = recommendation.action === "allow" ? ALLOW_ALL_ONCE : DENY_ALL;
+	const fallbackIndex = options.indexOf(fallback);
+	return fallbackIndex >= 0 ? fallbackIndex : undefined;
+}
+
+/** The option-list index of the first candidate with `scope` (Custom… rows count). */
+function candidateOptionIndex(candidates: CandidateRule[], scope: RecommendationScope): number | undefined {
+	let optionIndex = 0;
+	for (const candidateItem of candidates) {
+		if (candidateItem.scope === scope) return optionIndex;
+		optionIndex += 1;
+		if (candidateItem.scope === "pattern") optionIndex += 1; // Custom… follows a pattern
+	}
+	return undefined;
 }
 
 /** Dialog presentation options for {@link chooseLabel}. */
 interface ChooseLabelDialogOpts {
 	/** Row to preselect; omitted = no selection. */
 	initialIndex?: number;
+	/** Resolves to the row to preselect once the model's recommendation lands. */
+	preselect?: Promise<number | undefined>;
 	/** Help line shown at the bottom of the dialog. */
 	helpText?: string;
 }
@@ -538,6 +629,7 @@ async function chooseLabel(
 			options: options.map(label => ({ label })),
 			...(suggestions !== undefined ? { suggestions } : {}),
 			...(dialogOpts?.initialIndex !== undefined ? { initialIndex: dialogOpts.initialIndex } : {}),
+			...(dialogOpts?.preselect !== undefined ? { preselect: dialogOpts.preselect } : {}),
 			...(dialogOpts?.helpText !== undefined ? { helpText: dialogOpts.helpText } : {}),
 		};
 		const index = await ui.showPermissionDialog(request);
@@ -558,11 +650,18 @@ const CUSTOM_LABEL = "Custom…";
 /** The scope dialog's back-to-decision-page signal (esc / cancel). */
 const SCOPE_BACK = "back" as const;
 
-/** Level-2 scope choice: pick a candidate (with its YAML preview), edit via Custom…, or go back. */
+/**
+ * Level-2 scope choice: pick a candidate (with its YAML preview), edit via
+ * Custom…, or go back. `recommendedScope` resolves to the model's recommended
+ * scope for this call, preselected when it lands; without a recommendation
+ * the Pattern candidate stays preselected (the one that will fire again).
+ */
 async function chooseCandidate(
 	ui: ExtensionUIContext,
 	title: string,
 	candidates: CandidateRule[],
+	recommendedScope: Promise<RecommendationScope | undefined> | undefined,
+	args: unknown,
 ): Promise<CandidateRule | typeof SCOPE_BACK | undefined> {
 	if (candidates.length === 0) return SCOPE_BACK;
 	if (ui.showPermissionDialog) {
@@ -583,13 +682,20 @@ async function chooseCandidate(
 				candidates.findIndex(candidateItem => candidateItem.scope === "pattern"),
 			),
 			helpText: "j/k navigate  enter select  esc back",
+			...(recommendedScope !== undefined
+				? {
+						preselect: recommendedScope.then(scope =>
+							scope === undefined ? undefined : candidateOptionIndex(candidates, scope),
+						),
+					}
+				: {}),
 		};
 		const index = await ui.showPermissionDialog(request);
 		if (index === undefined || index === -1) return SCOPE_BACK; // esc — back to the decision page
 		// The option list inserts Custom… between candidates, so the picked
 		// index does not map onto the candidates array — resolve by label.
 		const label = options[index]?.label;
-		if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
+		if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates, args);
 		const found = candidates.find(candidateItem => candidateItem.label === label);
 		return found;
 	}
@@ -599,7 +705,7 @@ async function chooseCandidate(
 	];
 	const label = await ui.select(title, labels);
 	if (label === undefined) return SCOPE_BACK;
-	if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates);
+	if (label === CUSTOM_LABEL) return editCustomCandidate(ui, title, candidates, args);
 	const index = candidates.findIndex(candidateItem => candidateItem.label === label);
 	return index >= 0 ? candidates[index] : undefined;
 }
@@ -608,28 +714,45 @@ async function chooseCandidate(
  * Custom… (spec §5.1): edit the recommended pattern glob via `ui.input`,
  * returning a pattern-scope candidate for the caller to write. Cancel/empty
  * edits resolve to undefined (no rule).
+ *
+ * The edited pattern is validated against the pending call's value before
+ * acceptance: a pattern that cannot match this call (e.g. a `~` path the
+ * engine cannot see, a glob narrower than the actual target) would write a
+ * rule that never fires. On mismatch the input reopens with an error
+ * notification so the user can fix the glob or esc to abandon.
  */
 async function editCustomCandidate(
 	ui: ExtensionUIContext,
 	title: string,
 	candidates: CandidateRule[],
+	args: unknown,
 ): Promise<CandidateRule | undefined> {
 	if (ui.input === undefined) return undefined;
 	const recommended = candidates.find(candidateItem => candidateItem.scope === "pattern");
 	if (recommended === undefined) return undefined; // Custom… is only offered next to a Pattern
 	const matchKey = Object.keys(recommended.rule.match)[0] ?? "command";
 	const current = String(recommended.rule.match[matchKey] ?? "");
-	const edited = await ui.input(`Edit pattern (${title})`, current);
-	if (edited === undefined || edited.trim().length === 0) return undefined;
-	const value = edited.trim();
-	const deny = recommended.rule.action === "deny";
-	return candidate(
-		recommended.rule.tool,
-		recommended.rule.action,
-		"pattern",
-		{ [matchKey]: value },
-		`${deny ? "Deny pattern" : "Pattern"}: ${value}`,
-	);
+	const pendingValue = argString(args, matchKey);
+	let edited = await ui.input(`Edit pattern (${title})`, current);
+	while (edited !== undefined && edited.trim().length > 0) {
+		const value = edited.trim();
+		// No pending value for this key (should not happen — Custom… only
+		// follows a Pattern candidate whose key exists in the call): accept
+		// without validation rather than blocking on a phantom mismatch.
+		if (pendingValue === undefined || matchPatternValue(matchKey, pendingValue, value)) {
+			const deny = recommended.rule.action === "deny";
+			return candidate(
+				recommended.rule.tool,
+				recommended.rule.action,
+				"pattern",
+				{ [matchKey]: value },
+				`${deny ? "Deny pattern" : "Pattern"}: ${value}`,
+			);
+		}
+		ui.notify(`This pattern cannot match the pending call — it would never fire: ${value}`, "error");
+		edited = await ui.input(`Edit pattern (${title}) — pattern does not match this call`, value);
+	}
+	return undefined;
 }
 
 async function writeRememberedRule(rule: Omit<PermissionRule, "layer">, ctx: EngineContext): Promise<void> {
@@ -684,22 +807,25 @@ async function promptUnit(
 
 	const candidates = buildCandidates(toolName, unitArgs, pieces);
 	// The forced-prompt branch above already returned, so only candidate
-	// dialogs reach here; the provider fires once per pending unit.
-	const suggestionsPromise =
+	// dialogs reach here; the provider fires once per pending unit and its
+	// recommendation drives the dialog preselection.
+	const suggestionFlow =
 		opts.suggestionsProvider !== undefined
 			? opts
-					.suggestionsProvider(unitPieceText(toolName, unitArgs))
-					.then(resolveSuggestions)
-					.catch(() => ({ options: [], byLabel: new Map<string, Suggestion>() }))
+					.suggestionsProvider({ tool: toolName, args: unitArgs, text: unitPieceText(toolName, unitArgs) })
+					.then(resolved => resolveSuggestions(resolved, toolName, unitArgs, pieces))
+					.catch(() => EMPTY_SUGGESTIONS)
 			: undefined;
 	// Shell-control bash commands cannot be suppressed by a remembered rule,
 	// and tools whose candidates are exact-only (one-shot code tools like
 	// eval) can only remember an identical call — drop the remember options
-	// for both and say why.
+	// for both and say why. "Allow for this session" is an in-memory rule:
+	// it survives exact-only tools (an identical re-run is exactly what it
+	// covers) but is useless under shell control, where rule-backed allows
+	// degrade to a prompt (R1) — so it drops there too.
 	const rememberDisabled = bashRememberDisabled(unitArgs);
 	const exactOnlyRemember =
 		candidates.length > 0 && candidates.every(candidateItem => candidateItem.scope === "exact");
-	const rememberUseless = rememberDisabled || exactOnlyRemember;
 	const metaLines = dialogMetadataLines(toolName, opts);
 	const lines: (string | PermissionDialogLine)[] = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
 	if (rememberDisabled) {
@@ -707,18 +833,27 @@ async function promptUnit(
 	} else if (exactOnlyRemember) {
 		lines.push("", EXACT_ONLY_REMEMBER_NOTE);
 	}
-	const baseOptions = rememberUseless ? [ALLOW_ONCE, DENY] : [ALLOW_ONCE, ALLOW_REMEMBER, DENY, DENY_REMEMBER];
+	const baseOptions = rememberDisabled
+		? [ALLOW_ONCE, DENY]
+		: exactOnlyRemember
+			? [ALLOW_ONCE, ALLOW_SESSION, DENY]
+			: [ALLOW_ONCE, ALLOW_SESSION, ALLOW_REMEMBER, DENY, DENY_REMEMBER];
 	const options = backLabel !== undefined ? [...baseOptions, backLabel] : baseOptions;
-	// The decision page preselects "Allow once": the least-commitment action
-	// is the recommended default (auto-mode-with-confirmation).
+	// The model's recommendation preselects the decision-page option when it
+	// lands; until then the dialog shows no selection (auto-mode-with-
+	// confirmation — the model decides, the user confirms).
+	const recommendedScope = suggestionFlow?.then(resolved => resolved.result.recommendation?.scope);
+	const preselect = suggestionFlow?.then(resolved =>
+		decisionRecommendationIndex(resolved.result.recommendation, options),
+	);
 	while (true) {
 		const chosen = await chooseLabel(
 			ui,
 			dialogTitle(ui, title, metaLines),
 			options,
 			lines,
-			suggestionsPromise?.then(result => result.options),
-			{ initialIndex: 0 },
+			suggestionFlow?.then(result => result.options),
+			{ ...(preselect !== undefined ? { preselect } : {}) },
 		);
 		switch (chosen) {
 			case ALLOW_ONCE:
@@ -726,11 +861,23 @@ async function promptUnit(
 				return { policy: "allow" };
 			case DENY:
 				return { policy: "deny" };
+			case ALLOW_SESSION: {
+				// In-memory session-scoped allow: the pattern candidate when
+				// available (covers the call family for the rest of the
+				// session), else the exact one. Nothing is written to disk.
+				const allow = candidates.filter(candidateItem => candidateItem.rule.action === "allow");
+				const recommended = allow.find(candidateItem => candidateItem.scope === "pattern") ?? allow[0];
+				if (recommended === undefined) return { policy: "deny" };
+				addSessionRule(sessionRuleKey(ctx), sessionRule(recommended.rule));
+				return { policy: "allow" };
+			}
 			case ALLOW_REMEMBER: {
 				const rule = await chooseCandidate(
 					ui,
 					`Remember an allow rule for ${toolName}`,
 					candidates.filter(candidateItem => candidateItem.rule.action === "allow"),
+					recommendedScope,
+					unitArgs,
 				);
 				// Esc on the scope page returns to the decision page; a
 				// cancelled Custom… glob edit does the same.
@@ -743,6 +890,8 @@ async function promptUnit(
 					ui,
 					`Remember a deny rule for ${toolName}`,
 					candidates.filter(candidateItem => candidateItem.rule.action === "deny"),
+					recommendedScope,
+					unitArgs,
 				);
 				if (rule === SCOPE_BACK || rule === undefined) continue;
 				await writeRememberedRule(rule.rule, ctx);
@@ -754,8 +903,8 @@ async function promptUnit(
 				// A suggestion option picked from the dialog: remember its rule
 				// and resolve with its action. Unknown labels (incl. esc) still
 				// fail closed.
-				if (chosen !== undefined && suggestionsPromise !== undefined) {
-					const picked = (await suggestionsPromise).byLabel.get(chosen);
+				if (chosen !== undefined && suggestionFlow !== undefined) {
+					const picked = (await suggestionFlow).byLabel.get(chosen);
 					if (picked !== undefined) {
 						await writeRememberedRule(picked.rule, ctx);
 						return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };
@@ -765,6 +914,15 @@ async function promptUnit(
 			}
 		}
 	}
+}
+
+/**
+ * Give a remember-scoped candidate rule its session-layer identity: same
+ * match, action, and reason, but a `session-` id so audit attribution and
+ * the store display read as ephemeral rather than file-backed.
+ */
+function sessionRule(rule: Omit<PermissionRule, "layer">): Omit<PermissionRule, "layer"> {
+	return { ...rule, id: `session-${rule.id.replace(/^remember-/u, "")}` };
 }
 
 /** Compound remember dialog (spec §5.1): per-piece first-token glob checklist with live YAML preview. */
@@ -944,34 +1102,53 @@ export async function promptForDecision(
 	const title = opts.title ?? defaultTitle(toolName);
 	const metaLines = dialogMetadataLines(toolName, opts);
 	const lines = [...metaLines, ...buildDialogLines(decision, pieces, ctx)];
-	const suggestionsPromise =
+	const suggestionFlow =
 		opts.suggestionsProvider !== undefined
 			? opts
-					.suggestionsProvider(unitPieceText(toolName, args))
-					.then(resolveSuggestions)
-					.catch(() => ({ options: [], byLabel: new Map<string, Suggestion>() }))
+					.suggestionsProvider({ tool: toolName, args, text: unitPieceText(toolName, args) })
+					.then(resolved => resolveSuggestions(resolved, toolName, args, pendingPieces))
+					.catch(() => EMPTY_SUGGESTIONS)
 			: undefined;
 	const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));
 	const baseOptions = rememberDisabled
 		? [ALLOW_ALL_ONCE, DENY_ALL]
-		: [ALLOW_ALL_ONCE, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
-	// "Allow all pending once" is preselected: the least-commitment action is
-	// the recommended default (auto-mode-with-confirmation). Esc on the
-	// remember checklist returns here (auto-mode-with-confirmation back nav).
+		: [ALLOW_ALL_ONCE, ALLOW_ALL_SESSION, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
+	// The model's recommendation preselects the compound option when it
+	// lands; until then no selection. Esc on the remember checklist returns
+	// here.
+	const preselect = suggestionFlow?.then(resolved =>
+		compoundRecommendationIndex(resolved.result.recommendation, baseOptions),
+	);
 	while (true) {
 		const chosen = await chooseLabel(
 			ui,
 			dialogTitle(ui, title, metaLines),
 			baseOptions,
 			lines,
-			suggestionsPromise?.then(result => result.options),
-			{ initialIndex: 0 },
+			suggestionFlow?.then(result => result.options),
+			{ ...(preselect !== undefined ? { preselect } : {}) },
 		);
 		switch (chosen) {
 			case ALLOW_ALL_ONCE:
 				return { policy: "allow" };
 			case DENY_ALL:
 				return { policy: "deny" };
+			case ALLOW_ALL_SESSION: {
+				// One in-memory session rule per pending piece (first-token
+				// globs), mirroring the remember checklist without any disk
+				// write.
+				for (const piece of pendingPieces) {
+					const rule = candidate(
+						"bash",
+						"allow",
+						"pattern",
+						{ command: firstTokenPattern(piece.text) },
+						firstTokenPattern(piece.text),
+					).rule;
+					addSessionRule(sessionRuleKey(ctx), sessionRule(rule));
+				}
+				return { policy: "allow" };
+			}
 			case ALLOW_ALL_REMEMBER: {
 				const rule = await rememberCompound(ui, pendingPieces, "allow", ctx);
 				if (rule === SCOPE_BACK) continue; // back to the compound decision page
@@ -981,8 +1158,8 @@ export async function promptForDecision(
 				return drillDownPieces(ui, pendingPieces, decision, ctx, opts);
 			default:
 				// Suggestion option picked from the dialog (appended options).
-				if (chosen !== undefined && suggestionsPromise !== undefined) {
-					const picked = (await suggestionsPromise).byLabel.get(chosen);
+				if (chosen !== undefined && suggestionFlow !== undefined) {
+					const picked = (await suggestionFlow).byLabel.get(chosen);
 					if (picked !== undefined) {
 						await writeRememberedRule(picked.rule, ctx);
 						return { policy: picked.rule.action === "allow" ? "allow" : "deny", remembered: picked.rule };

@@ -3707,7 +3707,8 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// LLM-generated permission rule suggestions (interaction tab). Defaults
-	// off: the one-shot side-request path is opt-in.
+	// off: the extra rule options are opt-in. The model's recommended action
+	// for the dialog preselection always runs (auto-mode-with-confirmation).
 	"permissions.llmSuggestions": {
 		type: "boolean",
 		default: false,
@@ -3716,7 +3717,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Permissions",
 			label: "LLM Rule Suggestions",
 			description:
-				"Ask the session model to propose allow/deny rules for each pending approval. Off by default; when enabled, suggestions appear as extra dialog options.",
+				"Ask the session model to propose allow/deny rules for each pending approval. Off by default; when enabled, rules appear as extra dialog options. The model's recommended action for the preselected choice always runs.",
 		},
 	},
 

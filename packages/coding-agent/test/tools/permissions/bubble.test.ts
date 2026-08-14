@@ -263,7 +263,7 @@ describe("PermissionController", () => {
 
 	it("preloads the focused dialog with async LLM suggestions when a provider is supplied", async () => {
 		registerTree();
-		const provider = vi.fn(async () => []);
+		const provider = vi.fn(async () => ({ suggestions: [] }));
 		const h = makeController({ suggestionsProvider: () => provider });
 		h.controller.install();
 		h.setAttached(SUB_SESSION_ID);

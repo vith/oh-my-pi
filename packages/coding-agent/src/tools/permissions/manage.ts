@@ -254,7 +254,7 @@ async function clearRules(rest: string, ctx: RunPermissionCommandContext): Promi
 
 	const files = ruleFiles(ctx.cwd);
 	const { rules } = loadRuleLayers(ctx.cwd);
-	const layerRules: Record<Exclude<RuleLayer, "curated" | "legacy">, PermissionRule[]> = {
+	const layerRules: Record<Exclude<RuleLayer, "curated" | "legacy" | "session">, PermissionRule[]> = {
 		project: [],
 		user: [],
 	};

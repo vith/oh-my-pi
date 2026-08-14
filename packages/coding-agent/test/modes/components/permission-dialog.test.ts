@@ -326,6 +326,41 @@ describe("PermissionDialogComponent", () => {
 		expect(render(component)).toContain("j/k navigate  space/enter toggle  esc back");
 	});
 
+	it("applies the late model preselection while the dialog is untouched", async () => {
+		const selected: number[] = [];
+		const deferred = Promise.withResolvers<number | undefined>();
+		const component = new PermissionDialogComponent(
+			"Approve this command?",
+			[],
+			[{ label: "Allow once" }, { label: "Deny" }],
+			index => selected.push(index),
+			() => {},
+			{ preselect: deferred.promise },
+		);
+		deferred.resolve(1);
+		await deferred.promise;
+		component.handleInput(ENTER);
+		expect(selected).toEqual([1]);
+	});
+
+	it("never applies the late preselection after the user interacted", async () => {
+		const selected: number[] = [];
+		const deferred = Promise.withResolvers<number | undefined>();
+		const component = new PermissionDialogComponent(
+			"Approve this command?",
+			[],
+			[{ label: "Allow once" }, { label: "Deny" }],
+			index => selected.push(index),
+			() => {},
+			{ preselect: deferred.promise },
+		);
+		component.handleInput("j"); // user moved first — the recommendation stays off
+		deferred.resolve(1);
+		await deferred.promise;
+		component.handleInput(ENTER);
+		expect(selected).toEqual([0]);
+	});
+
 	it("keeps a truncated line with a status on one row (status after the ellipsis)", () => {
 		const component = new PermissionDialogComponent(
 			"Allow tool: bash",
