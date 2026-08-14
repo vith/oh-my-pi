@@ -160,6 +160,8 @@ export interface PermissionDialogRequest {
 	options: PermissionDialogOption[];
 	/** Row to preselect; -1/omitted = no selection (Task 6's Pattern preselect). */
 	initialIndex?: number;
+	/** Help line shown at the bottom; defaults to the standard navigate/select/cancel text. */
+	helpText?: string;
 	/** Checklist mode: space toggles toggleable options. */
 	checklist?: boolean;
 	/** Edit mode: a key opens a text editor for the picked option. */

@@ -18,6 +18,12 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
 - **Notes:** needs a decision-recommendation output from the provider plus
   preselection wiring (including the late-arrival case: preselect when
   suggestions land if the user hasn't moved yet).
+- **Fixed (2026-08-14):** deterministic preselection on every page — the
+  decision page preselects "Allow once" (compound: "Allow all pending
+  once"), the forced-prompt binary preselects "Approve", and the scope page
+  already preselected the Pattern candidate. With `permissions.llmSuggestions`
+  now off by default, the recommendation is the least-commitment action
+  (auto-mode-with-confirmation); the model-driven variant can layer on later.
 
 ## 2. `echo "hello from bash"` flagged as unanalyzable shell control
 
@@ -47,6 +53,10 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   neither space nor what `[x]` means.
 - **Expected:** help text like "j/k navigate  space toggle  enter write checked  esc cancel",
   Enter toggles rows, only the write button commits, `[x]` = included.
+- **Fixed (2026-08-14):** Enter on a toggleable row now toggles it (the
+  dialog never settles on a row); only the write button commits. Help line
+  reads "j/k navigate  space/enter toggle  enter write checked  esc back"
+  and a legend line states "[x] rows are written as rules".
 
 ## 4. Allow & remember on a non-bash tool offers only a useless "exact" scope
 
@@ -56,6 +66,10 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
 - **Expected:** either a useful scope for code tools (e.g. first-line /
   first-token pattern?) or drop the remember options for tools whose args are
   one-shot code (like shell-control bash does). **Design decision needed.**
+- **Fixed (2026-08-14):** remember options are dropped (with a note —
+  "Remembering this call would only match an identical call — no pattern
+  scope applies to this tool") whenever every candidate scope is exact,
+  i.e. eval-like tools. The dialog keeps Allow once + Deny.
 
 ## 5. Scope page has no way back to the decision page
 
@@ -68,6 +82,10 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
 - **Expected:** the scope page needs a back option to the decision page, and
   "Allow once" must stay reachable from there; esc on the scope page goes
   back to page 1, esc on page 1 is the real cancel.
+- **Fixed (2026-08-14):** esc on the scope page (allow/deny remember) and on
+  the compound checklist now returns to the decision page; esc on the
+  decision page is the only cancel (denies). Scope help line documents
+  "esc back".
 
 ## 6. Concurrent pending approvals render out of order / detached from diffs
 

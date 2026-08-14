@@ -198,16 +198,7 @@ export class PermissionDialogComponent extends Container {
 			return;
 		}
 		if (this.#checklist && (matchesKey(keyData, "space") || keyData === " ")) {
-			const option = this.#options[this.#selectedIndex];
-			if (option?.toggleable === true) {
-				this.#checked[this.#selectedIndex] = !(this.#checked[this.#selectedIndex] ?? false);
-				// Write back onto the source option object so the caller can read final state.
-				const source = this.#sourceOptions[this.#selectedIndex];
-				if (source !== undefined) source.checked = this.#checked[this.#selectedIndex];
-				if (option.labelFor !== undefined) option.label = option.labelFor(this.#checked);
-				this.#renderList();
-				this.#renderPreview();
-			}
+			this.#toggleChecked(this.#selectedIndex);
 			return;
 		}
 		if (matchesKey(keyData, "e") && this.#onEdit !== undefined && this.#checklist && this.#selectedIndex >= 0) {
@@ -220,10 +211,31 @@ export class PermissionDialogComponent extends Container {
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			// No-selection mode: Enter stays a no-op until navigation (spec §5.1).
 			if (this.#options.length > 0 && this.#selectedIndex >= 0) {
+				const option = this.#options[this.#selectedIndex];
+				// Checklist rows toggle on Enter like space; only the write
+				// button (non-toggleable) commits — Enter on a row must never
+				// settle the dialog.
+				if (this.#checklist && option?.toggleable === true) {
+					this.#toggleChecked(this.#selectedIndex);
+					return;
+				}
 				this.#settled = true;
 				this.#onSelect(Math.min(this.#selectedIndex, this.#options.length - 1));
 			}
 		}
+	}
+
+	/** Toggle a checklist row's checked state (space or Enter on the row). */
+	#toggleChecked(index: number): void {
+		const option = this.#options[index];
+		if (option?.toggleable !== true) return;
+		this.#checked[index] = !(this.#checked[index] ?? false);
+		// Write back onto the source option object so the caller can read final state.
+		const source = this.#sourceOptions[index];
+		if (source !== undefined) source.checked = this.#checked[index];
+		if (option.labelFor !== undefined) option.label = option.labelFor(this.#checked);
+		this.#renderList();
+		this.#renderPreview();
 	}
 
 	override dispose(): void {
