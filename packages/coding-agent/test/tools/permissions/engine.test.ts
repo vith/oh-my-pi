@@ -843,6 +843,75 @@ describe("posture allow vs unanalyzable residue (R1)", () => {
 	});
 });
 
+describe("whole-command allow rules vs compounds", () => {
+	// A remembered first-token rule (`cd *`) matches the WHOLE `&&`-joined
+	// string too. The walk must not let that whole-command allow decide a
+	// multi-piece call: `&&` is shell control, so it degraded to a prompt
+	// even under allow-all posture, when every piece was posture- or
+	// rule-allowed (the bash tool's per-piece evaluation is the granular
+	// authority for compounds — the walk's allow gate mirrors the legacy
+	// single-piece gate).
+	const walkCtx = (dir: string, posture: string) => ({
+		settings: Settings.isolated({ "permissions.default": posture }),
+		cwd: "/tmp/perm-test",
+		home: dir,
+	});
+	const writeUserRule = (dir: string, match: string, action: string) =>
+		write(
+			path.join(dir, ".omp", "agent", "permissions.yml"),
+			`rules:\n  - id: walk-test\n    tool: bash\n    match: { command: '${match}' }\n    action: ${action}\n`,
+		);
+
+	it("allow-all posture does not prompt a compound matching a remembered first-token rule", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			writeUserRule(dir, "cd *", "allow");
+			const d = evaluatePermission(tool("bash"), { command: "cd /tmp && echo hi" }, walkCtx(dir, "allow"));
+			expect(d.policy).toBe("allow");
+			expect(d.source).toBe("posture");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("prompt posture still prompts the same compound", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			writeUserRule(dir, "cd *", "allow");
+			const d = evaluatePermission(tool("bash"), { command: "cd /tmp && echo hi" }, walkCtx(dir, "prompt"));
+			expect(d.policy).toBe("prompt");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("single-piece shell-control commands still degrade a rule allow (R1)", () => {
+		// `cd /tmp > out` is one piece with a redirect: the rule cannot
+		// vouch for it, so it must keep prompting even under allow posture.
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			writeUserRule(dir, "cd *", "allow");
+			const d = evaluatePermission(tool("bash"), { command: "cd /tmp > out" }, walkCtx(dir, "allow"));
+			expect(d.policy).toBe("prompt");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a whole-command deny rule still denies a compound", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
+		try {
+			// The pattern only matches the joined string, never a single
+			// piece; the walk's deny resolution must keep catching it.
+			writeUserRule(dir, "cd /etc && echo *", "deny");
+			const d = evaluatePermission(tool("bash"), { command: "cd /etc && echo hi" }, walkCtx(dir, "allow"));
+			expect(d.policy).toBe("deny");
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("session rules (bug 8)", () => {
 	// The in-memory layer is module-global, keyed by session id (fallback:
 	// cwd). Every test cleans the store so later files start empty.

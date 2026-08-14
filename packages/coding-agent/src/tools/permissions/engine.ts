@@ -588,10 +588,17 @@ function evaluatePermissionCore(
 	// control (ruling R1); `prompt` rules match any piece text (ruling R2).
 	const legacy = legacyBashPatterns(ctx.settings);
 	const legacyAllowActive = legacyAllowEnabled && command !== undefined && isSinglePiece(command);
+	// Allow rules only ever vouch for a single-piece command. On a compound,
+	// the whole-command match would always degrade (its `&&`/`;` separators
+	// are shell control, R1) and force a prompt even when every piece is
+	// posture- or rule-allowed — the bash tool's per-piece evaluation is the
+	// granular authority there, and it skips the degradation for posture
+	// allows. Deny/prompt rules keep matching the joined string.
+	const multiPieceBash = command !== undefined && !isSinglePiece(command);
 	const pool = [
 		...legacy.filter(rule => rule.action !== "allow" || legacyAllowActive),
-		...rules,
-		...sessionRules(sessionRuleKey(ctx)),
+		...rules.filter(rule => rule.action !== "allow" || !multiPieceBash),
+		...sessionRules(sessionRuleKey(ctx)).filter(rule => rule.action !== "allow" || !multiPieceBash),
 	];
 	const best = resolveWholeCommandRule(pool, tool.name, args);
 	if (best !== undefined) {

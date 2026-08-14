@@ -8,6 +8,7 @@
 
 - Compound permission dialogs no longer offer remember suggestions that match only the whole `&&`-joined command string — such rules can never fire because the engine evaluates per piece; compound suggestions must match a pending piece.
 - Compound permission dialogs keep the "Decide per piece →" action when a piece carries shell control, instead of degrading to a binary allow-all/deny-all choice.
+- Compound bash commands matching a remembered first-token allow rule (e.g. `cd *`) no longer prompt under allow-all posture: the whole-command allow match always degraded on the `&&`/`;` separators, forcing a dialog even when every piece was already allowed. Allow rules now vouch only for single-piece commands; per-piece evaluation is authoritative for compounds.
 
 ## [17.3.1+vith-fork.147.e4cf13962d] - 2026-08-14
 
