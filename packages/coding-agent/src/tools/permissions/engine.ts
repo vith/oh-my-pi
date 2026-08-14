@@ -684,8 +684,26 @@ function evaluateBashPiece(
 	// and the piece allow only stands when every sub-command is allowed.
 	// Unanalyzable residue (malformed constructs, non-simple pipeline stages,
 	// excessive nesting) degrades the allow to a prompt (R1 — over-prompt).
+	// Posture allows (`permissions.default: allow` / legacy yolo) skip the
+	// degradation: the user opted into auto-approving everything not denied
+	// and no rule is vouching, so prompting on parser limits under allow-all
+	// is noise. Sub-commands are still recursed below, so curated/rule denies
+	// inside substitutions keep denying.
 	const subs = extractSubCommands(piece.text, depth);
 	if (subs === null) {
+		if (decision.source === "posture") {
+			return {
+				evaluation: {
+					text: piece.text,
+					operator: piece.operator,
+					policy: "allow",
+					ruleId: decision.ruleId,
+					layer: decision.layer,
+					reason: decision.reason,
+				},
+				source: decision.source,
+			};
+		}
 		return {
 			evaluation: {
 				text: piece.text,

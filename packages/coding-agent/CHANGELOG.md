@@ -11,6 +11,7 @@
 ### Changed
 
 - `permissions.llmSuggestions` now defaults to **off**: the one-shot model rule-suggestion side request is opt-in (`permissions.llmSuggestions: true`).
+- The allow-all posture (`permissions.default: allow`, legacy yolo) no longer prompts on unanalyzable bash residue (malformed substitutions, nesting past the analysis depth): the R1 degradation now applies to rule-backed allows only, while curated/rule denies inside substitutions still deny.
 
 ## [17.3.1+vith-fork.142.d1177a301b] - 2026-08-14
 

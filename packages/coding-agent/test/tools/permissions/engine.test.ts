@@ -333,14 +333,26 @@ describe("sub-command evaluation", () => {
 		expect(cmdExe.policy).toBe("prompt");
 	});
 
-	it("malformed substitutions and excessive nesting degrade to a prompt", () => {
-		const unclosed = evaluateBashCommand("echo $(date", allow("echo *"));
-		expect(unclosed.policy).toBe("prompt");
-		// depth 9 > SUB_COMMAND_MAX_DEPTH (8)
-		let deep = "date";
-		for (let i = 0; i < 9; i++) deep = `echo $(${deep})`;
-		const nested = evaluateBashCommand(deep, allow("echo *"));
-		expect(nested.policy).toBe("prompt");
+	it("malformed substitutions and excessive nesting degrade rule allows to a prompt", () => {
+		// R1 for rule-backed allows: a file rule matching `echo *` must not
+		// vouch for unanalyzable residue, so both cases still prompt. (Posture
+		// allows skip this degradation — see the posture-vs-R1 describe.)
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-engine-${Snowflake.next()}-`));
+		try {
+			write(
+				path.join(dir, ".omp", "permissions.yml"),
+				"rules:\n  - id: echo-all\n    tool: bash\n    match: { command: 'echo *' }\n    action: allow\n",
+			);
+			const unclosed = evaluateBashCommand("echo $(date", ctx({}, dir));
+			expect(unclosed.policy).toBe("prompt");
+			// depth 9 > SUB_COMMAND_MAX_DEPTH (8)
+			let deep = "date";
+			for (let i = 0; i < 9; i++) deep = `echo $(${deep})`;
+			const nested = evaluateBashCommand(deep, ctx({}, dir));
+			expect(nested.policy).toBe("prompt");
+		} finally {
+			removeSyncWithRetries(dir);
+		}
 	});
 
 	test("git log * rule covers git log | head via safe-consumer exemption", () => {
@@ -767,5 +779,20 @@ describe("project-writes posture (permissions.projectWrites)", () => {
 		} finally {
 			removeSyncWithRetries(base);
 		}
+	});
+});
+
+describe("posture allow vs unanalyzable residue (R1)", () => {
+	// Nesting deeper than SUB_COMMAND_MAX_DEPTH makes extractSubCommands return
+	// null — the "unanalyzable construct" prompt path.
+	const deep = "echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo $(echo x))))))))";
+
+	it("allow-all posture does not prompt on unanalyzable nesting", () => {
+		const d = evaluateBashCommand(deep, ctx({ "permissions.default": "allow" }));
+		expect(d.policy).toBe("allow");
+	});
+	it("allow-all posture still denies curated patterns inside substitutions", () => {
+		const d = evaluateBashCommand("echo $(rm -rf /)", ctx({ "permissions.default": "allow" }));
+		expect(d.policy).toBe("deny");
 	});
 });

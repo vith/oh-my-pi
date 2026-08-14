@@ -26,13 +26,12 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   and both remember options are dropped.
 - **Expected:** a plain quoted command is fully analyzable; "Allow &
   remember" must be available.
-- **Investigation so far:** `hasBashApprovalShellControl("echo \"hello from
-  bash\"")` reads false by hand-trace (no redirects, no `-c`/`-e` options),
-  so the trigger is `extractSubCommands(...) === null` → `parseCommandNode`
-  → `natives.parseShellCommand` (Rust, crates/pi-natives) returning a
-  non-single node list or throwing for a quoted single command. Verify with a
-  parser probe (couldn't run during the live demo). If the Rust parser is
-  fine, re-check the piece text the engine actually passes.
+- **Investigation (resolved):** probed `natives.parseShellCommand` from the
+  current source: `echo "hello from bash"` parses to a single
+  `simpleCommand` with empty substitutions, so `extractSubCommands` returns
+  `[]` and `bashRememberDisabled` is false in the current code. The demo
+  report predates the running build (fork.151) — the quoted-command case is
+  already fixed; no further work needed here.
 
 ## 3. Compound remember checklist (allow all & remember) UX
 
@@ -140,6 +139,12 @@ interactive permission dialogs. All open; fix on `feat/permissions-v3`.
   safe and must not disable remember rules for otherwise-analyzable
   commands; the blanket redirect degradation (ruling R1) is too coarse.
   Related to bug 2.
+- **Partial fix (2026-08-14):** the *allow-all posture* no longer prompts on
+  unanalyzable residue (deep nesting / malformed substitutions) — the R1
+  degradation in `evaluateBashPiece` now applies only to rule-backed allows
+  (posture allows skip it; sub-command recursion still enforces curated/rule
+  denies). The remember-option suppression for redirects remains by design
+  (a remembered rule genuinely cannot suppress that prompt).
 
 ## 12. No global setting for default posture on project-dir writes
 
