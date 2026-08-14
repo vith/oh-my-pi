@@ -576,7 +576,15 @@ function resolveSuggestions(
 		// legitimate defensive policy.
 		if (rule.action === "allow" && rule.tool === "bash" && rule.match.command === "*") continue;
 		const layered = { ...rule, layer: "user" } as PermissionRule;
-		if (matchRule(layered, toolName, args)) {
+		if (pendingPieces !== undefined && pendingPieces.length > 1 && toolName === "bash") {
+			// Compound calls: the engine evaluates rules per pending piece,
+			// never against the whole `&&`-joined string. A rule matching
+			// only that string — an exact remember of the whole command, or
+			// a pattern spanning the join — would be offered, picked,
+			// written, and never fire; the piece match is the only test
+			// that keeps a live rule.
+			if (pendingPieces.some(piece => matchRule(layered, "bash", { command: piece.text }))) kept.push(rule);
+		} else if (matchRule(layered, toolName, args)) {
 			kept.push(rule);
 		} else if (pendingPieces !== undefined && toolName === "bash") {
 			const matchesPiece = pendingPieces.some(piece => matchRule(layered, "bash", { command: piece.text }));
@@ -1182,8 +1190,11 @@ export async function promptForDecision(
 						.catch(() => EMPTY_SUGGESTIONS)
 				: Promise.resolve(EMPTY_SUGGESTIONS));
 	const rememberDisabled = pendingPieces.some(piece => bashRememberDisabled({ command: piece.text }));
+	// Shell control kills the rule-backed actions (remember, session — those
+	// allows degrade to a prompt), but per-piece allow/deny decisions still
+	// work, so drill-down stays in the degraded set.
 	const baseOptions = rememberDisabled
-		? [ALLOW_ALL_ONCE, DENY_ALL]
+		? [ALLOW_ALL_ONCE, DENY_ALL, DRILL_DOWN]
 		: [ALLOW_ALL_ONCE, ALLOW_ALL_SESSION, ALLOW_ALL_REMEMBER, DENY_ALL, DRILL_DOWN];
 	// The first choice preselects the compound option when it lands; until
 	// then no selection. Esc on the remember checklist returns here. The

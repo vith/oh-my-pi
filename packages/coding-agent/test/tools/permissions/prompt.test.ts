@@ -634,6 +634,23 @@ describe("promptForDecision", () => {
 		expect(requests[0]?.options.map(option => option.label)).toEqual([...COMPOUND_ACTIONS]);
 	});
 
+	it("compound dialog keeps drill-down when a piece cannot be remembered", async () => {
+		const ctx = fakeCtx(tempHome());
+		const decision = evaluateBashCommand("echo hi && git log > out", ctx);
+		expect(decision.pieces?.filter(piece => piece.policy === "prompt")).toHaveLength(2);
+		const requests: PermissionDialogRequest[] = [];
+		const { ui } = queuedDialogUi([0], requests); // Allow all pending once
+		const res = await promptForDecision(ui, "bash", { command: "echo hi && git log > out" }, decision, ctx);
+		expect(res.policy).toBe("allow");
+		// Shell control kills the rule-backed actions (remember, session),
+		// but per-piece allow/deny decisions still work — drill-down stays.
+		expect(requests[0]?.options.map(option => option.label)).toEqual([
+			"Allow all pending once",
+			"Deny all pending",
+			"Decide per piece →",
+		]);
+	});
+
 	it("Deny all pending denies the call", async () => {
 		const { ctx, decision } = compoundFixture();
 		const { ui } = queuedDialogUi([3]); // Deny all pending
@@ -1025,6 +1042,43 @@ describe("promptForDecision with a suggestionsProvider", () => {
 		expect(options).toHaveLength(1);
 		expect(options[0]?.label).toContain("Allow bash");
 		expect(options[0]?.description).toContain("echo a");
+	});
+
+	it("compound calls never offer an exact remember of the whole command string", async () => {
+		const captured: { request?: PermissionDialogRequest } = {};
+		const ui = capturingDialogUi(captured, 0); // "Allow all pending once"
+		// The engine evaluates rules per pending piece, never against the
+		// whole `&&`-joined string: an exact rule for the whole command can
+		// never match a piece, so appending it would write a dead rule.
+		const exactChoice: SuggestionChoice = { action: "allow", remember: true, reason: "remember this exact grep" };
+		const provider = async (): Promise<SuggestResult> => ({ choices: [onceChoice, exactChoice] });
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		expect(await resolveLazy(captured.request!.suggestions!)).toEqual([]);
+	});
+
+	it("compound pattern suggestions covering only the joined string are dropped", async () => {
+		const captured: { request?: PermissionDialogRequest } = {};
+		const ui = capturingDialogUi(captured, 0); // "Allow all pending once"
+		// The pattern spans the `&&` join: it matches the whole compound
+		// string but neither piece, so per-piece evaluation would never fire
+		// it — the suggestion must not be offered.
+		const wholeStringChoice: SuggestionChoice = {
+			action: "allow",
+			remember: true,
+			pattern: "echo a && echo b",
+			reason: "x",
+		};
+		const provider = async (): Promise<SuggestResult> => ({ choices: [onceChoice, wholeStringChoice] });
+		const decision = fakeDecision({ pieces: [pendingPiece("echo a"), pendingPiece("echo b")] });
+		const res = await promptForDecision(ui, "bash", { command: "echo a && echo b" }, decision, fakeCtx(tempHome()), {
+			suggestionsProvider: provider,
+		});
+		expect(res.policy).toBe("allow");
+		expect(await resolveLazy(captured.request!.suggestions!)).toEqual([]);
 	});
 
 	it("defers the provider until the dialog is presented (issue 13: queued dialogs keep their budget)", async () => {
