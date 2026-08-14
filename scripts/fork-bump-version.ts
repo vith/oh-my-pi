@@ -182,8 +182,10 @@ async function main(): Promise<void> {
 		`  base: ${tag ?? current.version.split("+")[0]} (${tag ? "git tag" : "package.json fallback"}), commits: ${commitsSince}, head: ${shortHash}, target: ${version}`,
 	);
 
-	if (tag && compareVersions(version, tag) <= 0) {
-		console.error(`Error: Version ${version} must be greater than latest tag v${tag}`);
+	// The core equals the tag by design; build metadata (identifier.commits.hash)
+	// makes the version distinct. Only a strictly lower version is a mistake.
+	if (tag && compareVersions(version, tag) < 0) {
+		console.error(`Error: Version ${version} must not be older than latest tag v${tag}`);
 		process.exit(1);
 	}
 
