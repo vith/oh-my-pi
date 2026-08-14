@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [17.3.1+vith-fork.136.4b7d383011] - 2026-08-14
+
 ### Added
 
 - Permission rules resolve by match class and specificity: exact-structure beats covering, most specific wins, deny wins ties, curated hard-denies absolute (spec §3.1).
