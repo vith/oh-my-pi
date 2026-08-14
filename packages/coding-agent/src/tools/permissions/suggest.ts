@@ -50,11 +50,13 @@ export type SuggestionProvider = (unit: SuggestionUnit) => Promise<SuggestResult
 
 /** Side requests are bounded: hard timeout, capped token budget, at most 3 choices. */
 const SUGGEST_TIMEOUT_MS = 30000;
-// Reasoning models (e.g. opencode-go deepseek-v4-flash) spend most of the
-// budget thinking before emitting the JSON; 256 tokens was entirely consumed
-// by reasoning (stopReason "length", zero text) so no choice ever landed.
-// 2048 leaves room for ~1k reasoning tokens plus the response.
-const SUGGEST_MAX_TOKENS = 2048;
+// Reasoning models (e.g. opencode-go deepseek-v4-flash) spend 1k-2.5k tokens
+// thinking on non-trivial prompts before emitting the JSON; 256 tokens was
+// entirely consumed by reasoning (issue 14) and 2048 still blew on complex
+// commands (issue 17, stopReason "length", zero text). 4096 leaves room for
+// the thinking plus the response — and a no-reasoning fallback attempt
+// guarantees a recommendation when even that is exhausted.
+const SUGGEST_MAX_TOKENS = 4096;
 const SUGGEST_MAX_CHOICES = 3;
 
 const LLM_SUGGESTIONS_KEY = "permissions.llmSuggestions";
@@ -152,53 +154,87 @@ async function suggestWithModel(
 			userMessage,
 		});
 
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt: [suggestionSystemPrompt],
-				messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-			},
-			{
-				apiKey: registry.resolver(model, sessionId),
-				maxTokens: SUGGEST_MAX_TOKENS,
-				// OpenAI-compat gateways (e.g. opencode-go's Zen) default
-				// thinking ON when the effort field is omitted, and unbounded
-				// thinking can consume the whole token budget before the JSON
-				// arrives (issue 14: 256 tokens were all reasoning). Pin the
-				// lowest effort so the model still reasons — its judgment is
-				// the point of the side request — but with a bounded thinking
-				// budget. Other APIs (anthropic, google, bedrock) only think
-				// when explicitly requested, so nothing to pin there.
-				...(model.api.startsWith("openai-") || model.api.startsWith("azure-openai-")
-					? { reasoning: Effort.Minimal }
-					: {}),
-				signal: requestSignal,
-			},
-		);
+		// One attempt with reasoning (the model's judgment decides the
+		// preselection), then — if it burned the whole budget on thinking
+		// without emitting a single text block — one fallback attempt with
+		// reasoning forced off, so the dialog still gets a recommendation.
+		// Both attempts share the same deadline: the suggestion must never
+		// outlive the dialog.
+		const runAttempt = async (effort: { reasoning?: Effort; forceReasoningOff?: boolean }) => {
+			const response = await completeSimple(
+				model,
+				{
+					systemPrompt: [suggestionSystemPrompt],
+					messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
+				},
+				{
+					apiKey: registry.resolver(model, sessionId),
+					maxTokens: SUGGEST_MAX_TOKENS,
+					// OpenAI-compat gateways (e.g. opencode-go's Zen) default
+					// thinking ON when the effort field is omitted, and
+					// unbounded thinking can consume the whole token budget
+					// before the JSON arrives (issue 14: 256 tokens were all
+					// reasoning). Pin the lowest effort so the model still
+					// reasons with a bounded budget. Other APIs (anthropic,
+					// google, bedrock) only think when explicitly requested,
+					// so nothing to pin there.
+					...(model.api.startsWith("openai-") || model.api.startsWith("azure-openai-") ? effort : {}),
+					signal: requestSignal,
+				},
+			);
 
-		// Full wire view for debugging the recommendation (input logged at
-		// request time): stop reason, usage, and every content block —
-		// including the thinking trace — verbatim.
-		logger.debug("permission-suggest: response", {
-			pendingCall: unit.text,
-			model: `${model.provider}/${model.id}`,
-			stopReason: response.stopReason,
-			errorMessage: response.errorMessage ?? undefined,
-			elapsedMs: Math.round(performance.now() - requestStartedAt),
-			usage: (response as { usage?: unknown }).usage,
-			content: response.content.map(block => {
-				switch (block.type) {
-					case "text":
-						return { type: block.type, text: block.text };
-					case "thinking":
-						return { type: block.type, thinking: block.thinking };
-					case "redactedThinking":
-						return { type: block.type, data: block.data };
-					default:
-						return { type: block.type };
-				}
-			}),
+			// Full wire view for debugging the recommendation (input logged
+			// at request time): stop reason, usage, and every content block —
+			// including the thinking trace — verbatim.
+			logger.debug("permission-suggest: response", {
+				pendingCall: unit.text,
+				model: `${model.provider}/${model.id}`,
+				stopReason: response.stopReason,
+				errorMessage: response.errorMessage ?? undefined,
+				elapsedMs: Math.round(performance.now() - requestStartedAt),
+				usage: (response as { usage?: unknown }).usage,
+				content: response.content.map(block => {
+					switch (block.type) {
+						case "text":
+							return { type: block.type, text: block.text };
+						case "thinking":
+							return { type: block.type, thinking: block.thinking };
+						case "redactedThinking":
+							return { type: block.type, data: block.data };
+						default:
+							return { type: block.type };
+					}
+				}),
+			});
+			return response;
+		};
+
+		let response = await runAttempt({
+			...(model.api.startsWith("openai-") || model.api.startsWith("azure-openai-")
+				? { reasoning: Effort.Minimal }
+				: {}),
 		});
+
+		// The observed failure mode: `reasoning: minimal` does not hard-cap
+		// thinking on complex prompts — deepseek-v4-flash spent the entire
+		// 2048-token budget on thinking (stopReason "length", zero text) and
+		// the dialog got no preselection. Retry without reasoning: the same
+		// model answers the same prompt in JSON in ~2s, 0 reasoning tokens.
+		const hasText = response.content.some(block => block.type === "text" && block.text.length > 0);
+		if (
+			!hasText &&
+			response.stopReason !== "aborted" &&
+			response.stopReason !== "error" &&
+			(model.api.startsWith("openai-") || model.api.startsWith("azure-openai-"))
+		) {
+			logger.debug("permission-suggest: retrying without reasoning", {
+				reason: "reasoning-exhausted",
+				pendingCall: unit.text,
+				stopReason: response.stopReason,
+				elapsedMs: Math.round(performance.now() - requestStartedAt),
+			});
+			response = await runAttempt({ forceReasoningOff: true });
+		}
 
 		if (response.stopReason === "aborted") {
 			// The hard timeout or the caller's signal cut the request before
