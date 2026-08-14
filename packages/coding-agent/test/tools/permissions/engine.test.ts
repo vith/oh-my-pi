@@ -532,6 +532,18 @@ describe("match classes and specificity (spec §3.1)", () => {
 		expect(resolveWholeCommandRule([dynamicAllow, legacyPrompt], "bash", args)?.rule.id).toBe("da");
 	});
 
+	test("specificity sums literal counts across all match keys", () => {
+		// A two-key rule scores the sum of both keys' patterns, so it beats the
+		// same command pattern with only one key.
+		const twoKey = rule({ id: "two", match: { command: "git *", arg: "status" } });
+		const oneKey = rule({ id: "one", match: { command: "git *" } });
+		const args = { command: "git status", arg: "status" };
+		const best = resolveWholeCommandRule([oneKey, twoKey], "bash", args);
+		expect(best?.rule.id).toBe("two");
+		expect(best?.specificity).toBe(2); // command "git" + arg "status"
+		expect(resolveWholeCommandRule([oneKey], "bash", args)?.specificity).toBe(1);
+	});
+
 	test("covering allow matches piped command; unrelated command has no match", () => {
 		const allow = rule({ id: "a", match: { command: "git log *" } });
 		expect(resolveWholeCommandRule([allow], "bash", { command: "git log -n 5 | head -1" })?.rule.id).toBe("a");

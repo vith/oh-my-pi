@@ -266,11 +266,13 @@ export function resolveWholeCommandRule(
 		const commandPattern = rule.match.command;
 		const matchClass: MatchClass =
 			typeof commandPattern === "string" ? matchClassOf(commandPattern, command) : "exact-structure";
-		const specKey = typeof commandPattern === "string" ? "command" : (Object.keys(rule.match)[0] ?? "");
-		const specificity =
-			typeof commandPattern === "string"
-				? patternSpecificity("command", commandPattern)
-				: patternSpecificity(specKey, String(rule.match[specKey] ?? ""));
+		// Specificity sums the literal count of EVERY match key (spec §3.1): a
+		// rule matching on command + arg is strictly more specific than the
+		// same command pattern alone.
+		let specificity = 0;
+		for (const [key, pattern] of Object.entries(rule.match)) {
+			if (typeof pattern === "string") specificity += patternSpecificity(key, pattern);
+		}
 		const candidate: RuleMatch = { rule, matchClass, specificity };
 		if (best === undefined) {
 			best = candidate;
