@@ -22,6 +22,7 @@ import {
 	type RuleLayer,
 	removeUserRule,
 	ruleFiles,
+	writeRulesFile,
 	writeUserRule,
 } from "./rules";
 
@@ -36,7 +37,9 @@ import {
  *   with audit match counts when the audit file exists.
  * - `show <id>` — rule details plus its last audit hits.
  * - `add <yaml>` — validate via `normalizeRule` and write to the user file.
- * - `remove <id>` — delete from the user file.
+ * - `remove <id> [<id>...]` — delete rule(s) from the user file.
+ * - `clear [--project]` — wipe the file-backed layers (dynamic + user by
+ *   default; the repo-committed project layer only with `--project`).
  * - `edit <id> <yaml>` — replace a user-file rule by id.
  * - `test "<command>"` — dry-run `evaluateBashCommand`; prints decision,
  *   rule, layer, and the winning rule's match class (with specificity).
@@ -64,6 +67,8 @@ export async function runPermissionCommand(args: string, ctx: RunPermissionComma
 			return addRule(rest, ctx);
 		case "remove":
 			return removeRule(rest, ctx);
+		case "clear":
+			return clearRules(rest, ctx);
 		case "edit":
 			return editRule(rest, ctx);
 		case "test":
@@ -87,7 +92,8 @@ function usage(): string {
 		"  list                 merged rules by layer with audit match counts",
 		"  show <id>            rule details + last audit hits",
 		"  add <yaml>           add a rule to the user layer (validated)",
-		"  remove <id>          remove a rule from the user layer",
+		"  remove <id> [<id>...] remove rule(s) from the user layer",
+		"  clear [--project]     clear file-backed rules (project layer only with --project)",
 		"  edit <id> <yaml>     replace a user-layer rule by id",
 		'  test "<command>"     dry-run a bash command (decision + rule + layer + class)',
 		"  log                  recent permission audit entries",
@@ -183,24 +189,90 @@ async function addRule(rest: string, ctx: RunPermissionCommandContext): Promise<
 }
 
 async function removeRule(rest: string, ctx: RunPermissionCommandContext): Promise<string> {
-	const id = rest.trim();
-	if (id.length === 0) return "Usage: permissions remove <id>";
+	const ids = rest.trim().split(/\s+/u).filter(Boolean);
+	if (ids.length === 0) return "Usage: permissions remove <id> [<id>...]";
 	const file = ruleFiles(ctx.cwd).user;
-	if (await removeUserRule(file, id)) return `Removed rule "${id}" from the user layer.`;
-
-	const { rules } = loadRuleLayers(ctx.cwd);
-	const elsewhere = rules.find(rule => rule.id === id);
-	if (elsewhere !== undefined) {
-		const files = ruleFiles(ctx.cwd);
-		const pathForLayer: Partial<Record<RuleLayer, string>> = {
-			dynamic: files.dynamic,
-			project: files.project,
-			user: files.user,
-		};
-		const location = pathForLayer[elsewhere.layer] !== undefined ? ` (${pathForLayer[elsewhere.layer]})` : "";
-		return `Rule "${id}" lives in the ${elsewhere.layer} layer${location}, which this command does not edit. Only user-layer rules can be removed here.`;
+	const lines: string[] = [];
+	for (const id of ids) {
+		if (await removeUserRule(file, id)) {
+			lines.push(`Removed rule "${id}" from the user layer.`);
+			continue;
+		}
+		const { rules } = loadRuleLayers(ctx.cwd);
+		const elsewhere = rules.find(rule => rule.id === id);
+		if (elsewhere !== undefined) {
+			const files = ruleFiles(ctx.cwd);
+			const pathForLayer: Partial<Record<RuleLayer, string>> = {
+				dynamic: files.dynamic,
+				project: files.project,
+				user: files.user,
+			};
+			const location = pathForLayer[elsewhere.layer] !== undefined ? ` (${pathForLayer[elsewhere.layer]})` : "";
+			lines.push(
+				`Rule "${id}" lives in the ${elsewhere.layer} layer${location}, which this command does not edit. Only user-layer rules can be removed here.`,
+			);
+			continue;
+		}
+		lines.push(`No rule with id "${id}" found in the file-backed layers. Use "permissions list" to see rule ids.`);
 	}
-	return `No rule with id "${id}" found in the file-backed layers. Use "permissions list" to see rule ids.`;
+	return lines.join("\n");
+}
+
+/**
+ * Wipe the file-backed rule layers. Dynamic and user layers are always
+ * cleared; the repo-committed project layer is only cleared with an explicit
+ * `--project` (a plain `clear` lists the project rules and says how to clear
+ * them, so a shared file is never wiped by accident). Only files that
+ * actually contain rules are rewritten.
+ */
+async function clearRules(rest: string, ctx: RunPermissionCommandContext): Promise<string> {
+	const trimmed = rest.trim();
+	const args = trimmed.toLowerCase();
+	const includeProject = args === "--project" || args === "project";
+	if (trimmed.length > 0 && !includeProject) {
+		return `Unknown flag "${trimmed}". Usage: permissions clear [--project]`;
+	}
+
+	const files = ruleFiles(ctx.cwd);
+	const { rules } = loadRuleLayers(ctx.cwd);
+	const layerRules: Record<Exclude<RuleLayer, "curated" | "legacy">, PermissionRule[]> = {
+		dynamic: [],
+		project: [],
+		user: [],
+	};
+	for (const rule of rules) {
+		if (rule.layer === "dynamic" || rule.layer === "project" || rule.layer === "user") {
+			layerRules[rule.layer].push(rule);
+		}
+	}
+
+	const cleared: string[] = [];
+	if (layerRules.dynamic.length > 0) {
+		await writeRulesFile(files.dynamic, []);
+		cleared.push(`dynamic (${layerRules.dynamic.length})`);
+	}
+	if (layerRules.user.length > 0) {
+		await writeRulesFile(files.user, []);
+		cleared.push(`user (${layerRules.user.length})`);
+	}
+	if (includeProject && layerRules.project.length > 0) {
+		await writeRulesFile(files.project, []);
+		cleared.push(`project (${layerRules.project.length})`);
+	}
+
+	const lines: string[] = [];
+	if (cleared.length > 0) lines.push(`Cleared ${cleared.join(", ")} rule(s).`);
+	if (!includeProject && layerRules.project.length > 0) {
+		lines.push(
+			`Project layer has ${layerRules.project.length} repo-committed rule${layerRules.project.length === 1 ? "" : "s"}, not cleared:`,
+		);
+		for (const rule of layerRules.project) {
+			lines.push(`  - ${rule.id} tool=${rule.tool} match=${JSON.stringify(rule.match)} action=${rule.action}`);
+		}
+		lines.push('Re-run "permissions clear --project" to clear them too.');
+	}
+	if (lines.length === 0) return "No file-backed rules to clear.";
+	return lines.join("\n");
 }
 
 async function editRule(rest: string, ctx: RunPermissionCommandContext): Promise<string> {

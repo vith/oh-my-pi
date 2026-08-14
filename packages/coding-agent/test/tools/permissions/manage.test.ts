@@ -141,6 +141,89 @@ describe("runPermissionCommand add/remove/edit", () => {
 		expect(rule?.action).toBe("deny");
 		expect(rule?.match).toEqual({ command: "git push" });
 	});
+
+	it("remove accepts multiple ids, removing each and reporting misses", async () => {
+		await runPermissionCommand("add tool: bash\nmatch: { command: 'git *' }\naction: allow\nid: git1", await ctx());
+		await runPermissionCommand("add tool: bash\nmatch: { command: 'npm *' }\naction: allow\nid: npm1", await ctx());
+
+		const output = await runPermissionCommand("remove git1 missing1 npm1", await ctx());
+
+		expect(output).toContain('Removed rule "git1"');
+		expect(output).toContain('Removed rule "npm1"');
+		expect(output).toContain('No rule with id "missing1"');
+		const remaining = loadRuleLayers(cwd, home).rules;
+		expect(remaining.some(rule => rule.id === "git1")).toBe(false);
+		expect(remaining.some(rule => rule.id === "npm1")).toBe(false);
+	});
+});
+
+describe("runPermissionCommand clear", () => {
+	it("wipes dynamic and user rules, reporting what was cleared", async () => {
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+		);
+		write(
+			userRulesFile,
+			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand("clear", await ctx());
+
+		expect(output).toContain("Cleared dynamic (1), user (1)");
+		const { rules } = loadRuleLayers(cwd, home);
+		expect(rules.filter(rule => rule.layer === "dynamic")).toHaveLength(0);
+		expect(rules.filter(rule => rule.layer === "user")).toHaveLength(0);
+	});
+
+	it("leaves repo-committed project rules until --project is passed", async () => {
+		write(
+			path.join(cwd, ".omp", "permissions.yml"),
+			"rules:\n  - id: proj1\n    tool: write\n    match: { path: 'src/**' }\n    action: allow\n",
+		);
+		write(
+			userRulesFile,
+			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand("clear", await ctx());
+
+		// User layer is still wiped; the project rules are listed and kept.
+		expect(output).toContain("Cleared user (1)");
+		expect(output).toContain("Project layer has 1 repo-committed rule");
+		expect(output).toContain("proj1");
+		expect(output).toContain('Re-run "permissions clear --project"');
+		const { rules } = loadRuleLayers(cwd, home);
+		expect(rules.filter(rule => rule.layer === "user")).toHaveLength(0);
+		expect(rules.filter(rule => rule.layer === "project")).toHaveLength(1);
+	});
+
+	it("clear --project wipes the project layer too", async () => {
+		write(
+			path.join(cwd, ".omp", "permissions.yml"),
+			"rules:\n  - id: proj1\n    tool: write\n    match: { path: 'src/**' }\n    action: allow\n",
+		);
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand("clear --project", await ctx());
+
+		expect(output).toContain("Cleared dynamic (1), project (1)");
+		expect(loadRuleLayers(cwd, home).rules).toHaveLength(0);
+	});
+
+	it("reports when there is nothing to clear", async () => {
+		const output = await runPermissionCommand("clear", await ctx());
+		expect(output).toContain("No file-backed rules to clear");
+		expect(fs.existsSync(userRulesFile)).toBe(false);
+	});
+
+	it("rejects unknown flags", async () => {
+		const output = await runPermissionCommand("clear --force", await ctx());
+		expect(output).toContain('Unknown flag "--force"');
+	});
 });
 
 describe("runPermissionCommand test", () => {
