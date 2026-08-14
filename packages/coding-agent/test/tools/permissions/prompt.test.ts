@@ -12,6 +12,7 @@ import { evaluateBashCommand } from "@oh-my-pi/pi-coding-agent/tools/permissions
 import {
 	buildCandidates,
 	buildDialogLines,
+	pieceStatusText,
 	promptForDecision,
 	rememberCompound,
 	renderAllowSuggestion,
@@ -1111,6 +1112,15 @@ describe("renderAllowSuggestion", () => {
 });
 
 describe("buildDialogLines", () => {
+	it("single-unit fallback names the deciding rule or says no rule", () => {
+		const withRule = buildDialogLines(fakeDecision({ ruleId: "git1", layer: "user" }), undefined);
+		expect(JSON.stringify(withRule)).toContain("rule git1 (user)");
+		const bareRule = buildDialogLines(fakeDecision({ ruleId: "git1" }), undefined);
+		expect(JSON.stringify(bareRule)).toContain("rule git1");
+		const withoutRule = buildDialogLines(fakeDecision(), undefined);
+		expect(JSON.stringify(withoutRule)).toContain("no rule");
+	});
+
 	it("renders summary, operator prefixes, and safe-tail dimming", () => {
 		// dynamic rule file: allow bash "echo *" — the middle piece of the
 		// compound rides the rule; the two git pieces have no rule (prompt).
@@ -1134,5 +1144,35 @@ describe("buildDialogLines", () => {
 		// status text per v3 wording
 		expect(JSON.stringify(lines)).toContain("no rule");
 		expect(JSON.stringify(lines)).toContain("allowed · remembered this session");
+	});
+});
+
+describe("pieceStatusText", () => {
+	it("denied variants always read denied, with or without a rule", () => {
+		expect(pieceStatusText({ text: "git push", policy: "deny" })).toEqual({ text: "denied", style: "accent" });
+		expect(pieceStatusText({ text: "git push", policy: "deny", ruleId: "deny-push", layer: "dynamic" })).toEqual({
+			text: "denied",
+			style: "accent",
+		});
+	});
+
+	it("prompt variants distinguish a matched rule from no rule", () => {
+		expect(pieceStatusText({ text: "echo hi", policy: "prompt", ruleId: "prompt-echo", layer: "project" })).toEqual({
+			text: "prompt · rule prompt-echo",
+			style: "accent",
+		});
+		expect(pieceStatusText({ text: "echo hi", policy: "prompt" })).toEqual({ text: "no rule", style: "accent" });
+	});
+
+	it("allow variants name the rule layer when one matched", () => {
+		expect(pieceStatusText({ text: "echo hi", policy: "allow" })).toEqual({ text: "allowed" });
+		expect(pieceStatusText({ text: "echo hi", policy: "allow", ruleId: "dyn-echo", layer: "dynamic" })).toEqual({
+			text: "allowed · remembered this session",
+			style: "muted",
+		});
+		expect(pieceStatusText({ text: "echo hi", policy: "allow", ruleId: "proj-echo", layer: "project" })).toEqual({
+			text: "allowed · project rule proj-echo",
+			style: "muted",
+		});
 	});
 });

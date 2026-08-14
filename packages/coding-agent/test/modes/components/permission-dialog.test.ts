@@ -74,7 +74,8 @@ describe("PermissionDialogComponent", () => {
 		expect(upSelected).toEqual([2]);
 	});
 
-	it("enter selects the highlighted option; j/k and arrows move; esc cancels", () => {		const selected: number[] = [];
+	it("enter selects the highlighted option; j/k and arrows move; esc cancels", () => {
+		const selected: number[] = [];
 		let cancelled = 0;
 		const component = new PermissionDialogComponent(
 			"Allow tool: bash",

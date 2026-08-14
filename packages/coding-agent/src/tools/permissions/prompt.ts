@@ -399,7 +399,7 @@ function dialogTitle(ui: ExtensionUIContext, title: string, metaLines: Permissio
 	return `${title}\n${metadataText(metaLines)}`;
 }
 
-function pieceStatusText(piece: PieceEvaluation): { text: string; style?: "muted" | "text" | "accent" } {
+export function pieceStatusText(piece: PieceEvaluation): { text: string; style?: "muted" | "text" | "accent" } {
 	if (piece.policy === "allow") {
 		if (piece.ruleId === undefined) return { text: "allowed" };
 		return piece.layer === "dynamic"
@@ -625,6 +625,26 @@ async function promptUnit(
 	ctx: EngineContext,
 	opts: PromptForDecisionOptions,
 	pieces: PieceEvaluation[] | undefined,
+): Promise<PromptResolution>;
+/** Drill-down variant: the per-piece dialog also offers the back-to-selector option. */
+async function promptUnit(
+	ui: ExtensionUIContext,
+	toolName: string,
+	unitArgs: unknown,
+	decision: EngineDecision,
+	ctx: EngineContext,
+	opts: PromptForDecisionOptions,
+	pieces: PieceEvaluation[] | undefined,
+	backLabel: string,
+): Promise<PromptUnitResult>;
+async function promptUnit(
+	ui: ExtensionUIContext,
+	toolName: string,
+	unitArgs: unknown,
+	decision: EngineDecision,
+	ctx: EngineContext,
+	opts: PromptForDecisionOptions,
+	pieces: PieceEvaluation[] | undefined,
 	backLabel?: string,
 ): Promise<PromptUnitResult> {
 	const title = opts.title ?? defaultTitle(toolName);
@@ -800,7 +820,16 @@ async function drillDownPieces(
 		const index = remaining.findIndex(piece => piece.text === picked);
 		if (index < 0) break;
 		const [piece] = remaining.splice(index, 1);
-		const resolution = await promptUnit(ui, "bash", { command: piece.text }, decision, ctx, opts, [piece], BACK_TO_ALL_PIECES);
+		const resolution = await promptUnit(
+			ui,
+			"bash",
+			{ command: piece.text },
+			decision,
+			ctx,
+			opts,
+			[piece],
+			BACK_TO_ALL_PIECES,
+		);
 		if (resolution.policy === "back") {
 			// Back to all pieces: return the piece to the selector, undecided.
 			remaining.splice(index, 0, piece);
