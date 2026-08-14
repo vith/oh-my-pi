@@ -237,9 +237,8 @@ async function suggestWithModel(
 }
 
 /**
- * The user message: the pending call (tool + args), the cwd, a summary of
- * current rules, and the mechanical candidates the dialog would offer on its
- * own — so the model aims above them instead of duplicating them.
+ * The user message: the pending call (tool + args), the cwd, and a summary
+ * of current rules so the model never proposes duplicates.
  */
 function buildSuggestionPrompt(unit: SuggestionUnit, ctx: EngineContext): string {
 	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
@@ -255,30 +254,9 @@ function buildSuggestionPrompt(unit: SuggestionUnit, ctx: EngineContext): string
 			lines.push(`- ${rule.tool} ${JSON.stringify(rule.match)} -> ${rule.action}`);
 		}
 	}
-	const candidates = mechanicalCandidates(unit);
-	if (candidates.length > 0) {
-		lines.push("Mechanical candidates (already offered — do not duplicate them):");
-		for (const candidate of candidates) lines.push(`- ${candidate}`);
-	}
 	// Rule suggestions are gated; the recommendation always runs.
 	if (!suggestionsEnabled(ctx)) lines.push("Do not include a rules array in your response.");
 	return lines.join("\n");
-}
-
-/** The deterministic candidate shapes the dialog offers without the model. */
-function mechanicalCandidates(unit: SuggestionUnit): string[] {
-	if (unit.tool === "bash") {
-		const command = isRecord(unit.args) && typeof unit.args.command === "string" ? unit.args.command : unit.text;
-		const firstToken = command.trim().split(/\s+/u)[0];
-		return firstToken !== undefined ? [`Exact: ${command}`, `Pattern: ${firstToken} *`] : [`Exact: ${command}`];
-	}
-	if (isRecord(unit.args) && typeof unit.args.path === "string") {
-		const fileArg = unit.args.path;
-		const parent = fileArg.includes("/") ? fileArg.slice(0, fileArg.lastIndexOf("/")) : ".";
-		const glob = parent === "." ? "./**" : `${parent}/**`;
-		return [`Exact: ${fileArg}`, `Pattern: ${glob}`];
-	}
-	return [`Exact: ${JSON.stringify(unit.args)}`];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

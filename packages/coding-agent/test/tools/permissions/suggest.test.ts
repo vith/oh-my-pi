@@ -154,7 +154,7 @@ describe("suggestRules", () => {
 		expect(result.suggestions.some(s => s.rule.tool === "bash" && s.rule.action === "deny")).toBe(true);
 	});
 
-	it("sends the imported system prompt with the call, cwd, current rules, and mechanical candidates", async () => {
+	it("sends the imported system prompt with the call, cwd, and current rules", async () => {
 		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"rules":[]}'));
 		await suggestRules(unit("bash", { command: "git push" }), fakeCtx(), fakeRegistry(), "session-1");
 		const request = spy.mock.calls[0]?.[1] as { systemPrompt?: string[]; messages?: Array<{ content: string }> };
@@ -168,15 +168,25 @@ describe("suggestRules", () => {
 		expect(systemPrompt).toContain('the space before "*" is literal');
 		expect(systemPrompt).toContain('A leading "~" in a path pattern');
 		// And the dialog's scope rules: no tool-wide bash.
-		expect(systemPrompt).toContain('never recommend "tool" scope for bash');
+		expect(systemPrompt).toContain('Never recommend "tool" scope for bash');
+		// The three decisions are made in order, and saving a rule is the
+		// default for repeatable calls — the model must not dodge rules to
+		// avoid duplicating the dialog's own candidates (issue 16).
+		expect(systemPrompt.indexOf("1. Allow or deny?")).toBeLessThan(systemPrompt.indexOf("2. Save a rule or not?"));
+		expect(systemPrompt.indexOf("2. Save a rule or not?")).toBeLessThan(
+			systemPrompt.indexOf("3. If saving a rule, what pattern?"),
+		);
+		expect(systemPrompt).toContain("A human should not have to approve");
 		const userMessage = request.messages?.[0]?.content ?? "";
 		expect(userMessage).toContain("git push");
 		expect(userMessage).toContain("Tool: bash");
 		expect(userMessage).toContain('Arguments: {"command":"git push"}');
 		expect(userMessage).toContain("/tmp/suggest-proj");
-		// The mechanical candidates the dialog offers on its own.
-		expect(userMessage).toContain("- Exact: git push");
-		expect(userMessage).toContain("- Pattern: git *");
+		// The dialog's own candidate shapes are UI, not prompt context — the
+		// model must not be steered away from proposing them (issue 16).
+		expect(userMessage).not.toContain("Mechanical candidates");
+		expect(userMessage).not.toContain("- Exact:");
+		expect(userMessage).not.toContain("- Pattern:");
 		const options = spy.mock.calls[0]?.[2] as {
 			apiKey?: unknown;
 			maxTokens?: number;
@@ -199,15 +209,6 @@ describe("suggestRules", () => {
 		expect(options?.forceReasoningOff).not.toBe(true);
 	});
 
-	it("shows file-tool candidates as an exact path and a parent glob", async () => {
-		const spy = vi.spyOn(piAi, "completeSimple").mockResolvedValue(assistantJson('{"rules":[]}'));
-		await suggestRules(unit("write", { path: "src/foo/bar.ts" }), fakeCtx(), fakeRegistry());
-		const request = spy.mock.calls[0]?.[1] as { messages?: Array<{ content: string }> };
-		const userMessage = request.messages?.[0]?.content ?? "";
-		expect(userMessage).toContain("- Exact: src/foo/bar.ts");
-		expect(userMessage).toContain("- Pattern: src/foo/**");
-	});
-
 	it("never surfaces a tool-wide bash allow suggestion", async () => {
 		const spy = vi
 			.spyOn(piAi, "completeSimple")
@@ -224,7 +225,7 @@ describe("suggestRules", () => {
 		expect(tools).toEqual(["deny *", "allow git status *"]);
 	});
 
-	it("composes the caller signal with the 8s timeout and degrades to an empty result when aborted", async () => {
+	it("composes the caller signal with the hard timeout and degrades to an empty result when aborted", async () => {
 		const controller = new AbortController();
 		controller.abort();
 		const spy = vi.spyOn(piAi, "completeSimple").mockImplementation((_model, _context, options) => {
