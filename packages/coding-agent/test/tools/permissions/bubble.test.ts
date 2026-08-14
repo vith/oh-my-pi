@@ -336,10 +336,14 @@ describe("showFirstRunNotices", () => {
 		cwd = path.join(tmp, "project");
 		fs.mkdirSync(agentDir, { recursive: true });
 		fs.mkdirSync(cwd, { recursive: true });
+		// firstRunNotice resolves rule files against the OS home; point it at
+		// the temp home so the real user's rules never leak into the plan.
+		vi.spyOn(os, "homedir").mockReturnValue(path.join(tmp, "home"));
 	});
 
 	afterEach(() => {
 		fs.rmSync(tmp, { recursive: true, force: true });
+		vi.restoreAllMocks();
 		restoreSettingsTestState(settingsState);
 	});
 

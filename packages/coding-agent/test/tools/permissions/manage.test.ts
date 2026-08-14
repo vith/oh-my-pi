@@ -27,7 +27,7 @@ beforeEach(() => {
 	fs.rmSync(tmp, { recursive: true, force: true });
 	fs.mkdirSync(agentDir, { recursive: true });
 	fs.mkdirSync(cwd, { recursive: true });
-	// runPermissionCommand resolves the user/project/dynamic layers against
+	// runPermissionCommand resolves the user/project layers against
 	// the OS home; point it at the temp home so no test touches the real one.
 	vi.spyOn(os, "homedir").mockReturnValue(home);
 });
@@ -56,15 +56,11 @@ describe("runPermissionCommand list", () => {
 	it("lists merged rules by layer in precedence order with audit match counts", async () => {
 		write(
 			userRulesFile,
-			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
 		);
 		write(
 			path.join(cwd, ".omp", "permissions.yml"),
 			"rules:\n  - id: proj1\n    tool: write\n    match: { path: 'src/**' }\n    action: allow\n",
-		);
-		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
-			"rules:\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
 		);
 		await appendAudit(auditFilePath(cwd), {
 			ts: Date.now(),
@@ -77,9 +73,8 @@ describe("runPermissionCommand list", () => {
 
 		const output = await runPermissionCommand("list", await ctx());
 
-		// Layers appear highest-precedence first (dynamic before project before user).
-		expect(output.indexOf("dynamic:")).toBeGreaterThanOrEqual(0);
-		expect(output.indexOf("dynamic:")).toBeLessThan(output.indexOf("project:"));
+		// Layers appear highest-precedence first (project before user).
+		expect(output.indexOf("project:")).toBeGreaterThanOrEqual(0);
 		expect(output.indexOf("project:")).toBeLessThan(output.indexOf("user:"));
 		// Each rule is listed; the user rule carries its audit hit count.
 		expect(output).toContain("dyn1");
@@ -156,15 +151,15 @@ describe("runPermissionCommand add/remove/edit", () => {
 		expect(remaining.some(rule => rule.id === "npm1")).toBe(false);
 	});
 
-	it("remove deletes engine-written dynamic rules by id", async () => {
+	it("remove deletes a remembered rule from the user file", async () => {
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			userRulesFile,
 			"rules:\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
 		);
 
 		const output = await runPermissionCommand("remove dyn1", await ctx());
 
-		expect(output).toContain('Removed rule "dyn1" from the dynamic layer.');
+		expect(output).toContain('Removed rule "dyn1" from the user layer.');
 		expect(loadRuleLayers(cwd, home).rules.some(rule => rule.id === "dyn1")).toBe(false);
 	});
 
@@ -209,22 +204,34 @@ describe("runPermissionCommand add/remove/edit", () => {
 });
 
 describe("runPermissionCommand clear", () => {
-	it("wipes dynamic and user rules, reporting what was cleared", async () => {
-		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
-			"rules:\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
-		);
+	it("wipes user rules, reporting what was cleared", async () => {
 		write(
 			userRulesFile,
-			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
 		);
 
 		const output = await runPermissionCommand("clear", await ctx());
 
-		expect(output).toContain("Cleared dynamic (1), user (1)");
+		expect(output).toContain("Cleared user (2)");
 		const { rules } = loadRuleLayers(cwd, home);
-		expect(rules.filter(rule => rule.layer === "dynamic")).toHaveLength(0);
 		expect(rules.filter(rule => rule.layer === "user")).toHaveLength(0);
+	});
+
+	it("clear also wipes rules folded from a legacy dynamic file", async () => {
+		write(
+			userRulesFile,
+			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
+		);
+		write(
+			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			"rules:\n  - id: old1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+		);
+
+		const output = await runPermissionCommand("clear", await ctx());
+
+		expect(output).toContain("Cleared user (2)");
+		expect(fs.existsSync(path.join(home, ".omp", "agent", "permissions.dynamic.yml"))).toBe(false);
+		expect(loadRuleLayers(cwd, home).rules.filter(rule => rule.layer === "user")).toHaveLength(0);
 	});
 
 	it("leaves repo-committed project rules until --project is passed", async () => {
@@ -255,13 +262,13 @@ describe("runPermissionCommand clear", () => {
 			"rules:\n  - id: proj1\n    tool: write\n    match: { path: 'src/**' }\n    action: allow\n",
 		);
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
-			"rules:\n  - id: dyn1\n    tool: bash\n    match: { command: 'npm test' }\n    action: allow\n",
+			userRulesFile,
+			"rules:\n  - id: user1\n    tool: bash\n    match: { command: 'git *' }\n    action: allow\n",
 		);
 
 		const output = await runPermissionCommand("clear --project", await ctx());
 
-		expect(output).toContain("Cleared dynamic (1), project (1)");
+		expect(output).toContain("Cleared user (1), project (1)");
 		expect(loadRuleLayers(cwd, home).rules).toHaveLength(0);
 	});
 
@@ -299,12 +306,12 @@ describe("runPermissionCommand test", () => {
 	});
 
 	it("test output includes match class and specificity winner", async () => {
-		// temp dynamic file: deny bash "* |head *", allow bash "git branch * |head *"
+		// temp user file: deny bash "* |head *", allow bash "git branch * |head *"
 		// (normalized pipe forms: the tokenizer glues `|` to the next stage).
 		// The git stage must be rule-allowed too: git is not a safe-consumer
 		// stage, so an unruled stage would degrade the pipeline allow to a prompt.
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			userRulesFile,
 			"rules:\n  - id: deny-pipe\n    tool: bash\n    match: { command: '* |head *' }\n    action: deny\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * |head *' }\n    action: allow\n  - id: allow-git-branch\n    tool: bash\n    match: { command: 'git branch *' }\n    action: allow\n",
 		);
 
@@ -324,7 +331,7 @@ describe("runPermissionCommand test", () => {
 		// (no ruleId): the annotations would describe a rule that did not
 		// decide, so they must be omitted.
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			userRulesFile,
 			"rules:\n  - id: allow-rm\n    tool: bash\n    match: { command: 'rm -rf /' }\n    action: allow\n",
 		);
 
@@ -339,14 +346,14 @@ describe("runPermissionCommand test", () => {
 		// A compound whose deny decided at the piece level (no whole-command
 		// winner) still attributes class/specificity to the deciding piece rule.
 		write(
-			path.join(home, ".omp", "agent", "permissions.dynamic.yml"),
+			userRulesFile,
 			"rules:\n  - id: deny-echo\n    tool: bash\n    match: { command: 'echo *' }\n    action: deny\n",
 		);
 
 		const output = await runPermissionCommand('test "git log -n 5 && echo hi"', await ctx());
 
 		expect(output).toContain("decision: deny");
-		expect(output).toContain("piece: echo hi -> deny (deny-echo, dynamic)");
+		expect(output).toContain("piece: echo hi -> deny (deny-echo, user)");
 		expect(output).toContain("piece class: exact-structure (specificity 1)");
 		// No whole-command winner exists for this compound: the plain class
 		// line stays absent.
@@ -365,7 +372,7 @@ describe("runPermissionCommand status/log/migrate", () => {
 		const output = await runPermissionCommand("status", await ctx());
 
 		expect(output).toContain("Posture: allow");
-		expect(output).toContain("dynamic: 0");
+		expect(output).toContain("project: 0");
 		expect(output).toContain("user: 1");
 		expect(output).toContain(userRulesFile);
 	});

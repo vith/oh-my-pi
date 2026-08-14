@@ -9,14 +9,19 @@ import { YAML } from "bun";
 /**
  * Rule layers, ordered from highest to lowest precedence.
  *
- * - `dynamic`: rules written by the engine ("approve and remember").
  * - `project`: the repo's committed `.omp/permissions.yml`.
- * - `user`: hand-edited `~/.omp/agent/permissions.yml`.
+ * - `user`: personal rules in `~/.omp/agent/permissions.yml` — hand-written
+ *   (`/permissions add`) or remembered from approval dialogs.
  * - `curated`: bundled code defaults (not file-backed).
  * - `legacy`: migrated settings keys (not file-backed).
+ *
+ * The pre-merge engine wrote remembered rules to a separate
+ * `permissions.dynamic.yml`; {@link loadRuleLayers} folds any leftover rules
+ * from that legacy file into the user layer, and `foldLegacyDynamicRules`
+ * (wired into `/permissions migrate`) merges the file and removes it.
  */
 export type RuleAction = "allow" | "deny" | "prompt";
-export type RuleLayer = "dynamic" | "project" | "user" | "curated" | "legacy";
+export type RuleLayer = "project" | "user" | "curated" | "legacy";
 
 export interface PermissionRule {
 	/** Unique within its file; auto-generated when absent. */
@@ -43,24 +48,27 @@ export interface RuleLoadResult {
 }
 
 /** File-backed layers in load order (highest precedence first). */
-const LAYER_ORDER = ["dynamic", "project", "user"] as const;
+const LAYER_ORDER = ["project", "user"] as const;
 
 const RULE_ACTIONS: readonly RuleAction[] = ["allow", "deny", "prompt"];
 
 /**
- * Resolve the three file-backed rule layer files.
+ * Resolve the file-backed rule layer files.
  *
  * `project` walks up from `cwd` to the nearest directory containing
  * `.omp/permissions.yml` (same walking shape as omp's
  * `findAllNearestProjectConfigDirs`), falling back to `<cwd>/.omp/permissions.yml`
  * when no ancestor has one.
+ *
+ * `legacyDynamic` is the pre-merge location of engine-written ("remembered")
+ * rules; it is read for migration only and removed by `foldLegacyDynamicRules`.
  */
-export function ruleFiles(cwd: string, home?: string): { dynamic: string; project: string; user: string } {
+export function ruleFiles(cwd: string, home?: string): { project: string; user: string; legacyDynamic: string } {
 	const homeDir = home ?? os.homedir();
 	return {
-		dynamic: path.join(homeDir, ".omp", "agent", "permissions.dynamic.yml"),
 		project: path.join(findNearestProjectRoot(cwd), ".omp", "permissions.yml"),
 		user: path.join(homeDir, ".omp", "agent", "permissions.yml"),
+		legacyDynamic: path.join(homeDir, ".omp", "agent", "permissions.dynamic.yml"),
 	};
 }
 
@@ -108,12 +116,12 @@ export function clearRuleLayerCache(): void {
 }
 
 function layerFileStats(files: {
-	dynamic: string;
 	project: string;
 	user: string;
+	legacyDynamic: string;
 }): Array<{ mtimeMs: number; size: number } | null> {
 	const stats: Array<{ mtimeMs: number; size: number } | null> = [];
-	for (const file of [files.dynamic, files.project, files.user]) {
+	for (const file of [files.project, files.user, files.legacyDynamic]) {
 		try {
 			const stat = fs.statSync(file);
 			stats.push({ mtimeMs: stat.mtimeMs, size: stat.size });
@@ -144,13 +152,16 @@ function sameLayerFileStats(
 }
 
 /**
- * Load the three file-backed layers in precedence order (dynamic → project → user),
+ * Load the file-backed layers in precedence order (project → user),
  * deduplicating ids within each file, dropping expired rules, and collecting
- * per-file errors. A broken or missing file contributes no rules.
+ * per-file errors. A broken or missing file contributes no rules. Rules left
+ * in the legacy `permissions.dynamic.yml` are folded into the user layer
+ * (after the user file's own rules) so remembered rules keep working until
+ * `/permissions migrate` folds the file away.
  */
 export function loadRuleLayers(cwd: string, home?: string): RuleLoadResult {
 	const files = ruleFiles(cwd, home);
-	const key = `${cwd}\u0000${home ?? ""}\u0000${files.dynamic}\u0000${files.project}\u0000${files.user}`;
+	const key = `${cwd}\u0000${home ?? ""}\u0000${files.project}\u0000${files.user}\u0000${files.legacyDynamic}`;
 	const stats = layerFileStats(files);
 	const cached = ruleLayerCache.get(key);
 	if (cached !== undefined && sameLayerFileStats(cached.stats, stats)) {
@@ -161,6 +172,12 @@ export function loadRuleLayers(cwd: string, home?: string): RuleLoadResult {
 	const errors: string[] = [];
 	for (const layer of LAYER_ORDER) {
 		const loaded = loadRuleFile(files[layer], layer);
+		rules.push(...loaded.rules);
+		errors.push(...loaded.errors);
+	}
+	// Legacy pre-merge remembered rules fold in as user-layer rules.
+	if (stats[2] !== null) {
+		const loaded = loadRuleFile(files.legacyDynamic, "user");
 		rules.push(...loaded.rules);
 		errors.push(...loaded.errors);
 	}
@@ -288,23 +305,9 @@ export function isRuleExpired(rule: PermissionRule, now: number = Date.now()): b
 }
 
 /**
- * Append or replace (by `id`) a rule in the dynamic rules file. The write is
- * atomic and serialized with other writers through an OS-backed file lock
- * (Task 2 deferred minor; the management surface adds real callers). The
- * `layer` field is derived from the file's position at load time and is not
- * stored.
- */
-export async function writeDynamicRule(
-	file: string,
-	rule: Omit<PermissionRule, "layer"> & { layer?: RuleLayer },
-): Promise<void> {
-	await upsertRuleInFile(file, rule);
-}
-
-/**
  * Append or replace (by `id`) a rule in the user rules file (the management
- * surface's write path). Same atomic + locked semantics as
- * {@link writeDynamicRule}.
+ * surface's write path). Atomic + locked semantics shared with the other
+ * file writers.
  */
 export async function writeUserRule(
 	file: string,
@@ -342,14 +345,6 @@ function ruleToEntry(rule: Omit<PermissionRule, "layer"> & { layer?: RuleLayer }
 	if (rule.reason !== undefined) entry.reason = rule.reason;
 	if (rule.ttl !== undefined) entry.ttl = rule.ttl;
 	return entry;
-}
-
-/**
- * Remove a rule by `id` from the dynamic rules file.
- * Returns whether a rule with that id existed (and the file was rewritten).
- */
-export async function removeDynamicRule(file: string, id: string): Promise<boolean> {
-	return removeRuleFromFile(file, id);
 }
 
 /**
@@ -395,7 +390,7 @@ function writeRulesDoc(file: string, rules: Record<string, unknown>[]): Promise<
 
 /**
  * Replace the whole `rules` list of a rules file under the file lock. This is
- * the public whole-list writer; the mutating writers ({@link writeDynamicRule}
+ * the public whole-list writer; the mutating writers (writeUserRule
  * et al.) share the same locked read-modify-write core, so every write to a
  * rules file is serialized (a bare read + rename could interleave).
  */
@@ -414,7 +409,7 @@ async function mutateRuleDoc(
 	mutate: (rules: Record<string, unknown>[]) => Record<string, unknown>[],
 ): Promise<boolean> {
 	return await withRulesFileLock(file, async () => {
-		const doc = await readDynamicDoc(file);
+		const doc = await readRulesDoc(file);
 		const next = mutate(doc.rules);
 		if (next === doc.rules) return false;
 		await writeRulesDoc(file, next);
@@ -422,8 +417,8 @@ async function mutateRuleDoc(
 	});
 }
 
-/** Read a dynamic rules file as a `{ rules }` document; missing or empty files yield no rules. */
-async function readDynamicDoc(file: string): Promise<{ rules: Record<string, unknown>[] }> {
+/** Read a rules file as a `{ rules }` document; missing or empty files yield no rules. */
+async function readRulesDoc(file: string): Promise<{ rules: Record<string, unknown>[] }> {
 	let content: string;
 	try {
 		content = await Bun.file(file).text();
@@ -438,19 +433,42 @@ async function readDynamicDoc(file: string): Promise<{ rules: Record<string, unk
 	try {
 		parsed = YAML.parse(content);
 	} catch (error) {
-		throw new Error(`Cannot write dynamic rules file ${file}: ${toError(error).message}`);
+		throw new Error(`Cannot parse rules file ${file}: ${toError(error).message}`);
 	}
 	if (parsed === null || parsed === undefined) return { rules: [] };
 	if (typeof parsed !== "object" || Array.isArray(parsed)) {
-		throw new Error(`Cannot write dynamic rules file ${file}: top-level value must be a mapping`);
+		throw new Error(`Cannot parse rules file ${file}: top-level value must be a mapping`);
 	}
 
 	const rulesValue = (parsed as Record<string, unknown>).rules;
 	if (rulesValue === undefined) return { rules: [] };
 	if (!Array.isArray(rulesValue)) {
-		throw new Error(`Cannot write dynamic rules file ${file}: "rules" must be a list`);
+		throw new Error(`Cannot parse rules file ${file}: "rules" must be a list`);
 	}
 	return { rules: rulesValue as Record<string, unknown>[] };
+}
+
+/**
+ * One-time migration of the legacy `permissions.dynamic.yml` file: move its
+ * rules into the user rules file (after any existing entries, so hand-written
+ * rules keep precedence on ties) and delete the legacy file. Returns the
+ * number of rules folded (0 when the file is absent or empty). Idempotent:
+ * a second call has nothing left to fold.
+ */
+export async function foldLegacyDynamicRules(cwd: string, home?: string): Promise<number> {
+	const files = ruleFiles(cwd, home);
+	return await withRulesFileLock(files.user, async () => {
+		const legacy = await readRulesDoc(files.legacyDynamic);
+		if (legacy.rules.length === 0) return 0;
+		const user = await readRulesDoc(files.user);
+		await writeRulesDoc(files.user, [...user.rules, ...legacy.rules]);
+		try {
+			await fs.promises.rm(files.legacyDynamic);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		return legacy.rules.length;
+	});
 }
 
 /**

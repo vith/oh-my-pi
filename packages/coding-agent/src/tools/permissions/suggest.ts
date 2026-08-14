@@ -165,7 +165,7 @@ function parseSuggestionResponse(content: AssistantMessage["content"]): Suggesti
 	const suggestions: Suggestion[] = [];
 	for (const record of parsed) {
 		if (suggestions.length >= SUGGEST_MAX_SUGGESTIONS) break;
-		const rule = normalizeRule(record, "dynamic");
+		const rule = normalizeRule(record, "user");
 		if (rule === null) continue;
 		// Read-only tools are curated-allowlisted; a deny suggestion for one can
 		// never take effect and only confuses the user.

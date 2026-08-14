@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isRecord, toError } from "@oh-my-pi/pi-utils";
@@ -20,7 +21,6 @@ import {
 	normalizeRule,
 	type PermissionRule,
 	type RuleLayer,
-	removeDynamicRule,
 	removeProjectRule,
 	removeUserRule,
 	ruleFiles,
@@ -35,21 +35,22 @@ import {
  * argument strings from its structured parameters).
  *
  * Subcommands:
- * - `list` — merged file-backed rules by layer (dynamic → project → user)
+ * - `list` — merged file-backed rules by layer (project → user)
  *   with audit match counts when the audit file exists.
  * - `show <id>` — rule details plus its last audit hits.
  * - `add <yaml>` — validate via `normalizeRule` and write to the user file.
  * - `remove [--project] <id> [<id>...]` — delete rule(s) from whichever
  *   file-backed layer holds them (project only with `--project`).
- * - `clear [--project]` — wipe the file-backed layers (dynamic + user by
- *   default; the repo-committed project layer only with `--project`).
+ * - `clear [--project]` — wipe the file-backed layers (user by default; the
+ *   repo-committed project layer only with `--project`).
  * - `edit <id> <yaml>` — replace a user-file rule by id.
  * - `test "<command>"` — dry-run `evaluateBashCommand`; prints decision,
  *   rule, layer, and the winning rule's match class (with specificity).
  *   Never writes anything.
  * - `log` — recent audit entries (newest first).
  * - `status` — posture, per-layer rule counts, rule file paths.
- * - `migrate [--apply]` — Task 9's plan (dry-run by default) or apply.
+ * - `migrate [--apply]` — Task 9's plan (dry-run by default) or apply;
+ *   also folds the legacy `permissions.dynamic.yml` into the user file.
  */
 export interface RunPermissionCommandContext {
 	cwd: string;
@@ -57,7 +58,7 @@ export interface RunPermissionCommandContext {
 	sessionId?: string;
 }
 
-const FILE_LAYERS = ["dynamic", "project", "user"] as const;
+const FILE_LAYERS = ["project", "user"] as const;
 
 export async function runPermissionCommand(args: string, ctx: RunPermissionCommandContext): Promise<string> {
 	const { token, rest } = splitFirstToken(args.trim());
@@ -192,10 +193,10 @@ async function addRule(rest: string, ctx: RunPermissionCommandContext): Promise<
 }
 
 /**
- * Remove rule(s) from whichever file-backed layer holds them. Dynamic and
- * user rules are removable directly; repo-committed project rules require an
- * explicit `--project` (accepted anywhere in the argument list) so a shared
- * file is never wiped by accident.
+ * Remove rule(s) from whichever file-backed layer holds them. User rules are
+ * removable directly; repo-committed project rules require an explicit
+ * `--project` (accepted anywhere in the argument list) so a shared file is
+ * never wiped by accident.
  */
 async function removeRule(rest: string, ctx: RunPermissionCommandContext): Promise<string> {
 	const tokens = rest.trim().split(/\s+/u).filter(Boolean);
@@ -225,11 +226,7 @@ async function removeRule(rest: string, ctx: RunPermissionCommandContext): Promi
 			continue;
 		}
 		const removed =
-			target.layer === "dynamic"
-				? await removeDynamicRule(files.dynamic, id)
-				: target.layer === "project"
-					? await removeProjectRule(files.project, id)
-					: await removeUserRule(files.user, id);
+			target.layer === "project" ? await removeProjectRule(files.project, id) : await removeUserRule(files.user, id);
 		lines.push(
 			removed
 				? `Removed rule "${id}" from the ${target.layer} layer.`
@@ -240,11 +237,12 @@ async function removeRule(rest: string, ctx: RunPermissionCommandContext): Promi
 }
 
 /**
- * Wipe the file-backed rule layers. Dynamic and user layers are always
- * cleared; the repo-committed project layer is only cleared with an explicit
- * `--project` (a plain `clear` lists the project rules and says how to clear
- * them, so a shared file is never wiped by accident). Only files that
- * actually contain rules are rewritten.
+ * Wipe the file-backed rule layers. The user layer (including rules folded
+ * from the legacy dynamic file) is always cleared; the repo-committed
+ * project layer is only cleared with an explicit `--project` (a plain
+ * `clear` lists the project rules and says how to clear them, so a shared
+ * file is never wiped by accident). Only files that actually contain rules
+ * are rewritten.
  */
 async function clearRules(rest: string, ctx: RunPermissionCommandContext): Promise<string> {
 	const trimmed = rest.trim();
@@ -257,23 +255,21 @@ async function clearRules(rest: string, ctx: RunPermissionCommandContext): Promi
 	const files = ruleFiles(ctx.cwd);
 	const { rules } = loadRuleLayers(ctx.cwd);
 	const layerRules: Record<Exclude<RuleLayer, "curated" | "legacy">, PermissionRule[]> = {
-		dynamic: [],
 		project: [],
 		user: [],
 	};
 	for (const rule of rules) {
-		if (rule.layer === "dynamic" || rule.layer === "project" || rule.layer === "user") {
+		if (rule.layer === "project" || rule.layer === "user") {
 			layerRules[rule.layer].push(rule);
 		}
 	}
 
 	const cleared: string[] = [];
-	if (layerRules.dynamic.length > 0) {
-		await writeRulesFile(files.dynamic, []);
-		cleared.push(`dynamic (${layerRules.dynamic.length})`);
-	}
 	if (layerRules.user.length > 0) {
 		await writeRulesFile(files.user, []);
+		// Rules folded from the legacy dynamic file are user-layer rules;
+		// wiping the user layer must remove their source file too.
+		await fs.promises.rm(files.legacyDynamic, { force: true });
 		cleared.push(`user (${layerRules.user.length})`);
 	}
 	if (includeProject && layerRules.project.length > 0) {
@@ -408,21 +404,25 @@ function status(ctx: RunPermissionCommandContext): string {
 	const posture = resolvePosture(ctx.settings);
 	const files = ruleFiles(ctx.cwd);
 	const { rules, errors } = loadRuleLayers(ctx.cwd);
-	const counts: Record<string, number> = { dynamic: 0, project: 0, user: 0 };
+	const counts: Record<string, number> = { project: 0, user: 0 };
 	for (const rule of rules) {
 		counts[rule.layer] = (counts[rule.layer] ?? 0) + 1;
 	}
 	const lines = [
 		`Posture: ${posture}`,
 		"Rule counts:",
-		`  dynamic: ${counts.dynamic ?? 0}`,
 		`  project: ${counts.project ?? 0}`,
 		`  user: ${counts.user ?? 0}`,
 		"Files:",
-		`  dynamic: ${files.dynamic}`,
 		`  project: ${files.project}`,
 		`  user: ${files.user}`,
 	];
+	if (fs.existsSync(files.legacyDynamic)) {
+		lines.push(
+			`  legacy dynamic (folded at load): ${files.legacyDynamic}`,
+			'Run "permissions migrate" to fold the legacy dynamic file into the user file.',
+		);
+	}
 	if (errors.length > 0) lines.push(`Rule load errors: ${errors.join("; ")}`);
 	return lines.join("\n");
 }
