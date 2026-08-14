@@ -167,3 +167,22 @@ describe("/permissions rule-id completion", () => {
 		expect(await complete("remove ")).toBeNull();
 	});
 });
+
+describe("/mode argument completion", () => {
+	/** Materialized /mode — its completions are runtime-independent. */
+	function modeCompleter() {
+		const runtime = {} as never as TuiSlashCommandRuntime;
+		const command = buildTuiBuiltinSlashCommands(runtime).find(c => c.name === "mode");
+		if (command === undefined) throw new Error("mode slash command not registered");
+		return command.getArgumentCompletions ?? (() => null);
+	}
+
+	it("completes the three postures, filtered by prefix", async () => {
+		const complete = modeCompleter();
+		expect((await complete(""))?.map(item => item.label)).toEqual(["allow", "prompt", "deny"]);
+		expect((await complete("p"))?.map(item => item.label)).toEqual(["prompt"]);
+		expect((await complete("a"))?.map(item => item.label)).toEqual(["allow"]);
+		expect((await complete("DEN"))?.map(item => item.label)).toEqual(["deny"]); // case-insensitive
+		expect(await complete("allow more")).toBeNull(); // past the posture token
+	});
+});
