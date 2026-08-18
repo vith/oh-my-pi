@@ -4880,7 +4880,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "17.3.4+vith-fork.214.9910c1fe60"
+version = "17.3.7+vith-fork.218.6e8076ce18"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -4949,7 +4949,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "17.3.4+vith-fork.214.9910c1fe60"
+version = "17.3.7+vith-fork.218.6e8076ce18"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -5034,7 +5034,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "17.3.4+vith-fork.214.9910c1fe60"
+version = "17.3.7+vith-fork.218.6e8076ce18"
 dependencies = [
  "async-trait",
  "libc",
@@ -5046,7 +5046,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "17.3.4+vith-fork.214.9910c1fe60"
+version = "17.3.7+vith-fork.218.6e8076ce18"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5118,7 +5118,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "17.3.4+vith-fork.214.9910c1fe60"
+version = "17.3.7+vith-fork.218.6e8076ce18"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -5146,7 +5146,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "17.3.4+vith-fork.214.9910c1fe60"
+version = "17.3.7+vith-fork.218.6e8076ce18"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -5161,7 +5161,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "17.3.4+vith-fork.214.9910c1fe60"
+version = "17.3.7+vith-fork.218.6e8076ce18"
 dependencies = [
  "dashmap",
  "globset",
@@ -9081,9 +9081,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.4"
+version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47402523226a02bfe5230160dc3ccc089aa6f6f19e7fcbb4e6f824bbb1b4aa62"
+checksum = "9f212a141d820099d57ffafb9569be9617a6f27d3dc881fbee8fb56642f917a9"
 dependencies = [
  "proc-macro2",
  "quote",
