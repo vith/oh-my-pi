@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [17.3.6] - 2026-08-17
+
+### Changed
+
+- Changed the paid xAI (XAI_API_KEY) and SuperGrok (xai-oauth) default models to grok-4.6.
+
+### Fixed
+
+- Raised the GPT-5.6 Sol/Terra/Luna context window on the Codex transport (openai-codex) from 372K to 1M tokens: OpenAI enabled the 1M window for subscription Codex on 2026-08-16, but the Codex model registry still reports the stale 272,000, so discovery now floors these SKUs at 1,000,000 instead of trusting the reported value ([openai/codex#38917](https://github.com/openai/codex/issues/38917)).
+
+## [17.3.5] - 2026-08-16
+
+### Added
+
+- Added support for GLM-5.3 on the z.AI provider, featuring a unified low/high/max reasoning-effort ladder across all hosts, mandatory thinking mode, 1M context, and default-model status for the z.AI provider.
+
+### Changed
+
+- Switched the paid xAI provider (xai / XAI_API_KEY) from Chat Completions to the OpenAI Responses API, aligning it with SuperGrok (xai-oauth) for prompt-cache affinity, reasoning-effort handling, and encrypted-reasoning replay.
+- Changed the paid xAI (XAI_API_KEY) default model to grok-4.5.
+- Changed the SuperGrok (xai-oauth) default model to grok-4.5.
+- Improved reasoning continuity for xAI models by requesting and replaying encrypted reasoning content across multi-turn Responses API calls.
+
+### Fixed
+
+- Fixed Codex Daybreak Blue and Red model discovery reporting zero token prices, which incorrectly labeled the models as free in the model picker.
+- Fixed Baseten's moonshotai/Kimi-K3 catalog metadata so its low/high/max thinking levels are available.
+- Fixed opencode-go/deepseek-v4-flash Responses requests sending forced named tool_choice selectors that are rejected while thinking mode is active.
+
 ## [17.3.4] - 2026-08-14
 
 ### Added
