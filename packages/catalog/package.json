@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-catalog",
-  "version": "17.3.7+vith-fork.226.32f520f6eb",
+  "version": "17.3.7+vith-fork.229.f2632f8163",
   "description": "Model catalog for omp: bundled model database, provider discovery descriptors, model identity, classification, and equivalence",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",

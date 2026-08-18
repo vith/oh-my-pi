@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-agent-core",
-  "version": "17.3.7+vith-fork.226.32f520f6eb",
+  "version": "17.3.7+vith-fork.229.f2632f8163",
   "description": "General-purpose agent with transport abstraction, state management, and attachment support",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
