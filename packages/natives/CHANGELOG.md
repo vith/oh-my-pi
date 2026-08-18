@@ -5,6 +5,7 @@
 ### Added
 
 - Fork Linux builds now compile the `wayland-pipewire` Cargo feature, enabling Wayland screencast capture through the ScreenCast portal. `release:fork` builds the native addon through the local Cargo/N-API path with `OMP_NATIVE_BUILD_BACKEND=cargo` and `OMP_NATIVE_PIPEWIRE=1`; the shipped Bazel addons keep `crate_features = []` (the pipewire crate needs system libpipewire via pkg-config).
+- Wayland window captures now use the standard ScreenCast portal's Window source with per-application restore tokens and transparent-padding removal; a new or restarted window may still require one picker approval.
 
 ## [17.2.13+vith-fork] - 2026-08-11
 

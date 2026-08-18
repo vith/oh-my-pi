@@ -71,20 +71,21 @@ impl WaylandBackend {
 	}
 
 	#[cfg(feature = "wayland-pipewire")]
-	fn synthetic_display(image: &RgbaImage) -> DesktopDisplay {
+	fn synthetic_display(image: &RgbaImage, stream: capture::StreamGeometry) -> DesktopDisplay {
+		let scale = f64::from(image.width()) / f64::from(stream.width);
 		DesktopDisplay {
-			id:           "wayland-portal-0".to_string(),
-			name:         "Wayland portal monitor".to_string(),
-			x:            0,
-			y:            0,
-			width:        image.width(),
-			height:       image.height(),
-			scale:        1.0,
-			pixel_x:      0,
-			pixel_y:      0,
-			pixel_width:  image.width(),
+			id: "wayland-portal-0".to_string(),
+			name: "Wayland portal monitor".to_string(),
+			x: stream.x,
+			y: stream.y,
+			width: stream.width,
+			height: stream.height,
+			scale,
+			pixel_x: 0,
+			pixel_y: 0,
+			pixel_width: image.width(),
 			pixel_height: image.height(),
-			is_primary:   true,
+			is_primary: true,
 		}
 	}
 
@@ -165,13 +166,13 @@ impl Backend for WaylandBackend {
 		#[cfg(feature = "wayland-pipewire")]
 		{
 			self.selected_display_allowed()?;
-			let image = capture::capture()?;
-			let display = Self::synthetic_display(&image);
-			self.displays = vec![display.clone()];
 			match target {
 				Target::Desktop => {
+					let captured = capture::capture(capture::CaptureSource::Monitor)?;
+					let display = Self::synthetic_display(&captured.image, captured.geometry);
+					self.displays = vec![display];
 					let geometry = FrameGeometry::for_displays(&self.displays);
-					Ok((image, geometry))
+					Ok((captured.image, geometry))
 				},
 				Target::Window(id) => {
 					let window = self
@@ -181,24 +182,16 @@ impl Backend for WaylandBackend {
 						.ok_or_else(|| {
 							DesktopError::window_not_found(format!("Wayland window {id} not found"))
 						})?;
-					if window.x < 0 || window.y < 0 {
-						return Err(DesktopError::capture_failed(
-							"Wayland portal monitor stream cannot crop a window outside the selected \
-							 monitor",
-						));
-					}
-					let x = window.x as u32;
-					let y = window.y as u32;
-					let width = window.width.min(image.width().saturating_sub(x));
-					let height = window.height.min(image.height().saturating_sub(y));
-					if width == 0 || height == 0 {
-						return Err(DesktopError::capture_failed(format!(
-							"Wayland window {id} is outside the selected portal monitor"
-						)));
-					}
-					let cropped = image::imageops::crop_imm(&image, x, y, width, height).to_image();
-					let geometry = FrameGeometry::for_window(&window, cropped.width(), cropped.height());
-					Ok((cropped, geometry))
+					let token_name = capture::window_token_name(&window.app);
+					let captured = capture::capture(capture::CaptureSource::Window { token_name })?;
+					let display = Self::synthetic_display(&captured.image, captured.geometry);
+					self.displays = vec![display];
+					let geometry = FrameGeometry::for_window(
+						&window,
+						captured.image.width(),
+						captured.image.height(),
+					);
+					Ok((captured.image, geometry))
 				},
 			}
 		}
