@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-mnemopi",
-  "version": "17.3.7+vith-fork.223.10ceb6743f",
+  "version": "17.3.7+vith-fork.226.32f520f6eb",
   "description": "Local SQLite memory engine for Oh My Pi agents",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",

@@ -16,7 +16,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "17.3.7+vith-fork.223.10ceb6743f"
+version = "17.3.7+vith-fork.226.32f520f6eb"
 edition = "2024"
 license = "MIT"
 authors = ["Can Boluk"]
