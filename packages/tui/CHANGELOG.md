@@ -11,6 +11,13 @@
 ### Added
 
 - The live desktop notification is also dismissed when the terminal window regains focus (OSC 1004 focus reporting) or is clicked while a toast is on screen (transient button-event tracking armed only while a toast is live), so returning to the window clears the toast even before typing.
+## [17.3.5] - 2026-08-16
+
+### Fixed
+
+- Fixed long CPU-bound event-loop stalls being misclassified as system sleep and omitted from loop-blocked diagnostics.
+- Fixed focused components with markers falling back to full-screen redraws instead of direct row updates, preserving cursor position and native scrollback across marker changes.
+
 ## [17.3.4] - 2026-08-14
 
 ### Fixed
