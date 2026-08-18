@@ -4880,7 +4880,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "17.3.7+vith-fork.220.dc5dd78497"
+version = "17.3.7+vith-fork.223.10ceb6743f"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -4949,7 +4949,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "17.3.7+vith-fork.220.dc5dd78497"
+version = "17.3.7+vith-fork.223.10ceb6743f"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -5034,7 +5034,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "17.3.7+vith-fork.220.dc5dd78497"
+version = "17.3.7+vith-fork.223.10ceb6743f"
 dependencies = [
  "async-trait",
  "libc",
@@ -5046,7 +5046,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "17.3.7+vith-fork.220.dc5dd78497"
+version = "17.3.7+vith-fork.223.10ceb6743f"
 dependencies = [
  "anyhow",
  "arboard",
@@ -5118,7 +5118,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "17.3.7+vith-fork.220.dc5dd78497"
+version = "17.3.7+vith-fork.223.10ceb6743f"
 dependencies = [
  "anyhow",
  "brush-core",
@@ -5146,7 +5146,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "17.3.7+vith-fork.220.dc5dd78497"
+version = "17.3.7+vith-fork.223.10ceb6743f"
 dependencies = [
  "audiopus_sys",
  "bytes",
@@ -5161,7 +5161,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "17.3.7+vith-fork.220.dc5dd78497"
+version = "17.3.7+vith-fork.223.10ceb6743f"
 dependencies = [
  "dashmap",
  "globset",
@@ -9116,9 +9116,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant"
-version = "5.14.0"
+version = "5.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e28c25bd8bb8da5a1f3e7065d0c156b9ee9a7973adf78b0e35eaefdf3b1b5c"
+checksum = "c1d34c27cc6cdd1f458427519dd6b8612f7b7e3f7b9a0b2355d041dda9869147"
 dependencies = [
  "endi",
  "enumflags2",
@@ -9132,9 +9132,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant_derive"
-version = "5.14.0"
+version = "5.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d496a145685283b67e232bd9e47377f6b60ad9d51e3601b23867f77c42477f96"
+checksum = "864155e69b4352db0c7f374917bf45d1e0c8d17659c8b3dbf9795f3673f8c497"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -9145,9 +9145,9 @@ dependencies = [
 
 [[package]]
 name = "zvariant_utils"
-version = "4.1.0"
+version = "4.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b84ebb462416c27cdb97f2e7f5f0ccc844da1fe2ecc7121e1b690b41318bf42"
+checksum = "bad0294361a320b694a328460dc73add56c306150f5cb6bfafc44446120008a3"
 dependencies = [
  "proc-macro2",
  "quote",
