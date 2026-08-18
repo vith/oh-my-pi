@@ -21,7 +21,7 @@
     },
     "packages/agent": {
       "name": "@oh-my-pi/pi-agent-core",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "dependencies": {
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
@@ -40,7 +40,7 @@
     },
     "packages/ai": {
       "name": "@oh-my-pi/pi-ai",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "dependencies": {
         "@bufbuild/protobuf": "catalog:",
         "@oh-my-pi/omptype": "catalog:",
@@ -63,7 +63,7 @@
     },
     "packages/catalog": {
       "name": "@oh-my-pi/pi-catalog",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "dependencies": {
         "@bufbuild/protobuf": "catalog:",
         "@oh-my-pi/omptype": "catalog:",
@@ -76,7 +76,7 @@
     },
     "packages/coding-agent": {
       "name": "@oh-my-pi/pi-coding-agent",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "bin": {
         "omp": "src/cli.ts",
       },
@@ -105,6 +105,7 @@
         "@opentelemetry/sdk-metrics": "catalog:",
         "@opentelemetry/sdk-trace-base": "catalog:",
         "@opentelemetry/sdk-trace-node": "catalog:",
+        "mupdf": "catalog:",
         "puppeteer-core": "catalog:",
       },
       "devDependencies": {
@@ -133,7 +134,7 @@
     },
     "packages/hashline": {
       "name": "@oh-my-pi/hashline",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "dependencies": {
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
@@ -177,7 +178,7 @@
     },
     "packages/mnemopi": {
       "name": "@oh-my-pi/pi-mnemopi",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "bin": {
         "mnemopi": "src/cli.ts",
       },
@@ -203,7 +204,7 @@
     },
     "packages/natives": {
       "name": "@oh-my-pi/pi-natives",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -211,7 +212,7 @@
     },
     "packages/omptype": {
       "name": "@oh-my-pi/omptype",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "devDependencies": {
         "@ark/attest": "0.56.3",
         "@ark/schema": "0.56.2",
@@ -224,7 +225,7 @@
     },
     "packages/snapcompact": {
       "name": "@oh-my-pi/snapcompact",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "dependencies": {
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
@@ -238,7 +239,7 @@
     },
     "packages/stats": {
       "name": "@oh-my-pi/omp-stats",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "bin": {
         "omp-stats": "./src/index.ts",
       },
@@ -263,7 +264,7 @@
     },
     "packages/tui": {
       "name": "@oh-my-pi/pi-tui",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "dependencies": {
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
@@ -299,7 +300,7 @@
     },
     "packages/utils": {
       "name": "@oh-my-pi/pi-utils",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "dependencies": {
         "@oh-my-pi/pi-natives": "catalog:",
       },
@@ -309,7 +310,7 @@
     },
     "packages/wire": {
       "name": "@oh-my-pi/pi-wire",
-      "version": "17.3.7",
+      "version": "17.3.4-fork.214.9910c1fe60",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
@@ -347,19 +348,19 @@
     "@bufbuild/protoc-gen-es": "^2.12.1",
     "@huggingface/transformers": "^4.2.0",
     "@napi-rs/cli": "3.7.2",
-    "@oh-my-pi/hashline": "17.3.7",
-    "@oh-my-pi/omp-stats": "17.3.7",
-    "@oh-my-pi/omptype": "17.3.7",
-    "@oh-my-pi/pi-agent-core": "17.3.7",
-    "@oh-my-pi/pi-ai": "17.3.7",
-    "@oh-my-pi/pi-catalog": "17.3.7",
-    "@oh-my-pi/pi-coding-agent": "17.3.7",
-    "@oh-my-pi/pi-mnemopi": "17.3.7",
-    "@oh-my-pi/pi-natives": "17.3.7",
-    "@oh-my-pi/pi-tui": "17.3.7",
-    "@oh-my-pi/pi-utils": "17.3.7",
-    "@oh-my-pi/pi-wire": "17.3.7",
-    "@oh-my-pi/snapcompact": "17.3.7",
+    "@oh-my-pi/hashline": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/omp-stats": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/omptype": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/pi-agent-core": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/pi-ai": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/pi-catalog": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/pi-coding-agent": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/pi-mnemopi": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/pi-natives": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/pi-tui": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/pi-utils": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/pi-wire": "17.3.4+vith-fork.214.9910c1fe60",
+    "@oh-my-pi/snapcompact": "17.3.4+vith-fork.214.9910c1fe60",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.220.0",
     "@opentelemetry/context-async-hooks": "^2.9.0",
@@ -385,6 +386,7 @@
     "ghostty-web": "^0.4.0",
     "lint-staged": "^17.0.8",
     "lucide-react": "^1.24.0",
+    "mupdf": "^1.28.0",
     "onnxruntime-node": "1.26.0",
     "postcss": "^8.5.16",
     "prettier": "^3.9.5",
@@ -1216,6 +1218,8 @@
     "motion-utils": ["motion-utils@12.39.0", "", {}, "sha512-8nadJAJjTtqRkmRF36FoJTrywK9nnFmnPwnSMyxaOCU7GDjN9RTMJIxx9De8ErM+vpPhMccr/6fo5WciyQLnMQ=="],
 
     "ms": ["ms@2.1.3", "", {}, "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="],
+
+    "mupdf": ["mupdf@1.28.0", "", {}, "sha512-ACUnbpECaQ5JLq04pwd89lS+0IGMest5qL5tb08g9TAR7bDtfqflHEkb2Xm3o4rvC/szguLiV+WEbW9kstj8Sg=="],
 
     "mute-stream": ["mute-stream@3.0.0", "", {}, "sha512-dkEJPVvun4FryqBmZ5KhDo0K9iDXAwn08tMLDinNdRBNPcYEDiWYysLcc6k3mjTMlbP9KyylvRpd4wFtwrT9rw=="],
 
