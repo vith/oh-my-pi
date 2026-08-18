@@ -265,8 +265,16 @@ async function main(): Promise<void> {
 	// 11. Build the native addon for this machine. The coding-agent build
 	// embeds whatever `packages/natives/native/*.node` is on disk but does not
 	// compile it, so this must run first.
+	//
+	// On Linux, build through the local Cargo/N-API path with the
+	// wayland-pipewire feature so the fork binary supports Wayland screencast
+	// capture. The Bazel-shipped addons compile with crate_features = [] (the
+	// pipewire crate needs system libpipewire via pkg-config, unavailable in
+	// CI/cross builds), so the feature only exists on the local host build.
 	console.log("Building native addon...");
-	await $`bun --cwd=packages/natives run build`.quiet();
+	const addonBuildEnv =
+		process.platform === "linux" ? { OMP_NATIVE_BUILD_BACKEND: "cargo", OMP_NATIVE_PIPEWIRE: "1" } : undefined;
+	await $`bun --cwd=packages/natives run build`.env(addonBuildEnv ?? {}).quiet();
 	const platformTag = `${process.platform}-${process.arch}`;
 	const nativeDir = "packages/natives/native";
 

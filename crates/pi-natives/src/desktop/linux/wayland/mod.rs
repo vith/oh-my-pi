@@ -381,4 +381,22 @@ mod tests {
 			.expect_err("capture must fail without the pipewire feature");
 		assert_eq!(err.code.as_str(), "CaptureFailed");
 	}
+
+	#[test]
+	#[cfg(feature = "wayland-pipewire")]
+	fn capabilities_report_capture_with_pipewire_feature() {
+		let mut backend = WaylandBackend {
+			display:     DisplaySelector::All,
+			ax:          None,
+			ax_error:    None,
+			input:       None,
+			input_error: None,
+			displays:    Vec::new(),
+		};
+		let caps = backend.capabilities();
+		// Fork builds compiled with wayland-pipewire can screencast through the
+		// portal; capabilities() must advertise exactly what the binary can do.
+		assert!(caps.capture, "capture must be true when the pipewire feature is on");
+		assert_eq!(caps.capture_permission, "prompt-or-granted");
+	}
 }
