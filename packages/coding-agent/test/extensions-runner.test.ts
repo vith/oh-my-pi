@@ -116,6 +116,41 @@ describe("ExtensionRunner", () => {
 		expect(runner.createContext().cwd).toBe(dirB);
 	});
 
+	it("exposes the session's own settings on the context, not the global singleton", async () => {
+		const result = await loadTestExtensions();
+		// A session-scoped instance that is deliberately NOT `Settings.instance`:
+		// every session `createAgentSession` builds carries its own, and a
+		// subagent's is the derived instance from `createSubagentSettings`.
+		const sessionSettings = Settings.isolated({ "compaction.enabled": false });
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+			undefined,
+			sessionSettings,
+		);
+
+		expect(runner.createContext().settings).toBe(sessionSettings);
+		expect(runner.createContext().settings?.get("compaction.enabled")).toBe(false);
+	});
+
+	it("leaves context settings undefined when the runner was built without any", async () => {
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+
+		// Contexts synthesised outside a live session have no settings to expose;
+		// the field is optional rather than silently falling back to the singleton.
+		expect(runner.createContext().settings).toBeUndefined();
+	});
+
 	it("exposes the initialized host mode to extension contexts", async () => {
 		const result = await loadTestExtensions();
 		const runner = new ExtensionRunner(

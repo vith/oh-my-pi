@@ -965,6 +965,7 @@ export class ExtensionRunner {
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,
 			modelRegistry: this.modelRegistry,
+			settings: this.settings,
 			get model() {
 				return getModel();
 			},
