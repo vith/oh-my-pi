@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/omp-stats",
-  "version": "17.3.7+vith-fork.232.dd9d68a084",
+  "version": "17.3.8+vith-fork.235.db230e7dd9",
   "description": "Local observability dashboard for pi AI usage statistics",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
