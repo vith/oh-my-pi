@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-coding-agent",
-  "version": "17.3.8+vith-fork.235.db230e7dd9",
+  "version": "17.3.8+vith-fork.236.5f31bad7e7",
   "description": "Coding agent CLI with read, bash, edit, write tools and session management",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
