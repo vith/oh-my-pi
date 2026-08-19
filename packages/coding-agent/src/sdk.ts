@@ -899,6 +899,11 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
+		// Without this the field is structurally always `undefined` on the
+		// extension path, contradicting its own "prefer over the global
+		// singleton" contract. `AgentSession.buildAskReanswerContext` already
+		// forwards it; this path could not until `ExtensionContext` carried it.
+		settings: ctx.settings,
 		localProtocolOptions: ctx.localProtocolOptions,
 	};
 }

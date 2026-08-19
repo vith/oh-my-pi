@@ -51,6 +51,7 @@ import type {
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { Settings } from "../../config/settings";
 import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -540,6 +541,15 @@ export interface ExtensionContext {
 	sessionManager: ReadonlySessionManager;
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;
+	/**
+	 * Settings instance for the current session. Prefer over the global
+	 * singleton: `Settings.instance` is process-global and is the *root*
+	 * session's, while every session built by `createAgentSession` carries its
+	 * own — a subagent's is the derived instance from `createSubagentSettings`,
+	 * not its parent's. Optional because contexts synthesised outside a live
+	 * session (legacy shims, tests) have none.
+	 */
+	settings?: Settings;
 	/** Calling session's `local://` root mapping for external tool bridges. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Current model (may be undefined) */
