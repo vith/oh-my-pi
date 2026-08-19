@@ -4945,6 +4945,7 @@ dependencies = [
  "tree-sitter-xml",
  "tree-sitter-yaml",
  "tree-sitter-zig",
+ "xxhash-rust",
 ]
 
 [[package]]
