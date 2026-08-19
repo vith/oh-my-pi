@@ -92,6 +92,8 @@ Each piece is evaluated independently through the full pipeline:
 
 A leading `cd <path> && …` wrapper is folded into the tool's `cwd` at execution time (single-line, no shell expansion). The engine evaluates the command as submitted, and the splitter treats `cd …` as its own piece, so navigation rules and the follow-up command are checked separately.
 
+`bash.patterns` only feeds the `bash` tool's approval decision. The `eval` tool declares the `exec` tier and can spawn a shell via subprocess, so a `bash.patterns` `deny` rule does not apply to the same command run through `eval` — under `yolo`, that `exec` call resolves to `allow`. To gate the shell `eval` can reach, add a `tools.approval.eval` policy (`prompt` or `deny`) alongside `bash.patterns`.
+
 **PTY carve-out**: `pty: true` calls (interactive sessions) cannot be split or piece-dialoged. The whole command is analyzed as one unit — the strictest piece decision decides the call (deny → deny; pending → one whole-command dialog), with candidates scoped to the whole command text.
 
 ## Approval dialog

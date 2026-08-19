@@ -11,6 +11,13 @@
 ### Added
 
 - The live desktop notification is also dismissed when the terminal window regains focus (OSC 1004 focus reporting) or is clicked while a toast is on screen (transient button-event tracking armed only while a toast is live), so returning to the window clears the toast even before typing.
+## [17.3.8] - 2026-08-19
+
+### Fixed
+
+- Fixed images rendering as the `[Image: …]` text card on SIXEL terminals that expose no identifying environment variable (foot, xterm, contour): the graphics probe no longer requires Windows Terminal, and no longer reads an XTSMGRAPHICS success reply as a failure.
+- Fixed the multiline editor ignoring a `tui.input.submit` remap onto Ctrl+Enter: the hardcoded Ctrl/Shift+Enter → newline fallbacks now yield to an explicit submit binding, so Ctrl+Enter can be used to submit ([#8906](https://github.com/can1357/oh-my-pi/issues/8906)).
+
 ## [17.3.5] - 2026-08-16
 
 ### Fixed
