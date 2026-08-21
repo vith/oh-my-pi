@@ -154,6 +154,50 @@ describe("registerPersistedSubagent", () => {
 		expect(registry.get("invalid")).toBeUndefined();
 	});
 
+	it("rejects malformed JSON after a persisted session contract", async () => {
+		using tempDir = TempDir.createSync("@omp-external-persisted-invalid-tail-");
+		const sessionFile = path.join(tempDir.path(), "invalid-tail.jsonl");
+		await Bun.write(sessionFile, `${validTranscript("persisted-id")}\n{not valid json}\n`);
+		const registry = new AgentRegistry();
+
+		expect(
+			await registerPersistedSubagent(registry, {
+				id: "invalid-tail",
+				displayName: "Invalid tail",
+				sessionFile,
+			}),
+		).toBe("invalid");
+		expect(registry.get("invalid-tail")).toBeUndefined();
+	});
+
+	it("requires the persisted session header to be the first entry", async () => {
+		using tempDir = TempDir.createSync("@omp-external-persisted-header-order-");
+		const sessionFile = path.join(tempDir.path(), "late-header.jsonl");
+		await Bun.write(
+			sessionFile,
+			[
+				JSON.stringify({
+					type: "message",
+					id: "before-header",
+					parentId: null,
+					message: { role: "user", content: "wrong order" },
+				}),
+				sessionHeader("persisted-id"),
+				validTranscript("persisted-id").split("\n").at(1),
+			].join("\n"),
+		);
+		const registry = new AgentRegistry();
+
+		expect(
+			await registerPersistedSubagent(registry, {
+				id: "late-header",
+				displayName: "Late header",
+				sessionFile,
+			}),
+		).toBe("invalid");
+		expect(registry.get("late-header")).toBeUndefined();
+	});
+
 	it("registers tombstoned external transcripts as aborted", async () => {
 		using tempDir = TempDir.createSync("@omp-external-persisted-tombstone-");
 		const sessionFile = path.join(tempDir.path(), "tombstoned.jsonl");

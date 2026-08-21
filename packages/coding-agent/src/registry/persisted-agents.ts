@@ -336,6 +336,38 @@ async function readPersistedVibeChildIds(sessionFile: string, shouldContinue: ()
 	}
 }
 
+/**
+ * Validate the whole persisted transcript before registering it explicitly.
+ * Metadata intentionally stops at `session_init` and history tolerates corrupt
+ * records, but an externally supplied revival contract must reject either a
+ * malformed record or a session header that the normal loader would reject.
+ */
+async function isValidPersistedAgentTranscript(sessionFile: string, shouldContinue: () => boolean): Promise<boolean> {
+	let firstEntry = true;
+	let valid = true;
+	try {
+		await visitEntriesFromFileStream(
+			sessionFile,
+			entry => {
+				if (firstEntry) {
+					firstEntry = false;
+					valid = valid && entry.type === "session" && typeof entry.id === "string";
+				}
+				return shouldContinue();
+			},
+			{
+				shouldContinue,
+				onMalformedRecord: () => {
+					valid = false;
+				},
+			},
+		);
+	} catch {
+		return false;
+	}
+	return valid && !firstEntry && shouldContinue();
+}
+
 export interface PersistedSubagentRegistration {
 	id: string;
 	displayName: string;
@@ -367,6 +399,7 @@ export async function registerPersistedSubagent(
 	const shouldContinue = options.shouldContinue ?? (() => true);
 	if (!shouldContinue() || !input.id || !input.sessionFile.endsWith(".jsonl")) return "invalid";
 	if (registry.get(input.id)) return "existing";
+	if (!(await isValidPersistedAgentTranscript(input.sessionFile, shouldContinue))) return "invalid";
 
 	const tombstonedBeforeRead = await isPersistedAgentTombstoned(input.sessionFile);
 	if (!shouldContinue() || tombstonedBeforeRead === undefined) return "invalid";
