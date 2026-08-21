@@ -5576,6 +5576,9 @@ export class AgentSession {
 					await this.sessionManager.flush();
 					this.#persistedCustomPromptMessages.add(customMessage);
 				},
+				reconcileAfterProviderCancellation: () => {
+					this.agent.appendMessage(customMessage);
+				},
 			});
 		} finally {
 			this.#endInFlight();
@@ -5593,6 +5596,8 @@ export class AgentSession {
 			reservedInFlight?: boolean;
 			/** Runs after normal setup and compaction, immediately before the provider path. */
 			beforeProvider?: () => Promise<void>;
+			/** Reconciles an already-persisted prompt into live context if its provider turn is cancelled. */
+			reconcileAfterProviderCancellation?: () => void;
 		},
 	): Promise<void> {
 		const ownsInFlight = options?.reservedInFlight !== true;
@@ -5800,9 +5805,13 @@ export class AgentSession {
 			if (options?.beforeProvider) {
 				await options.beforeProvider();
 				// The durable append is authoritative once the before-provider boundary
-				// completes. A later abort must not start the provider, but recovery can
-				// safely observe the persisted message as appended.
-				if (this.#isDisposed || this.#promptGeneration !== generation) return;
+				// completes. A later abort must not start the provider. If the session
+				// remains live, reconcile the flushed prompt into its next context; cold
+				// recovery instead consumes the durable transcript entry.
+				if (this.#isDisposed || this.#promptGeneration !== generation) {
+					if (!this.#isDisposed) options.reconcileAfterProviderCancellation?.();
+					return;
+				}
 			}
 
 			// Commit the plan-reference delivery flag only now that the message is

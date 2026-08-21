@@ -9,6 +9,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { inspectDurableFollowUp } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("AgentSession persisted custom prompt", () => {
@@ -146,6 +147,73 @@ describe("AgentSession persisted custom prompt", () => {
 			releaseFlush.resolve();
 			await durableTurn;
 		}
+		await sessionManager.close();
+	});
+
+	it("reconciles a flushed durable prompt into live context when cancellation suppresses provider start", async () => {
+		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		await sessionManager.ensureOnDisk();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		let providerStarts = 0;
+		const mock = createMockModel({
+			handler: () => {
+				providerStarts++;
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		const flush = sessionManager.flush.bind(sessionManager);
+		let cancelAfterFlush = true;
+		vi.spyOn(sessionManager, "flush").mockImplementation(async () => {
+			await flush();
+			if (cancelAfterFlush) {
+				cancelAfterFlush = false;
+				await session?.abort();
+			}
+		});
+
+		await session.promptCustomMessagePersisted({
+			customType: "subagent-durable-follow-up",
+			content: "Use port 8080.",
+			display: true,
+			details: { deliveryKey: "resolution:r1" },
+			attribution: "user",
+		});
+
+		expect(providerStarts).toBe(0);
+		const transcriptBeforeRepeat = await Bun.file(sessionFile).text();
+		expect(transcriptBeforeRepeat.match(/resolution:r1/g)).toHaveLength(1);
+		expect(
+			agent.state.messages.filter(
+				message =>
+					message.role === "custom" &&
+					message.customType === "subagent-durable-follow-up" &&
+					message.details !== null &&
+					typeof message.details === "object" &&
+					"deliveryKey" in message.details &&
+					message.details.deliveryKey === "resolution:r1",
+			),
+		).toHaveLength(1);
+		expect(await inspectDurableFollowUp(sessionFile, "resolution:r1")).toBe("appended");
+		expect(await Bun.file(sessionFile).text()).toBe(transcriptBeforeRepeat);
 		await sessionManager.close();
 	});
 
