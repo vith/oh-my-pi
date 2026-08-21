@@ -27,6 +27,8 @@ interface PersistedAgentMetadata {
 	history?: AgentHistorySummary;
 	/** True when the file is only a SessionManager header (no session_init, no messages). */
 	incomplete?: boolean;
+	/** True when the prefix cannot describe a usable persisted transcript. */
+	invalid?: boolean;
 }
 
 interface PersistedTranscript {
@@ -246,8 +248,11 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 	let createdAt: number | undefined;
 	let activity: string | undefined;
 	let history: AgentHistorySummary = {};
+	let hasSessionHeader = false;
 	let hasSessionInit = false;
 	let hasConversation = false;
+	let malformed = false;
+	let readFailed = false;
 	try {
 		await visitEntriesFromFileStream(
 			sessionFile,
@@ -255,6 +260,7 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 				const record = recordOf(entry);
 				if (!record) return;
 				if (record.type === "session") {
+					hasSessionHeader ||= typeof record.id === "string";
 					createdAt ??= timestampOf(record.timestamp);
 					return;
 				}
@@ -288,18 +294,24 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 				};
 				return false;
 			},
-			{ maxRecords: MAX_METADATA_LINES },
+			{
+				maxRecords: MAX_METADATA_LINES,
+				onMalformedRecord: () => {
+					malformed = true;
+				},
+			},
 		);
 	} catch {
-		// A readable transcript is still useful even when its optional metadata
-		// prefix is malformed.
+		readFailed = true;
 	}
 	const [file, [hasOutput, hasPatch]] = await Promise.all([stat, artifactFiles]);
+	const invalid = readFailed || malformed || !hasSessionHeader;
 	return {
 		activity,
 		createdAt: createdAt ?? file?.birthtimeMs,
 		lastActivity: file?.mtimeMs,
-		incomplete: !hasSessionInit && !hasConversation,
+		incomplete: !invalid && !hasSessionInit && !hasConversation,
+		invalid,
 		history: {
 			...history,
 			...(hasOutput ? { outputPath } : {}),
@@ -324,6 +336,79 @@ async function readPersistedVibeChildIds(sessionFile: string, shouldContinue: ()
 	}
 }
 
+export interface PersistedSubagentRegistration {
+	id: string;
+	displayName: string;
+	parentId?: string;
+	sessionFile: string;
+}
+
+export type PersistedSubagentRegistrationResult = "registered" | "existing" | "tombstoned" | "incomplete" | "invalid";
+
+async function isPersistedAgentTombstoned(sessionFile: string): Promise<boolean | undefined> {
+	try {
+		await fs.promises.access(getAgentTombstonePath(sessionFile));
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		return undefined;
+	}
+}
+
+/**
+ * Register one persisted subagent transcript as a parked ref, including
+ * transcripts that live outside the root session's artifact directory.
+ */
+export async function registerPersistedSubagent(
+	registry: AgentRegistry,
+	input: PersistedSubagentRegistration,
+	options: { shouldContinue?: () => boolean } = {},
+): Promise<PersistedSubagentRegistrationResult> {
+	const shouldContinue = options.shouldContinue ?? (() => true);
+	if (!shouldContinue() || !input.id || !input.sessionFile.endsWith(".jsonl")) return "invalid";
+	if (registry.get(input.id)) return "existing";
+
+	const tombstonedBeforeRead = await isPersistedAgentTombstoned(input.sessionFile);
+	if (!shouldContinue() || tombstonedBeforeRead === undefined) return "invalid";
+	const metadata = await readPersistedAgentMetadata(input.sessionFile);
+	if (!shouldContinue() || metadata.invalid) return "invalid";
+	if (metadata.incomplete && !tombstonedBeforeRead) return "incomplete";
+
+	const history = await readPersistedAgentHistory(
+		{
+			id: input.id,
+			sessionFile: input.sessionFile,
+			createdAt: metadata.createdAt,
+			lastActivity: metadata.lastActivity,
+		},
+		shouldContinue,
+	);
+	if (!shouldContinue()) return "invalid";
+	// Metadata and history reads yield. A spawn can claim the id in the meantime;
+	// the final registry CAS must preserve that live generation untouched.
+	if (registry.get(input.id)) return "existing";
+	const tombstoned = await isPersistedAgentTombstoned(input.sessionFile);
+	if (!shouldContinue() || tombstoned === undefined) return "invalid";
+	const registered = registry.registerIfAvailable(
+		{
+			id: input.id,
+			displayName: input.displayName,
+			kind: "sub",
+			parentId: input.parentId ?? MAIN_AGENT_ID,
+			session: null,
+			sessionFile: input.sessionFile,
+			activity: metadata.activity,
+			createdAt: metadata.createdAt,
+			lastActivity: metadata.lastActivity,
+			history: { ...metadata.history, ...history },
+			status: tombstoned ? "aborted" : "parked",
+		},
+		null,
+	);
+	if (!registered) return "existing";
+	return tombstoned ? "tombstoned" : "registered";
+}
+
 /** Register persisted subagent and advisor transcripts as parked registry refs. */
 export async function registerPersistedSubagents(
 	registry: AgentRegistry,
@@ -336,15 +421,15 @@ export async function registerPersistedSubagents(
 	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile, shouldContinue);
 	if (!shouldContinue()) return;
 	const root = sessionFile.slice(0, -6);
-	const transcripts: PersistedTranscript[] = [];
-	await registerPersistedSubagentsFromDir(registry, root, undefined, vibeOwnedIds, transcripts, shouldContinue);
+	const advisorTranscripts: PersistedTranscript[] = [];
+	await registerPersistedSubagentsFromDir(registry, root, undefined, vibeOwnedIds, advisorTranscripts, shouldContinue);
 	if (!shouldContinue()) return;
 	let nextTranscript = 0;
-	const workers = Array.from({ length: Math.min(4, transcripts.length) }, async () => {
+	const workers = Array.from({ length: Math.min(4, advisorTranscripts.length) }, async () => {
 		for (;;) {
 			if (!shouldContinue()) return;
 			const index = nextTranscript++;
-			const transcript = transcripts[index];
+			const transcript = advisorTranscripts[index];
 			if (!transcript) return;
 			const history = await readPersistedAgentHistory(transcript, shouldContinue);
 			if (!shouldContinue()) return;
@@ -424,48 +509,12 @@ async function registerPersistedSubagentsFromDir(
 		}
 		const id = entry.name.slice(0, -6);
 		if (vibeOwnedIds.has(id) && registry.get(id)?.sessionFile !== sessionFile) continue;
-		let tombstoned = false;
-		try {
-			await fs.promises.access(getAgentTombstonePath(sessionFile));
-			tombstoned = true;
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
-		}
+		await registerPersistedSubagent(
+			registry,
+			{ id, displayName: id, parentId: parentId ?? MAIN_AGENT_ID, sessionFile },
+			{ shouldContinue },
+		);
 		if (!shouldContinue()) return;
-		if (!registry.get(id)) {
-			const metadata = await readPersistedAgentMetadata(sessionFile);
-			if (!shouldContinue()) return;
-			// Metadata reads yield. A spawn may claim the id while this scan is
-			// inspecting the file; never replace that live generation with a
-			// transcript-derived parked ref.
-			const unclaimed = !registry.get(id);
-			// SessionManager.open writes title+session before createAgentSession
-			// claims the id. Parking that stub makes the spawn's expectedAgentRef:null
-			// CAS fail with "already owned by another session generation".
-			if (unclaimed && metadata.incomplete && !tombstoned) continue;
-			if (unclaimed) {
-				registry.register({
-					id,
-					displayName: id,
-					kind: "sub",
-					parentId: parentId ?? MAIN_AGENT_ID,
-					session: null,
-					sessionFile,
-					activity: metadata.activity,
-					createdAt: metadata.createdAt,
-					lastActivity: metadata.lastActivity,
-					history: metadata.history,
-					status: tombstoned ? "aborted" : "parked",
-				});
-				const ref = registry.get(id);
-				transcripts.push({
-					id,
-					sessionFile,
-					createdAt: ref?.createdAt,
-					lastActivity: ref?.lastActivity,
-				});
-			}
-		}
 		await registerPersistedSubagentsFromDir(
 			registry,
 			path.join(dir, id),
