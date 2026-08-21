@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -15,6 +17,7 @@ describe("AgentSession persisted custom prompt", () => {
 	let authStorage: AuthStorage | undefined;
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.[Symbol.dispose]();
@@ -22,6 +25,23 @@ describe("AgentSession persisted custom prompt", () => {
 		authStorage = undefined;
 		tempDir = undefined;
 	});
+
+	function textFromProviderContent(content: unknown): string {
+		if (typeof content === "string") return content;
+		if (!Array.isArray(content)) return "";
+		return content
+			.filter(
+				(block): block is { type: "text"; text: string } =>
+					typeof block === "object" &&
+					block !== null &&
+					"type" in block &&
+					block.type === "text" &&
+					"text" in block &&
+					typeof block.text === "string",
+			)
+			.map(block => block.text)
+			.join("\n");
+	}
 
 	it("flushes a persisted custom prompt before the provider observes it without duplicating its entry", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
@@ -71,6 +91,148 @@ describe("AgentSession persisted custom prompt", () => {
 		expect(transcriptAtProviderStart.match(/resolution:r1/g)).toHaveLength(1);
 		releaseProvider.resolve();
 		await turn;
+		await sessionManager.flush();
+		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);
+		await sessionManager.close();
+	});
+
+	it("reserves the durable turn before its flush so a competing direct prompt cannot interleave", async () => {
+		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		await sessionManager.ensureOnDisk();
+		const flushEntered = Promise.withResolvers<void>();
+		const releaseFlush = Promise.withResolvers<void>();
+		const flush = sessionManager.flush.bind(sessionManager);
+		let flushCount = 0;
+		vi.spyOn(sessionManager, "flush").mockImplementation(async () => {
+			flushCount++;
+			if (flushCount === 1) {
+				flushEntered.resolve();
+				await releaseFlush.promise;
+			}
+			await flush();
+		});
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		const durableTurn = session.promptCustomMessagePersisted({
+			customType: "subagent-durable-follow-up",
+			content: "Use port 8080.",
+			display: true,
+			details: { deliveryKey: "resolution:r1" },
+			attribution: "user",
+		});
+		await flushEntered.promise;
+		try {
+			await expect(session.prompt("competing direct prompt")).rejects.toBeInstanceOf(AgentBusyError);
+			expect(mock.calls).toHaveLength(0);
+		} finally {
+			releaseFlush.resolve();
+			await durableTurn;
+		}
+		await sessionManager.close();
+	});
+
+	it("keeps the durable message singular through forced pre-prompt compaction", async () => {
+		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		const seedUser = {
+			role: "user" as const,
+			content: [{ type: "text" as const, text: "seed user context".repeat(40) }],
+			timestamp: Date.now() - 2,
+		};
+		const seedAssistant = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "seed assistant context".repeat(40) }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: Date.now() - 1,
+		};
+		sessionManager.appendMessage(seedUser);
+		sessionManager.appendMessage(seedAssistant);
+		await sessionManager.ensureOnDisk();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		const compact = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "pre-prompt compacted",
+			shortSummary: undefined,
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+		let durableMessagesAtProvider = 0;
+		const marker = "DURABLE-PORT-8080";
+		const mock = createMockModel({
+			handler: context => {
+				durableMessagesAtProvider = context.messages.reduce(
+					(count, message) =>
+						count + (textFromProviderContent(message.content).match(new RegExp(marker, "g"))?.length ?? 0),
+					0,
+				);
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [seedUser, seedAssistant] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.strategy": "context-full",
+				"compaction.thresholdTokens": 50,
+				"compaction.keepRecentTokens": 1,
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+		});
+
+		await session.promptCustomMessagePersisted({
+			customType: "subagent-durable-follow-up",
+			content: `${marker} ${"context filler ".repeat(120)}`,
+			display: true,
+			details: { deliveryKey: "resolution:r1" },
+			attribution: "user",
+		});
+
+		expect(compact).toHaveBeenCalledTimes(1);
+		expect(durableMessagesAtProvider).toBe(1);
 		await sessionManager.flush();
 		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);
 		await sessionManager.close();

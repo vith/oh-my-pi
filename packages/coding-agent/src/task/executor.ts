@@ -2652,6 +2652,151 @@ function isStructurallyValidSessionHeader(entry: unknown): boolean {
 	);
 }
 
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function isTextOrImageContentBlock(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	if (value.type === "text") return typeof value.text === "string";
+	return value.type === "image" && typeof value.data === "string" && typeof value.mimeType === "string";
+}
+
+function isTextOrImageContent(value: unknown): boolean {
+	return Array.isArray(value) && value.every(isTextOrImageContentBlock);
+}
+
+function isMessageContent(value: unknown): boolean {
+	return typeof value === "string" || isTextOrImageContent(value);
+}
+
+function isAssistantContentBlock(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	if (isTextOrImageContentBlock(value)) return true;
+	if (value.type === "thinking") return typeof value.thinking === "string";
+	if (value.type === "redactedThinking") return typeof value.data === "string";
+	if (value.type === "toolCall") {
+		return typeof value.id === "string" && typeof value.name === "string" && isRecord(value.arguments);
+	}
+	if (value.type === "fallback") {
+		return (
+			isRecord(value.from) &&
+			typeof value.from.model === "string" &&
+			isRecord(value.to) &&
+			typeof value.to.model === "string"
+		);
+	}
+	if (value.type === "anthropicServerTool") {
+		if (!isRecord(value.block) || typeof value.block.type !== "string") return false;
+		if (value.block.type === "server_tool_use") {
+			return typeof value.block.id === "string" && typeof value.block.name === "string";
+		}
+		return (
+			(value.block.type === "web_search_tool_result" || value.block.type === "tool_search_tool_result") &&
+			typeof value.block.tool_use_id === "string"
+		);
+	}
+	return false;
+}
+
+function isUsage(value: unknown): boolean {
+	if (!isRecord(value) || !isRecord(value.cost)) return false;
+	return (
+		isFiniteNumber(value.input) &&
+		isFiniteNumber(value.output) &&
+		isFiniteNumber(value.cacheRead) &&
+		isFiniteNumber(value.cacheWrite) &&
+		isFiniteNumber(value.totalTokens) &&
+		isFiniteNumber(value.cost.input) &&
+		isFiniteNumber(value.cost.output) &&
+		isFiniteNumber(value.cost.cacheRead) &&
+		isFiniteNumber(value.cost.cacheWrite) &&
+		isFiniteNumber(value.cost.total)
+	);
+}
+
+function isAttributedMessage(value: Record<string, unknown>): boolean {
+	return value.attribution === undefined || value.attribution === "user" || value.attribution === "agent";
+}
+
+function isStructurallyValidMessage(message: unknown): boolean {
+	if (!isRecord(message) || typeof message.role !== "string" || !isFiniteNumber(message.timestamp)) return false;
+	switch (message.role) {
+		case "user":
+		case "developer":
+			return isMessageContent(message.content) && isAttributedMessage(message);
+		case "assistant":
+			return (
+				Array.isArray(message.content) &&
+				message.content.every(isAssistantContentBlock) &&
+				typeof message.api === "string" &&
+				typeof message.provider === "string" &&
+				typeof message.model === "string" &&
+				isUsage(message.usage) &&
+				(message.stopReason === "stop" ||
+					message.stopReason === "length" ||
+					message.stopReason === "toolUse" ||
+					message.stopReason === "error" ||
+					message.stopReason === "aborted") &&
+				(message.stopDetails === undefined || message.stopDetails === null || isRecord(message.stopDetails))
+			);
+		case "toolResult":
+			return (
+				typeof message.toolCallId === "string" &&
+				typeof message.toolName === "string" &&
+				isTextOrImageContent(message.content) &&
+				typeof message.isError === "boolean" &&
+				isAttributedMessage(message)
+			);
+		case "custom":
+		case "hookMessage":
+			return (
+				typeof message.customType === "string" &&
+				isMessageContent(message.content) &&
+				typeof message.display === "boolean" &&
+				isAttributedMessage(message)
+			);
+		case "bashExecution":
+			return (
+				typeof message.command === "string" &&
+				typeof message.output === "string" &&
+				(message.exitCode === undefined || isFiniteNumber(message.exitCode)) &&
+				typeof message.cancelled === "boolean" &&
+				typeof message.truncated === "boolean"
+			);
+		case "pythonExecution":
+			return (
+				typeof message.code === "string" &&
+				typeof message.output === "string" &&
+				(message.exitCode === undefined || isFiniteNumber(message.exitCode)) &&
+				typeof message.cancelled === "boolean" &&
+				typeof message.truncated === "boolean"
+			);
+		case "fileMention":
+			return (
+				Array.isArray(message.files) &&
+				message.files.every(
+					file =>
+						isRecord(file) &&
+						typeof file.path === "string" &&
+						typeof file.content === "string" &&
+						(file.lineCount === undefined || isFiniteNumber(file.lineCount)) &&
+						(file.byteSize === undefined || isFiniteNumber(file.byteSize)) &&
+						(file.skippedReason === undefined ||
+							file.skippedReason === "tooLarge" ||
+							file.skippedReason === "binary") &&
+						(file.image === undefined || isTextOrImageContentBlock(file.image)),
+				)
+			);
+		case "branchSummary":
+			return typeof message.summary === "string" && typeof message.fromId === "string";
+		case "compactionSummary":
+			return typeof message.summary === "string" && isFiniteNumber(message.tokensBefore);
+		default:
+			return false;
+	}
+}
+
 /**
  * The streaming reader returns parsed JSON as FileEntry for caller ergonomics,
  * so inspection must restore the structural checks before walking parent ids.
@@ -2667,17 +2812,61 @@ function isStructurallyValidSessionEntry(entry: unknown): entry is SessionEntry 
 	) {
 		return false;
 	}
-	if (entry.type === "message") {
-		return isRecord(entry.message) && typeof entry.message.role === "string";
+	switch (entry.type) {
+		case "message":
+			return isStructurallyValidMessage(entry.message);
+		case "thinking_level_change":
+			return (
+				entry.thinkingLevel === undefined || entry.thinkingLevel === null || typeof entry.thinkingLevel === "string"
+			);
+		case "model_change":
+			return typeof entry.model === "string" && (entry.role === undefined || typeof entry.role === "string");
+		case "service_tier_change":
+			return "serviceTier" in entry && (entry.serviceTier === null || isRecord(entry.serviceTier));
+		case "compaction":
+			return (
+				typeof entry.summary === "string" &&
+				typeof entry.firstKeptEntryId === "string" &&
+				isFiniteNumber(entry.tokensBefore) &&
+				(entry.shortSummary === undefined || typeof entry.shortSummary === "string")
+			);
+		case "branch_summary":
+			return typeof entry.fromId === "string" && typeof entry.summary === "string";
+		case "custom":
+			return typeof entry.customType === "string";
+		case "custom_message":
+			return (
+				typeof entry.customType === "string" &&
+				isMessageContent(entry.content) &&
+				typeof entry.display === "boolean" &&
+				isAttributedMessage(entry)
+			);
+		case "label":
+			return typeof entry.targetId === "string" && (entry.label === undefined || typeof entry.label === "string");
+		case "title_change":
+			return (
+				typeof entry.title === "string" &&
+				(entry.previousTitle === undefined || typeof entry.previousTitle === "string") &&
+				(entry.source === "auto" || entry.source === "user")
+			);
+		case "ttsr_injection":
+			return Array.isArray(entry.injectedRules) && entry.injectedRules.every(rule => typeof rule === "string");
+		case "session_init":
+			return (
+				typeof entry.systemPrompt === "string" &&
+				typeof entry.task === "string" &&
+				Array.isArray(entry.tools) &&
+				entry.tools.every(tool => typeof tool === "string")
+			);
+		case "mode_change":
+			return typeof entry.mode === "string" && (entry.data === undefined || isRecord(entry.data));
+		case "credential_pin":
+			return typeof entry.provider === "string" && typeof entry.hash === "string";
+		case "reset_boundary":
+			return true;
+		default:
+			return false;
 	}
-	if (entry.type === "custom_message") {
-		return (
-			typeof entry.customType === "string" &&
-			(typeof entry.content === "string" || Array.isArray(entry.content)) &&
-			typeof entry.display === "boolean"
-		);
-	}
-	return true;
 }
 
 async function withDurableFollowUpLock<T>(id: string, deliveryKey: string, operation: () => Promise<T>): Promise<T> {
@@ -2726,7 +2915,11 @@ export async function inspectDurableFollowUp(sessionFile: string, deliveryKey: s
 				sawSessionHeader = true;
 				return;
 			}
-			if (!isStructurallyValidSessionEntry(entry) || entries.has(entry.id)) {
+			if (
+				!isStructurallyValidSessionEntry(entry) ||
+				entries.has(entry.id) ||
+				(entry.parentId !== null && !entries.has(entry.parentId))
+			) {
 				invalidEntries++;
 				return;
 			}

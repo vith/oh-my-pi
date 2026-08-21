@@ -5544,33 +5544,42 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 	): Promise<void> {
 		if (this.isStreaming) throw new AgentBusyError();
-		const textContent =
-			typeof message.content === "string"
-				? message.content
-				: message.content
-						.filter((content): content is TextContent => content.type === "text")
-						.map(content => content.text)
-						.join("");
-		const customMessage: CustomMessage<T> = {
-			role: "custom",
-			customType: message.customType,
-			content: message.content,
-			display: message.display,
-			details: message.details,
-			attribution: message.attribution ?? "agent",
-			timestamp: Date.now(),
-		};
+		this.#beginInFlight();
+		try {
+			const textContent =
+				typeof message.content === "string"
+					? message.content
+					: message.content
+							.filter((content): content is TextContent => content.type === "text")
+							.map(content => content.text)
+							.join("");
+			const customMessage: CustomMessage<T> = {
+				role: "custom",
+				customType: message.customType,
+				content: message.content,
+				display: message.display,
+				details: message.details,
+				attribution: message.attribution ?? "agent",
+				timestamp: Date.now(),
+			};
 
-		this.sessionManager.appendCustomMessageEntry(
-			customMessage.customType,
-			customMessage.content,
-			customMessage.display,
-			customMessage.details,
-			customMessage.attribution,
-		);
-		await this.sessionManager.flush();
-		this.#persistedCustomPromptMessages.add(customMessage);
-		await this.#promptWithMessage(customMessage, textContent);
+			await this.#promptWithMessage(customMessage, textContent, {
+				reservedInFlight: true,
+				beforeProvider: async () => {
+					this.sessionManager.appendCustomMessageEntry(
+						customMessage.customType,
+						customMessage.content,
+						customMessage.display,
+						customMessage.details,
+						customMessage.attribution,
+					);
+					await this.sessionManager.flush();
+					this.#persistedCustomPromptMessages.add(customMessage);
+				},
+			});
+		} finally {
+			this.#endInFlight();
+		}
 	}
 
 	async #promptWithMessage(
@@ -5580,9 +5589,14 @@ export class AgentSession {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
+			/** The caller already reserved the prompt before an awaited setup boundary. */
+			reservedInFlight?: boolean;
+			/** Runs after normal setup and compaction, immediately before the provider path. */
+			beforeProvider?: () => Promise<void>;
 		},
 	): Promise<void> {
-		this.#beginInFlight();
+		const ownsInFlight = options?.reservedInFlight !== true;
+		if (ownsInFlight) this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		try {
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
@@ -5783,6 +5797,14 @@ export class AgentSession {
 				nonMessageTokens,
 				cutoffCount: this.messages.length + messages.length,
 			});
+			if (options?.beforeProvider) {
+				await options.beforeProvider();
+				// The durable append is authoritative once the before-provider boundary
+				// completes. A later abort must not start the provider, but recovery can
+				// safely observe the persisted message as appended.
+				if (this.#isDisposed || this.#promptGeneration !== generation) return;
+			}
+
 			// Commit the plan-reference delivery flag only now that the message is
 			// actually handed to agent.prompt. Every pre-send setup step above can
 			// return (generation-bail) or throw (@-mention reads, before_agent_start
@@ -5806,7 +5828,7 @@ export class AgentSession {
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
-			this.#endInFlight();
+			if (ownsInFlight) this.#endInFlight();
 		}
 	}
 
