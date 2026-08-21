@@ -90,7 +90,7 @@ export interface SubagentLifecyclePayload {
 	agent: string;
 	agentSource: AgentSource;
 	description?: string;
-	status: "started" | "completed" | "failed" | "aborted";
+	status: "started" | "paused" | "completed" | "failed" | "aborted";
 	sessionFile?: string;
 	parentToolCallId?: string;
 	index: number;
@@ -400,7 +400,7 @@ export interface AgentProgress {
 	id: string;
 	agent: string;
 	agentSource: AgentSource;
-	status: "pending" | "running" | "completed" | "failed" | "aborted";
+	status: "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
 	task: string;
 	assignment?: string;
 	description?: string;

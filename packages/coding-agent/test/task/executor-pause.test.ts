@@ -12,7 +12,11 @@ import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/p
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { subprocessToolRegistry } from "@oh-my-pi/pi-coding-agent/task/subprocess-tool-registry";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import {
+	type AgentDefinition,
+	type SubagentLifecyclePayload,
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+} from "@oh-my-pi/pi-coding-agent/task/types";
 import "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -206,6 +210,11 @@ describe("runSubprocess recoverable terminal pause", () => {
 		const toolName = "test_pause_extension";
 		const firstToolCallId = "pause-first";
 		const sessionFile = path.join(tempDir.path(), `${id}.jsonl`);
+		const eventBus = new EventBus();
+		const lifecycleStatuses: SubagentLifecyclePayload["status"][] = [];
+		eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, event => {
+			lifecycleStatuses.push((event as SubagentLifecyclePayload).status);
+		});
 		subprocessToolRegistry.register(toolName, {
 			terminalDisposition: event => (event.isError ? undefined : "pause"),
 			// A disposition must win over this compatibility handler: the old
@@ -224,7 +233,7 @@ describe("runSubprocess recoverable terminal pause", () => {
 		mockCreateAgentSession(harness);
 		registerRunning(id, harness.session, sessionFile);
 
-		const result = await runSubprocess(options(id));
+		const result = await runSubprocess({ ...options(id), eventBus });
 
 		const jsonlEntries = (await Bun.file(sessionFile).text())
 			.trim()
@@ -247,9 +256,72 @@ describe("runSubprocess recoverable terminal pause", () => {
 		expect(harness.prompts).toHaveLength(1);
 		expect(harness.abortCalls()).toBe(1);
 		expect(harness.disposeCalls()).toBe(0);
+		expect(lifecycleStatuses).toEqual(["started", "paused"]);
 		expect(AgentRegistry.global().get(id)?.status).toBe("idle");
 		expect(AgentLifecycleManager.global().has(id)).toBe(true);
 		expect(await AgentLifecycleManager.global().ensureLive(id)).toBe(harness.session);
+	});
+
+	it("stops immediately when a synthetic yield reminder pauses", async () => {
+		const id = "ReminderPausedExtension";
+		const toolName = "test_reminder_pause_extension";
+		subprocessToolRegistry.register(toolName, {
+			terminalDisposition: event => (event.isError ? undefined : "pause"),
+		});
+		const harness = createPauseSession(({ promptIndex, harness: session }) => {
+			if (promptIndex === 1) {
+				session.recordAssistant([]);
+				return;
+			}
+			if (promptIndex === 2) {
+				session.recordAssistant([{ id: "pause-from-reminder", name: toolName }]);
+				session.recordToolResult("pause-from-reminder", toolName, false);
+			}
+		});
+		mockCreateAgentSession(harness);
+		registerRunning(id, harness.session, path.join(tempDir.path(), `${id}.jsonl`));
+
+		const result = await runSubprocess(options(id));
+
+		expect(result.paused).toEqual({ toolName, toolCallId: "pause-from-reminder" });
+		expect(harness.prompts).toHaveLength(2);
+	});
+
+	it("does not settle async work after a pause from the async-pending notice", async () => {
+		const id = "AsyncNoticePausedExtension";
+		const toolName = "test_async_notice_pause_extension";
+		let pending = true;
+		let settleCalls = 0;
+		subprocessToolRegistry.register(toolName, {
+			terminalDisposition: event => (event.isError ? undefined : "pause"),
+		});
+		const harness = createPauseSession(({ promptIndex, harness: session }) => {
+			if (promptIndex === 1) {
+				session.recordAssistant([{ id: "yield-before-notice", name: "yield" }]);
+				session.recordToolResult("yield-before-notice", "yield", false);
+				return;
+			}
+			if (promptIndex === 2) {
+				session.recordAssistant([{ id: "pause-from-async-notice", name: toolName }]);
+				session.recordToolResult("pause-from-async-notice", toolName, false);
+			}
+		});
+		Object.assign(harness.session, {
+			hasPendingAsyncWork: () => pending,
+			getAsyncJobSnapshot: () => ({ running: [{ id: "extension-request" }] }),
+			settleAsyncWork: async () => {
+				settleCalls++;
+				pending = false;
+			},
+		});
+		mockCreateAgentSession(harness);
+		registerRunning(id, harness.session, path.join(tempDir.path(), `${id}.jsonl`));
+
+		const result = await runSubprocess(options(id));
+
+		expect(result.paused).toEqual({ toolName, toolCallId: "pause-from-async-notice" });
+		expect(harness.prompts).toHaveLength(2);
+		expect(settleCalls).toBe(0);
 	});
 
 	it("does not pause when a terminal-disposition tool result is an error", async () => {

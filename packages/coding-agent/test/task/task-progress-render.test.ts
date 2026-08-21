@@ -261,6 +261,47 @@ describe("task progress rendering", () => {
 		expect(row).not.toContain(theme.fg("accent", titlePart));
 	});
 
+	it("labels paused rows and finalized results as paused rather than completed", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const progressRow = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: detailsFor(runningProgress({ id: "PausedProgress", status: "paused" })),
+					},
+					options,
+					theme,
+				),
+				"PausedProgress",
+			),
+		);
+		const resultRow = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: {
+							projectAgentsDir: null,
+							results: [
+								finishedResult({ id: "PausedResult", paused: { toolName: "extension", toolCallId: "call-1" } }),
+							],
+							totalDurationMs: 0,
+						},
+					},
+					options,
+					theme,
+				),
+				"PausedResult",
+			),
+		);
+
+		expect(progressRow).toContain("paused");
+		expect(resultRow).toContain("paused");
+		expect(resultRow).not.toContain("done");
+	});
+
 	it("shows the dispatch glyph in the header while agents run, not a spinner", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };

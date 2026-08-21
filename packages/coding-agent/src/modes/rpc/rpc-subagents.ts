@@ -39,7 +39,7 @@ function statusFromLifecycle(status: SubagentLifecyclePayload["status"]): AgentP
 }
 
 function isTerminalLifecycleStatus(status: SubagentLifecyclePayload["status"]): boolean {
-	return status !== "started";
+	return status !== "started" && status !== "paused";
 }
 
 function hasSameOwner(

@@ -214,6 +214,18 @@ describe("subagent HUD lines", () => {
 		expect(out).not.toContain("Inline");
 	});
 
+	it("retains paused lifecycle snapshots without presenting them as active work", () => {
+		const eventBus = new EventBus();
+		const registry = new SessionObserverRegistry();
+		registry.subscribeToEventBus(eventBus);
+		const lifecycle = makeLifecycle("Paused", 0, "waiting on extension", true);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...lifecycle, status: "paused" });
+
+		expect(registry.getSession("Paused")).toMatchObject({ status: "paused", detached: true });
+		expect(renderSubagentHudLines(registry.getSessions(), 120)).toEqual([]);
+	});
+
 	it("renders nested ids as a breadcrumb and truncates long descriptions to the viewport", () => {
 		const out = render([makeSession({ id: "Anna.Bob", description: `start ${"x".repeat(300)} end` })], 60);
 		expect(out).toContain("Anna>Bob:");

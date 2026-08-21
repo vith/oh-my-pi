@@ -76,6 +76,8 @@ function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFra
 			return formatStatusIcon("pending", theme);
 		case "running":
 			return formatStatusIcon("running", theme, spinnerFrame);
+		case "paused":
+			return formatStatusIcon("pending", theme);
 		case "completed":
 			return formatStatusIcon("success", theme);
 		case "failed":
@@ -903,9 +905,11 @@ function renderAgentProgress(
 	const iconColor =
 		progress.status === "completed"
 			? "success"
-			: progress.status === "failed" || progress.status === "aborted"
-				? "error"
-				: "accent";
+			: progress.status === "paused"
+				? "warning"
+				: progress.status === "failed" || progress.status === "aborted"
+					? "error"
+					: "accent";
 
 	// Main status line: id: description [status] · stats · ⟨agent⟩
 	const trimmedDescription = progress.description?.trim();
@@ -941,6 +945,8 @@ function renderAgentProgress(
 	// the operationally meaningful state.
 	if (progress.retryState && progress.status === "running") {
 		statusLine += ` ${formatBadge("retrying", "warning", theme)}`;
+	} else if (progress.status === "paused") {
+		statusLine += ` ${formatBadge("paused", "warning", theme)}`;
 	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
 		statusLine += ` ${formatBadge("rate-limited", "error", theme)}`;
 	} else if (progress.status === "failed" || progress.status === "aborted") {
@@ -1223,26 +1229,31 @@ function renderAgentResult(
 
 	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = extractMissingYieldWarning(result.output);
 	const aborted = result.aborted ?? false;
-	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
-	const success = !aborted && result.exitCode === 0 && !result.error;
+	const paused = result.paused !== undefined;
+	const mergeFailed = !aborted && !paused && result.exitCode === 0 && !!result.error;
+	const success = !aborted && !paused && result.exitCode === 0 && !result.error;
 	const needsWarning = Boolean(missingCompleteWarning) && success;
 	const icon = aborted
 		? theme.status.aborted
-		: needsWarning
-			? theme.status.warning
-			: success
-				? theme.styledSymbol("status.done", "text")
-				: theme.status.error;
-	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
+		: paused
+			? theme.status.pending
+			: needsWarning
+				? theme.status.warning
+				: success
+					? theme.styledSymbol("status.done", "text")
+					: theme.status.error;
+	const iconColor = paused || needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
 	const statusText = aborted
 		? "aborted"
-		: needsWarning
-			? "warning"
-			: success
-				? "done"
-				: mergeFailed
-					? "merge failed"
-					: "failed";
+		: paused
+			? "paused"
+			: needsWarning
+				? "warning"
+				: success
+					? "done"
+					: mergeFailed
+						? "merge failed"
+						: "failed";
 
 	// Main status line: id: description [status] · stats · ⟨agent⟩
 	const trimmedDescription = result.description ? sanitizeText(result.description).trim() : undefined;
@@ -1388,9 +1399,9 @@ function renderAgentResult(
 		lines.push(...deferredToolLines);
 	}
 
-	if (result.patchPath && !aborted && result.exitCode === 0) {
+	if (result.patchPath && !aborted && !paused && result.exitCode === 0) {
 		lines.push(`${continuePrefix}${theme.fg("dim", `Patch: ${result.patchPath}`)}`);
-	} else if (result.branchName && !aborted && result.exitCode === 0) {
+	} else if (result.branchName && !aborted && !paused && result.exitCode === 0) {
 		lines.push(`${continuePrefix}${theme.fg("dim", `Branch: ${result.branchName}`)}`);
 	}
 
@@ -1438,6 +1449,7 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 	const counts: Record<AgentProgress["status"], number> = {
 		pending: 0,
 		running: 0,
+		paused: 0,
 		completed: 0,
 		failed: 0,
 		aborted: 0,
@@ -1447,6 +1459,7 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 	if (counts.completed > 0) parts.push(theme.fg("dim", `${counts.completed} done`));
 	if (counts.running > 0) parts.push(theme.fg("dim", `${counts.running} running`));
 	if (counts.pending > 0) parts.push(theme.fg("dim", `${counts.pending} pending`));
+	if (counts.paused > 0) parts.push(theme.fg("warning", `${counts.paused} paused`));
 	if (counts.failed > 0) parts.push(theme.fg("error", `${counts.failed} failed`));
 	if (counts.aborted > 0) parts.push(theme.fg("error", `${counts.aborted} aborted`));
 	const breakdown =

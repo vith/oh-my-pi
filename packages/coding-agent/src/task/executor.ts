@@ -1942,6 +1942,7 @@ async function driveSessionToYield(
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
 			while (!monitor.yieldCalled() && retryCount < MAX_YIELD_RETRIES && !abortSignal.aborted) {
+				if (monitor.pauseRequested()) return;
 				// A budget stop collapses the reminder ladder to a single forced
 				// final yield: wait for the stop's session abort to settle, then
 				// prompt once with the wrap-up reminder + named tool choice.
@@ -1949,7 +1950,7 @@ async function driveSessionToYield(
 				if (budgetStop) {
 					retryCount = MAX_YIELD_RETRIES - 1;
 					await monitor.waitForBudgetStop();
-					if (monitor.yieldCalled() || abortSignal.aborted) break;
+					if (monitor.pauseRequested() || monitor.yieldCalled() || abortSignal.aborted) break;
 				}
 				// Skip reminders when the model returned a terminal error (e.g.
 				// rate-limit cap hit, auth failure). Re-prompting would just
@@ -1973,8 +1974,11 @@ async function driveSessionToYield(
 							...(isFinalRetry && reminderToolChoice ? { toolChoice: reminderToolChoice } : {}),
 						}),
 					);
+					if (monitor.pauseRequested()) return;
 					await awaitAbortable(session.waitForIdle());
+					if (monitor.pauseRequested()) return;
 				} catch (err) {
+					if (monitor.pauseRequested()) return;
 					if (abortSignal.aborted || err instanceof ToolAbortError) {
 						// Benign control-flow exit — user cancel (^C) or compaction aborting
 						// pending operations both surface here as ToolAbortError. The outer
@@ -2017,8 +2021,14 @@ async function driveSessionToYield(
 		// still cancels and awaits their jobs before worktree capture.
 		let asyncPendingNoticeSent = false;
 		while (!abortSignal.aborted) {
+			if (monitor.pauseRequested()) {
+				return { exitCode: 0, aborted: false };
+			}
 			if (!monitor.yieldCalled()) {
 				await runYieldLadder();
+				if (monitor.pauseRequested()) {
+					return { exitCode: 0, aborted: false };
+				}
 				// Ladder exhausted / terminal model error: classified below
 				// (missing yield, or stale yield when one was invalidated).
 				if (!monitor.yieldCalled()) break;
@@ -2026,6 +2036,9 @@ async function driveSessionToYield(
 			// Let the parked yield's turn-stop session abort settle before
 			// prompting again (mirrors waitForBudgetStop).
 			await awaitAbortable(monitor.waitForYieldTurnStop());
+			if (monitor.pauseRequested()) {
+				return { exitCode: 0, aborted: false };
+			}
 			if (!session.hasPendingAsyncWork()) break;
 			if (!asyncPendingNoticeSent) {
 				asyncPendingNoticeSent = true;
@@ -2039,8 +2052,17 @@ async function driveSessionToYield(
 					});
 					try {
 						await awaitAbortable(session.prompt(notice, { attribution: "agent", synthetic: true }));
+						if (monitor.pauseRequested()) {
+							return { exitCode: 0, aborted: false };
+						}
 						await awaitAbortable(session.waitForIdle());
+						if (monitor.pauseRequested()) {
+							return { exitCode: 0, aborted: false };
+						}
 					} catch (err) {
+						if (monitor.pauseRequested()) {
+							return { exitCode: 0, aborted: false };
+						}
 						if (abortSignal.aborted || err instanceof ToolAbortError) throw err;
 						// A failed notice turn must not kill the run — fall through
 						// to the passive settle below.
@@ -2054,12 +2076,18 @@ async function driveSessionToYield(
 				}
 			}
 			await awaitAbortable(session.settleAsyncWork());
+			if (monitor.pauseRequested()) {
+				return { exitCode: 0, aborted: false };
+			}
 			// Results delivered during the settle invalidated the recorded
 			// yield: the next iteration's ladder demands a fresh one.
 		}
 
 		if (!monitor.yieldCalled()) {
 			await awaitAbortable(session.waitForIdle());
+			if (monitor.pauseRequested()) {
+				return { exitCode: 0, aborted: false };
+			}
 		}
 
 		const lastAssistant = session.getLastAssistantMessage();
@@ -2251,7 +2279,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						? monitor.resolveSignalAbortReason()
 						: monitor.resolveAbortReasonText()
 		: undefined;
-	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
+	progress.status = paused ? "paused" : wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
 	monitor.scheduleProgress(true);
 
 	// Emit lifecycle end event after finalization so yield status is reflected
@@ -2263,7 +2291,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			detached: args.detached,
 			agentSource: agent.source,
 			description: progress.description,
-			status: progress.status as "completed" | "failed" | "aborted",
+			status: progress.status as "paused" | "completed" | "failed" | "aborted",
 			sessionFile: args.sessionFile,
 			index,
 		});

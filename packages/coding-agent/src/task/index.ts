@@ -1028,11 +1028,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const spawn = syncSpawns[position];
 			const result = merged.results.find(r => r.id === spawn.agentId);
 			if (result) {
-				spawn.progress.status = result.aborted
-					? "aborted"
-					: result.exitCode === 0 && !result.error
-						? "completed"
-						: "failed";
+				spawn.progress.status = result.paused
+					? "paused"
+					: result.aborted
+						? "aborted"
+						: result.exitCode === 0 && !result.error
+							? "completed"
+							: "failed";
 				spawn.progress.durationMs = result.durationMs;
 			} else {
 				spawn.progress.status = payloads[position] ? "failed" : "aborted";
@@ -1071,8 +1073,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}): string {
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
-		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
-			if (aborted) {
+		const buildFollowUpHint = async (outcome: "aborted" | "paused" | "completed"): Promise<string> => {
+			if (outcome === "aborted") {
 				const ref = AgentRegistry.global().get(agentId);
 				const transcript = (await hasResolvableTranscript(agentId))
 					? `transcript at history://${agentId}`
@@ -1082,6 +1084,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					return `\n\n${agentId} was stopped but is still resumable — ${followUp}${transcript}`;
 				}
 				return `\n\n${agentId} was aborted — ${transcript}`;
+			}
+			if (outcome === "paused") {
+				const followUp = ircEnabled ? "message it via `hub` to resume; " : "";
+				return `\n\n${agentId} is paused and resumable — ${followUp}transcript at history://${agentId}`;
 			}
 			const followUp = ircEnabled ? "message it via `hub` to follow up; " : "";
 			return `\n\n${agentId} is now idle — ${followUp}transcript at history://${agentId}`;
@@ -1171,7 +1177,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// A missing result means the sync path failed at the tool level
 					// (results: []) — treat it as a failure, not success.
 					const resultFailed = !singleResult || (singleResult.aborted ?? false) || singleResult.exitCode !== 0;
-					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
+					progress.status = singleResult?.paused
+						? "paused"
+						: singleResult?.aborted
+							? "aborted"
+							: resultFailed
+								? "failed"
+								: "completed";
 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
 					progress.tokens = singleResult?.tokens ?? 0;
 					progress.requests = singleResult?.requests ?? 0;
@@ -1193,9 +1205,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					onSettled?.(resultFailed);
 					const statusText = resultFailed
 						? `Background task ${agentId} failed.`
-						: `Background task ${agentId} complete.`;
+						: singleResult?.paused
+							? `Background task ${agentId} paused.`
+							: `Background task ${agentId} complete.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
+					const deliveryText = `${finalText}${await buildFollowUpHint(
+						singleResult?.paused ? "paused" : singleResult?.aborted ? "aborted" : "completed",
+					)}`;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
 						throw new TaskJobError(deliveryText);
@@ -1211,7 +1227,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint("completed") : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();
@@ -1478,13 +1494,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		totalDurationMs: number,
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
-		const status = result.aborted
-			? "cancelled"
-			: result.exitCode === 0 && result.error
-				? "merge failed"
-				: result.exitCode === 0
-					? "completed"
-					: `failed (exit ${result.exitCode})`;
+		const status = result.paused
+			? "paused"
+			: result.aborted
+				? "cancelled"
+				: result.exitCode === 0 && result.error
+					? "merge failed"
+					: result.exitCode === 0
+						? "completed"
+						: `failed (exit ${result.exitCode})`;
 		const output = formatResultOutputFallback(result);
 		const outputCharCount = result.outputMeta?.charCount ?? output.length;
 		const fullOutputThreshold = 5000;
