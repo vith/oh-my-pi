@@ -101,7 +101,7 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 	return out;
 }
 
-type AgentEventStatus = "pending" | "running" | "completed" | "failed" | "aborted";
+type AgentEventStatus = "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
 
 /**
  * Append or replace a status event. `agent` events are progress snapshots keyed
@@ -133,6 +133,7 @@ function agentEventStatus(value: unknown): AgentEventStatus {
 	switch (value) {
 		case "pending":
 		case "running":
+		case "paused":
 		case "completed":
 		case "failed":
 		case "aborted":
@@ -186,15 +187,23 @@ function renderAgentProgressEvents(events: EvalStatusEvent[], theme: Theme, spin
 		const iconStatus =
 			status === "completed"
 				? "done"
-				: status === "failed"
-					? "error"
-					: status === "aborted"
-						? "aborted"
-						: status === "pending"
-							? "pending"
-							: "running";
+				: status === "paused"
+					? "pending"
+					: status === "failed"
+						? "error"
+						: status === "aborted"
+							? "aborted"
+							: status === "pending"
+								? "pending"
+								: "running";
 		const iconColor =
-			status === "completed" ? "success" : status === "failed" || status === "aborted" ? "error" : "accent";
+			status === "completed"
+				? "success"
+				: status === "paused"
+					? "warning"
+					: status === "failed" || status === "aborted"
+						? "error"
+						: "accent";
 		const icon =
 			status === "completed"
 				? theme.styledSymbol("tool.eval", "accent")
@@ -203,7 +212,7 @@ function renderAgentProgressEvents(events: EvalStatusEvent[], theme: Theme, spin
 		const id = eventString(event.id) ?? "agent";
 		let line = `${prefix} ${icon} ${theme.fg("accent", theme.bold(id))}`;
 
-		if (status === "failed" || status === "aborted") {
+		if (status === "paused" || status === "failed" || status === "aborted") {
 			line += ` ${formatBadge(status, iconColor, theme)}`;
 		}
 
@@ -215,7 +224,7 @@ function renderAgentProgressEvents(events: EvalStatusEvent[], theme: Theme, spin
 		}
 
 		line += formatAgentStats(event, theme);
-		if (status === "completed" || status === "failed" || status === "aborted") {
+		if (status === "paused" || status === "completed" || status === "failed" || status === "aborted") {
 			const durationMs = eventNumber(event.durationMs);
 			if (durationMs > 0) line += `${theme.sep.dot}${theme.fg("dim", formatDuration(durationMs))}`;
 		}

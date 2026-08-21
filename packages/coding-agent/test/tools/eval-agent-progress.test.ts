@@ -114,6 +114,25 @@ describe("eval renderer: agent() progress below the cell box", () => {
 		expect(below).toContain("$0.06");
 	});
 
+	it("renders a paused subagent as paused without a running spinner", () => {
+		const event: EvalStatusEvent = {
+			op: "agent",
+			id: "0-Paused",
+			agent: "task",
+			status: "paused",
+			taskPreview: "waiting for extension",
+			durationMs: 1500,
+		};
+
+		const lines = render([event], "complete");
+		const below = lines.slice(boxBottomIndex(lines) + 1).join("\n");
+
+		expect(below).toContain("0-Paused");
+		expect(below).toContain("paused");
+		expect(below).not.toContain(theme.getSpinnerFrames("status")[0]);
+		expect(below).not.toContain("waiting for extension");
+	});
+
 	it("renders one line per subagent for a parallel fan-out", () => {
 		const events: EvalStatusEvent[] = [
 			{ op: "agent", id: "0-Alpha", agent: "task", status: "running", lastIntent: "scanning" },

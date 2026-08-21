@@ -1539,12 +1539,14 @@ export function renderResult(
 	let abortedCount = 0;
 	let failCount = 0;
 	let mergeFailedCount = 0;
+	let pausedCount = 0;
 	let successCount = 0;
 	let requestTotal = 0;
 	if (hasResults) {
 		for (const r of details.results) {
 			requestTotal += r.requests ?? 0;
-			if (r.aborted) abortedCount++;
+			if (r.paused) pausedCount++;
+			else if (r.aborted) abortedCount++;
 			else if (r.exitCode !== 0) failCount++;
 			else if (r.error) mergeFailedCount++;
 			else successCount++;
@@ -1553,9 +1555,16 @@ export function renderResult(
 	const aborted = abortedCount > 0;
 	const failed = failCount > 0;
 	const mergeFailed = mergeFailedCount > 0;
+	const paused = pausedCount > 0;
 	const isError = aborted || failed;
 	const agentCount = hasResults ? details.results.length : (details.progress?.length ?? 0);
-	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
+	const icon: ToolUIStatus = options.isPartial
+		? "running"
+		: isError
+			? "error"
+			: mergeFailed || paused
+				? "warning"
+				: "success";
 	// Header meta is the spawn count only; each row carries its own ⟨agent⟩
 	// badge, so a joined type list here would repeat them. Before anything
 	// spawns, fall back to the flat form's agent type from the call args.
@@ -1634,6 +1643,7 @@ export function renderResult(
 
 			const summaryParts: string[] = [];
 			if (abortedCount > 0) summaryParts.push(theme.fg("error", `${abortedCount} aborted`));
+			if (pausedCount > 0) summaryParts.push(theme.fg("warning", `${pausedCount} paused`));
 			if (successCount > 0) summaryParts.push(theme.fg("success", `${successCount} succeeded`));
 			if (mergeFailedCount > 0) summaryParts.push(theme.fg("warning", `${mergeFailedCount} merge failed`));
 			if (failCount > 0) summaryParts.push(theme.fg("error", `${failCount} failed`));
@@ -1649,7 +1659,7 @@ export function renderResult(
 			);
 		}
 
-		const state = isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
+		const state = isPartial ? "running" : isError ? "error" : mergeFailed || paused ? "warning" : "success";
 		const borderColor = isError ? "error" : "borderMuted";
 
 		if (lines.length === 0) {
