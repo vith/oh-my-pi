@@ -2622,8 +2622,82 @@ export interface DurableFollowUpTurnOptions extends Omit<FollowUpTurnOptions, "m
 
 const DURABLE_FOLLOW_UP_CUSTOM_TYPE = "subagent-durable-follow-up";
 
+const DURABLE_FOLLOW_UP_ENTRY_TYPES = new Set<SessionEntry["type"]>([
+	"message",
+	"thinking_level_change",
+	"model_change",
+	"service_tier_change",
+	"compaction",
+	"branch_summary",
+	"custom",
+	"custom_message",
+	"label",
+	"title_change",
+	"ttsr_injection",
+	"session_init",
+	"mode_change",
+	"credential_pin",
+	"reset_boundary",
+]);
+
+const durableFollowUpLockTails = new Map<string, Promise<void>>();
+
+function isStructurallyValidSessionHeader(entry: unknown): boolean {
+	return (
+		isRecord(entry) &&
+		entry.type === "session" &&
+		typeof entry.id === "string" &&
+		typeof entry.timestamp === "string" &&
+		typeof entry.cwd === "string"
+	);
+}
+
+/**
+ * The streaming reader returns parsed JSON as FileEntry for caller ergonomics,
+ * so inspection must restore the structural checks before walking parent ids.
+ */
+function isStructurallyValidSessionEntry(entry: unknown): entry is SessionEntry {
+	if (
+		!isRecord(entry) ||
+		typeof entry.type !== "string" ||
+		!DURABLE_FOLLOW_UP_ENTRY_TYPES.has(entry.type as SessionEntry["type"]) ||
+		typeof entry.id !== "string" ||
+		(entry.parentId !== null && typeof entry.parentId !== "string") ||
+		typeof entry.timestamp !== "string"
+	) {
+		return false;
+	}
+	if (entry.type === "message") {
+		return isRecord(entry.message) && typeof entry.message.role === "string";
+	}
+	if (entry.type === "custom_message") {
+		return (
+			typeof entry.customType === "string" &&
+			(typeof entry.content === "string" || Array.isArray(entry.content)) &&
+			typeof entry.display === "boolean"
+		);
+	}
+	return true;
+}
+
+async function withDurableFollowUpLock<T>(id: string, deliveryKey: string, operation: () => Promise<T>): Promise<T> {
+	const lockKey = JSON.stringify([id, deliveryKey]);
+	const predecessor = durableFollowUpLockTails.get(lockKey) ?? Promise.resolve();
+	const completion = Promise.withResolvers<void>();
+	durableFollowUpLockTails.set(lockKey, completion.promise);
+	await predecessor;
+	try {
+		return await operation();
+	} finally {
+		completion.resolve();
+		if (durableFollowUpLockTails.get(lockKey) === completion.promise) {
+			durableFollowUpLockTails.delete(lockKey);
+		}
+	}
+}
+
 function isDurableFollowUpEntry(entry: SessionEntry, deliveryKey: string): boolean {
-	if (entry.type !== "custom_message") return false;
+	if (entry.type !== "custom_message" || entry.customType !== DURABLE_FOLLOW_UP_CUSTOM_TYPE) return false;
 	const details = entry.details;
 	return (
 		typeof details === "object" && details !== null && "deliveryKey" in details && details.deliveryKey === deliveryKey
@@ -2639,10 +2713,23 @@ export async function inspectDurableFollowUp(sessionFile: string, deliveryKey: s
 	const entries = new Map<string, SessionEntry>();
 	let leafId: string | null = null;
 	let malformedRecords = 0;
+	let invalidEntries = 0;
+	let sawSessionHeader = false;
 	await visitEntriesFromFileStream(
 		sessionFile,
 		entry => {
-			if (entry.type === "session") return;
+			if (!sawSessionHeader) {
+				if (!isStructurallyValidSessionHeader(entry)) {
+					invalidEntries++;
+					return;
+				}
+				sawSessionHeader = true;
+				return;
+			}
+			if (!isStructurallyValidSessionEntry(entry) || entries.has(entry.id)) {
+				invalidEntries++;
+				return;
+			}
 			entries.set(entry.id, entry);
 			leafId = entry.id;
 		},
@@ -2657,14 +2744,31 @@ export async function inspectDurableFollowUp(sessionFile: string, deliveryKey: s
 			`Cannot inspect durable follow-up in ${sessionFile}: transcript contains malformed JSONL records.`,
 		);
 	}
+	if (invalidEntries > 0) {
+		throw new Error(
+			`Cannot inspect durable follow-up in ${sessionFile}: transcript contains invalid session entries.`,
+		);
+	}
 
 	const activeBranch: SessionEntry[] = [];
 	const seen = new Set<string>();
 	let current = leafId ? entries.get(leafId) : undefined;
-	while (current && !seen.has(current.id)) {
+	while (current) {
+		if (seen.has(current.id)) {
+			throw new Error(
+				`Cannot inspect durable follow-up in ${sessionFile}: transcript contains an invalid parent cycle.`,
+			);
+		}
 		seen.add(current.id);
 		activeBranch.push(current);
-		current = current.parentId ? entries.get(current.parentId) : undefined;
+		if (current.parentId === null) break;
+		const parent = entries.get(current.parentId);
+		if (!parent) {
+			throw new Error(
+				`Cannot inspect durable follow-up in ${sessionFile}: transcript contains an invalid parent link.`,
+			);
+		}
+		current = parent;
 	}
 	activeBranch.reverse();
 
@@ -2813,31 +2917,34 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 export async function runDurableSubagentFollowUpTurn(
 	options: DurableFollowUpTurnOptions,
 ): Promise<DurableFollowUpResult> {
-	const ref = AgentRegistry.global().get(options.id);
-	const sessionFile = ref?.sessionFile;
-	if (!sessionFile) {
-		throw new Error(
-			`Cannot deliver durable follow-up to ${options.id}: the subagent has no persisted session transcript.`,
-		);
-	}
+	return withDurableFollowUpLock(options.id, options.deliveryKey, async () => {
+		const ref = AgentRegistry.global().get(options.id);
+		const sessionFile = ref?.sessionFile;
+		if (!sessionFile) {
+			throw new Error(
+				`Cannot deliver durable follow-up to ${options.id}: the subagent has no persisted session transcript.`,
+			);
+		}
 
-	const state = await inspectDurableFollowUp(sessionFile, options.deliveryKey);
-	if (state === "answered") return { delivery: "already-answered" };
-	if (state === "appended") return { delivery: "already-appended" };
+		const state = await inspectDurableFollowUp(sessionFile, options.deliveryKey);
+		if (state === "answered") return { delivery: "already-answered" };
+		if (state === "appended") return { delivery: "already-appended" };
 
-	const startTime = Date.now();
-	const session = await AgentLifecycleManager.global().ensureLive(options.id);
-	const result = await executeSubagentFollowUpTurn({
-		options,
-		session,
-		sessionFile,
-		startTime,
-		startPrompt: message => session.promptCustomMessage(durableFollowUpMessage(message, options.deliveryKey)),
+		const startTime = Date.now();
+		const session = await AgentLifecycleManager.global().ensureLive(options.id);
+		const result = await executeSubagentFollowUpTurn({
+			options,
+			session,
+			sessionFile,
+			startTime,
+			startPrompt: message =>
+				session.promptCustomMessagePersisted(durableFollowUpMessage(message, options.deliveryKey)),
+		});
+		if ((await inspectDurableFollowUp(sessionFile, options.deliveryKey)) === "absent") {
+			throw new Error(`Durable follow-up ${options.deliveryKey} was not appended to ${sessionFile}.`);
+		}
+		return { delivery: "appended", result };
 	});
-	if ((await inspectDurableFollowUp(sessionFile, options.deliveryKey)) === "absent") {
-		throw new Error(`Durable follow-up ${options.deliveryKey} was not appended to ${sessionFile}.`);
-	}
-	return { delivery: "appended", result };
 }
 
 /**

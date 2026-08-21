@@ -80,6 +80,12 @@ interface DurableSessionHarness {
 	modelRequests(): number;
 }
 
+interface DeferredDurableSessionHarness extends DurableSessionHarness {
+	firstModelStarted: Promise<void>;
+	secondModelStarted: Promise<void>;
+	releaseModel(): void;
+}
+
 function createDurableSession(manager: SessionManager): DurableSessionHarness {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: AssistantMessage[] = [];
@@ -143,6 +149,36 @@ function createDurableSession(manager: SessionManager): DurableSessionHarness {
 			} as AgentSessionEvent);
 			await manager.flush();
 		},
+		promptCustomMessagePersisted: async (message: {
+			customType: string;
+			content: string;
+			display: boolean;
+			details?: unknown;
+			attribution?: "agent" | "user";
+		}) => {
+			requests++;
+			manager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+				message.attribution,
+			);
+			const assistant = assistantYield();
+			messages.push(assistant);
+			manager.appendMessage(assistant);
+			emit({ type: "message_end", message: assistant } as AgentSessionEvent);
+			const result = yieldResult();
+			manager.appendMessage(result);
+			emit({
+				type: "tool_execution_end",
+				toolCallId: result.toolCallId,
+				toolName: result.toolName,
+				result: { content: result.content, details: result.details },
+				isError: false,
+			} as AgentSessionEvent);
+			await manager.flush();
+		},
 		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages.at(-1),
 		abort: async () => {},
@@ -151,6 +187,105 @@ function createDurableSession(manager: SessionManager): DurableSessionHarness {
 		subscribeRunState: () => () => {},
 	};
 	return { session: session as unknown as AgentSession, modelRequests: () => requests };
+}
+
+function createDeferredDurableSession(manager: SessionManager): DeferredDurableSessionHarness {
+	const listeners: Array<(event: AgentSessionEvent) => void> = [];
+	const messages: AssistantMessage[] = [];
+	const firstModelStarted = Promise.withResolvers<void>();
+	const secondModelStarted = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let requests = 0;
+	const emit = (event: AgentSessionEvent): void => {
+		for (const listener of listeners) listener(event);
+	};
+	const finishTurn = async (): Promise<void> => {
+		const assistant = assistantYield();
+		messages.push(assistant);
+		manager.appendMessage(assistant);
+		emit({ type: "message_end", message: assistant } as AgentSessionEvent);
+		const result = yieldResult();
+		manager.appendMessage(result);
+		emit({
+			type: "tool_execution_end",
+			toolCallId: result.toolCallId,
+			toolName: result.toolName,
+			result: { content: result.content, details: result.details },
+			isError: false,
+		} as AgentSessionEvent);
+		await manager.flush();
+	};
+	const beginProvider = async (): Promise<void> => {
+		requests++;
+		if (requests === 1) firstModelStarted.resolve();
+		if (requests === 2) secondModelStarted.resolve();
+		await release.promise;
+	};
+	const session = {
+		model: undefined,
+		subscribe: (listener: (event: AgentSessionEvent) => void) => {
+			listeners.push(listener);
+			return () => {
+				const index = listeners.indexOf(listener);
+				if (index >= 0) listeners.splice(index, 1);
+			};
+		},
+		prompt: async () => {
+			await beginProvider();
+			await finishTurn();
+		},
+		// This is the legacy event-persisted path: the entry is absent while the
+		// provider is blocked, reproducing the concurrent redelivery window.
+		promptCustomMessage: async (message: {
+			customType: string;
+			content: string;
+			display: boolean;
+			details?: unknown;
+			attribution?: "agent" | "user";
+		}) => {
+			await beginProvider();
+			manager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+				message.attribution,
+			);
+			await finishTurn();
+		},
+		// The durable primitive appends and flushes before a provider can start.
+		promptCustomMessagePersisted: async (message: {
+			customType: string;
+			content: string;
+			display: boolean;
+			details?: unknown;
+			attribution?: "agent" | "user";
+		}) => {
+			manager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+				message.attribution,
+			);
+			await manager.flush();
+			await beginProvider();
+			await finishTurn();
+		},
+		waitForIdle: async () => {},
+		getLastAssistantMessage: () => messages.at(-1),
+		abort: async () => {},
+		hasPendingAsyncWork: () => false,
+		setIrcWakeTurnObserver: () => {},
+		subscribeRunState: () => () => {},
+	};
+	return {
+		session: session as unknown as AgentSession,
+		modelRequests: () => requests,
+		firstModelStarted: firstModelStarted.promise,
+		secondModelStarted: secondModelStarted.promise,
+		releaseModel: () => release.resolve(),
+	};
 }
 
 describe("durable subagent follow-up delivery", () => {
@@ -207,6 +342,41 @@ describe("durable subagent follow-up delivery", () => {
 		await Bun.write(sessionFile, "{not json}\n");
 
 		await expect(inspectDurableFollowUp(sessionFile, "resolution:r1")).rejects.toThrow("malformed");
+	});
+
+	it("does not confuse another custom message's delivery key with a durable follow-up", async () => {
+		const sessionFile = path.join(tempDir.path(), "custom-key-collision.jsonl");
+		await writeTranscript(sessionFile, [
+			sessionEntry("init", null, { type: "session_init", systemPrompt: "test", task: "test", tools: [] }),
+			sessionEntry("unrelated", "init", {
+				type: "custom_message",
+				customType: "another-extension",
+				content: "Use port 8080.",
+				display: true,
+				details: { deliveryKey: "resolution:r1" },
+			}),
+		]);
+
+		expect(await inspectDurableFollowUp(sessionFile, "resolution:r1")).toBe("absent");
+	});
+
+	it("does not infer an absent delivery from parsed-invalid or unknown transcript entries", async () => {
+		const parsedInvalidFile = path.join(tempDir.path(), "parsed-invalid.jsonl");
+		await Bun.write(
+			parsedInvalidFile,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "session-1",
+				timestamp: new Date().toISOString(),
+				cwd: "/tmp",
+			})}\n{}\n`,
+		);
+		await expect(inspectDurableFollowUp(parsedInvalidFile, "resolution:r1")).rejects.toThrow("invalid");
+
+		const unknownEntryFile = path.join(tempDir.path(), "unknown-entry.jsonl");
+		await writeTranscript(unknownEntryFile, [sessionEntry("unknown", null, { type: "unknown-session-entry" })]);
+		await expect(inspectDurableFollowUp(unknownEntryFile, "resolution:r1")).rejects.toThrow("invalid");
 	});
 
 	it("appends a follow-up once and never starts a second model turn for the same key", async () => {
@@ -285,6 +455,44 @@ describe("durable subagent follow-up delivery", () => {
 
 		expect(result).toEqual({ delivery: "already-appended" });
 		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);
+	});
+
+	it("serializes concurrent same-key delivery before either provider turn can duplicate it", async () => {
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		manager.appendSessionInit({ systemPrompt: "test", task: "test", tools: ["yield"] });
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		const harness = createDeferredDurableSession(manager);
+		const id = "ConcurrentDurableFollowUp";
+		AgentRegistry.global().register({
+			id,
+			displayName: id,
+			kind: "sub",
+			parentId: "Main",
+			status: "idle",
+			session: harness.session,
+			sessionFile,
+		});
+
+		const options = { id, agent, deliveryKey: "resolution:r1", message: "Use port 8080." };
+		const first = runDurableSubagentFollowUpTurn(options);
+		await harness.firstModelStarted;
+		const second = runDurableSubagentFollowUpTurn(options);
+		const secondStartedBeforeFirstFinished = await Promise.race([
+			harness.secondModelStarted.then(() => true),
+			Bun.sleep(50).then(() => false),
+		]);
+
+		expect(secondStartedBeforeFirstFinished).toBe(false);
+		harness.releaseModel();
+		const [firstResult, secondResult] = await Promise.all([first, second]);
+
+		expect(firstResult.delivery).toBe("appended");
+		expect(secondResult.delivery).toBe("already-answered");
+		expect(harness.modelRequests()).toBe(1);
+		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);
+		await manager.close();
 	});
 
 	it("continues to include revival time in ordinary follow-up result duration", async () => {

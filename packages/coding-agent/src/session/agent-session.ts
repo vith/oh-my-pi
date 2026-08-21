@@ -495,6 +495,8 @@ export class AgentSession {
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
+	/** Custom messages explicitly flushed before their provider turn; skip their later message_end append. */
+	readonly #persistedCustomPromptMessages = new WeakSet<CustomMessage>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
@@ -2417,7 +2419,9 @@ export class AgentSession {
 		if (message.role === "hookMessage" || message.role === "custom") {
 			// Prewalk's plan nudge is a one-run steering instruction. Persisting it would
 			// resurrect the consumed prompt on resume, fork, or any context rebuild.
-			if (!isPrewalkPlanNudge(message)) {
+			const wasPersistedBeforePrompt =
+				message.role === "custom" && this.#persistedCustomPromptMessages.delete(message);
+			if (!isPrewalkPlanNudge(message) && !wasPersistedBeforePrompt) {
 				this.sessionManager.appendCustomMessageEntry(
 					message.customType,
 					message.content,
@@ -5529,6 +5533,44 @@ export class AgentSession {
 			...options,
 			prependMessages: keywordNotices.length > 0 ? keywordNotices : undefined,
 		});
+	}
+
+	/**
+	 * Send a custom prompt after its matching session entry has been appended and
+	 * flushed. This is intentionally separate from {@link promptCustomMessage}:
+	 * ordinary custom prompts retain their existing event-persistence behavior.
+	 */
+	async promptCustomMessagePersisted<T = unknown>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+	): Promise<void> {
+		if (this.isStreaming) throw new AgentBusyError();
+		const textContent =
+			typeof message.content === "string"
+				? message.content
+				: message.content
+						.filter((content): content is TextContent => content.type === "text")
+						.map(content => content.text)
+						.join("");
+		const customMessage: CustomMessage<T> = {
+			role: "custom",
+			customType: message.customType,
+			content: message.content,
+			display: message.display,
+			details: message.details,
+			attribution: message.attribution ?? "agent",
+			timestamp: Date.now(),
+		};
+
+		this.sessionManager.appendCustomMessageEntry(
+			customMessage.customType,
+			customMessage.content,
+			customMessage.display,
+			customMessage.details,
+			customMessage.attribution,
+		);
+		await this.sessionManager.flush();
+		this.#persistedCustomPromptMessages.add(customMessage);
+		await this.#promptWithMessage(customMessage, textContent);
 	}
 
 	async #promptWithMessage(
