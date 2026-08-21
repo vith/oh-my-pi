@@ -46,7 +46,10 @@ import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
+import type { CustomMessage } from "../session/messages";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import type { SessionEntry } from "../session/session-entries";
+import { visitEntriesFromFileStream } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
@@ -67,6 +70,8 @@ import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
 	type AgentProgress,
+	type DurableFollowUpResult,
+	type DurableFollowUpState,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
 	type SingleResult,
@@ -1883,6 +1888,8 @@ async function driveSessionToYield(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
+	startPrompt: (task: string) => Promise<boolean | void> = nextTask =>
+		session.prompt(nextTask, { attribution: "agent" }),
 ): Promise<DriveOutcome> {
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
@@ -1920,7 +1927,7 @@ async function driveSessionToYield(
 
 	try {
 		try {
-			await awaitAbortable(session.prompt(task, { attribution: "agent" }));
+			await awaitAbortable(startPrompt(task));
 			await awaitAbortable(session.waitForIdle());
 		} catch (err) {
 			// A budget stop or a yield turn-stop (terminal yield parked behind
@@ -2605,25 +2612,104 @@ export interface FollowUpTurnOptions {
 	maxRuntimeMs?: number;
 }
 
+/** Inputs for {@link runDurableSubagentFollowUpTurn}. */
+export interface DurableFollowUpTurnOptions extends Omit<FollowUpTurnOptions, "message"> {
+	/** The user-attributed follow-up message to durably append. */
+	message: string;
+	/** Stable caller-owned key used to detect an already-delivered follow-up. */
+	deliveryKey: string;
+}
+
+const DURABLE_FOLLOW_UP_CUSTOM_TYPE = "subagent-durable-follow-up";
+
+function isDurableFollowUpEntry(entry: SessionEntry, deliveryKey: string): boolean {
+	if (entry.type !== "custom_message") return false;
+	const details = entry.details;
+	return (
+		typeof details === "object" && details !== null && "deliveryKey" in details && details.deliveryKey === deliveryKey
+	);
+}
+
 /**
- * Continue a previously spawned (keep-alive) subagent with one more monitored
- * turn: revive it if parked, send `message` as a real prompt, drive it to
- * `yield`, and finalize a {@link SingleResult} exactly like a first run.
- *
- * The session's full conversation history is retained (live session, or JSONL
- * replay through the lifecycle reviver), so the turn sees all prior context.
- * Unlike {@link runSubprocess}, the session is NOT torn down afterwards — it
- * stays adopted by the {@link AgentLifecycleManager} (idle → TTL park →
- * revive), and an aborted turn only aborts the in-flight turn.
+ * Inspect the active transcript branch for a keyed durable follow-up. A
+ * malformed JSONL record is a delivery safety failure, never evidence that the
+ * follow-up is absent.
  */
-export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
+export async function inspectDurableFollowUp(sessionFile: string, deliveryKey: string): Promise<DurableFollowUpState> {
+	const entries = new Map<string, SessionEntry>();
+	let leafId: string | null = null;
+	let malformedRecords = 0;
+	await visitEntriesFromFileStream(
+		sessionFile,
+		entry => {
+			if (entry.type === "session") return;
+			entries.set(entry.id, entry);
+			leafId = entry.id;
+		},
+		{
+			onMalformedRecord: () => {
+				malformedRecords++;
+			},
+		},
+	);
+	if (malformedRecords > 0) {
+		throw new Error(
+			`Cannot inspect durable follow-up in ${sessionFile}: transcript contains malformed JSONL records.`,
+		);
+	}
+
+	const activeBranch: SessionEntry[] = [];
+	const seen = new Set<string>();
+	let current = leafId ? entries.get(leafId) : undefined;
+	while (current && !seen.has(current.id)) {
+		seen.add(current.id);
+		activeBranch.push(current);
+		current = current.parentId ? entries.get(current.parentId) : undefined;
+	}
+	activeBranch.reverse();
+
+	let delivered = false;
+	for (const entry of activeBranch) {
+		if (isDurableFollowUpEntry(entry, deliveryKey)) {
+			delivered = true;
+			continue;
+		}
+		if (delivered && entry.type === "message" && entry.message.role === "assistant") {
+			return "answered";
+		}
+	}
+	return delivered ? "appended" : "absent";
+}
+
+function durableFollowUpMessage(message: string, deliveryKey: string): CustomMessage<{ deliveryKey: string }> {
+	return {
+		role: "custom",
+		customType: DURABLE_FOLLOW_UP_CUSTOM_TYPE,
+		content: message,
+		display: true,
+		attribution: "user",
+		details: { deliveryKey },
+		timestamp: Date.now(),
+	};
+}
+
+interface FollowUpTurnExecution {
+	options: FollowUpTurnOptions;
+	session: AgentSession;
+	sessionFile?: string;
+	startTime: number;
+	startPrompt: (message: string) => Promise<boolean | void>;
+}
+
+async function executeSubagentFollowUpTurn({
+	options,
+	session,
+	sessionFile,
+	startTime,
+	startPrompt,
+}: FollowUpTurnExecution): Promise<SingleResult> {
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
-	const startTime = Date.now();
-	const session = await AgentLifecycleManager.global().ensureLive(id);
-	const ref = AgentRegistry.global().get(id);
-	const sessionFile = ref?.sessionFile ?? undefined;
-
 	const monitor = createSubagentRunMonitor({
 		index,
 		id,
@@ -2660,7 +2746,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const unsubscribe = monitor.attach(session);
 	let outcome: DriveOutcome;
 	try {
-		outcome = await driveSessionToYield(session, monitor, message);
+		outcome = await driveSessionToYield(session, monitor, message, startPrompt);
 	} finally {
 		try {
 			await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
@@ -2692,6 +2778,66 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		sessionFile,
 		startTime,
 	});
+}
+
+/**
+ * Continue a previously spawned (keep-alive) subagent with one more monitored
+ * turn: revive it if parked, send `message` as a real prompt, drive it to
+ * `yield`, and finalize a {@link SingleResult} exactly like a first run.
+ *
+ * The session's full conversation history is retained (live session, or JSONL
+ * replay through the lifecycle reviver), so the turn sees all prior context.
+ * Unlike {@link runSubprocess}, the session is NOT torn down afterwards — it
+ * stays adopted by the {@link AgentLifecycleManager} (idle → TTL park →
+ * revive), and an aborted turn only aborts the in-flight turn.
+ */
+export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
+	const startTime = Date.now();
+	const session = await AgentLifecycleManager.global().ensureLive(options.id);
+	const ref = AgentRegistry.global().get(options.id);
+	const sessionFile = ref?.sessionFile ?? undefined;
+	return executeSubagentFollowUpTurn({
+		options,
+		session,
+		sessionFile,
+		startTime,
+		startPrompt: message => session.prompt(message, { attribution: "agent" }),
+	});
+}
+
+/**
+ * Deliver a caller-keyed follow-up at most once. The transcript inspection is
+ * deliberately before revival: a recovery retry must not start a model turn
+ * merely to discover that a previous process already appended the message.
+ */
+export async function runDurableSubagentFollowUpTurn(
+	options: DurableFollowUpTurnOptions,
+): Promise<DurableFollowUpResult> {
+	const ref = AgentRegistry.global().get(options.id);
+	const sessionFile = ref?.sessionFile;
+	if (!sessionFile) {
+		throw new Error(
+			`Cannot deliver durable follow-up to ${options.id}: the subagent has no persisted session transcript.`,
+		);
+	}
+
+	const state = await inspectDurableFollowUp(sessionFile, options.deliveryKey);
+	if (state === "answered") return { delivery: "already-answered" };
+	if (state === "appended") return { delivery: "already-appended" };
+
+	const startTime = Date.now();
+	const session = await AgentLifecycleManager.global().ensureLive(options.id);
+	const result = await executeSubagentFollowUpTurn({
+		options,
+		session,
+		sessionFile,
+		startTime,
+		startPrompt: message => session.promptCustomMessage(durableFollowUpMessage(message, options.deliveryKey)),
+	});
+	if ((await inspectDurableFollowUp(sessionFile, options.deliveryKey)) === "absent") {
+		throw new Error(`Durable follow-up ${options.deliveryKey} was not appended to ${sessionFile}.`);
+	}
+	return { delivery: "appended", result };
 }
 
 /**

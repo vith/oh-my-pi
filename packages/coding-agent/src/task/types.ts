@@ -548,6 +548,15 @@ export interface SingleResult {
 	outputMeta?: { lineCount: number; charCount: number };
 }
 
+/** Durable transcript state for an idempotently keyed subagent follow-up. */
+export type DurableFollowUpState = "absent" | "appended" | "answered";
+
+/** Outcome of attempting to deliver an idempotently keyed subagent follow-up. */
+export interface DurableFollowUpResult {
+	delivery: "appended" | "already-appended" | "already-answered";
+	result?: SingleResult;
+}
+
 /** Tool details for TUI rendering */
 export interface TaskToolDetails {
 	projectAgentsDir: string | null;
