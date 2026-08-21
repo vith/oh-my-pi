@@ -470,6 +470,12 @@ export interface AgentProgress {
 	inflightTaskDetails?: TaskToolDetails;
 }
 
+/** A successful terminal tool result that parked the current subagent turn. */
+export interface SubprocessPause {
+	toolName: string;
+	toolCallId: string;
+}
+
 /** Result from a single agent execution */
 export interface SingleResult {
 	index: number;
@@ -508,6 +514,8 @@ export interface SingleResult {
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
+	/** Terminal tool result that paused this turn without aborting the session. */
+	paused?: SubprocessPause;
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
 	/** Output path for the task result */

@@ -73,6 +73,7 @@ import {
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
+	type SubprocessPause,
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
@@ -556,6 +557,7 @@ interface FinalizeSubprocessOutputArgs {
 	stderr: string;
 	doneAborted: boolean;
 	signalAborted: boolean;
+	paused?: boolean;
 	yieldItems?: YieldItem[];
 	outputSchema: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
@@ -683,7 +685,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			}
 		}
 	} else {
-		const allowFallback = exitCode === 0 && !doneAborted && !signalAborted;
+		const allowFallback = exitCode === 0 && !doneAborted && !signalAborted && !args.paused;
 		const { normalized: normalizedSchema, error: schemaError } = normalizeSchema(outputSchema);
 		const hasOutputSchema = normalizedSchema !== undefined && !schemaError;
 		const fallback = allowFallback ? resolveFallbackCompletion(rawOutput, outputSchema) : null;
@@ -721,7 +723,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		} else if (!hasOutputSchema && allowFallback && rawOutput.trim().length > 0) {
 			exitCode = 0;
 			stderr = "";
-		} else if (exitCode === 0) {
+		} else if (exitCode === 0 && !args.paused) {
 			const hasRawOutput = rawOutput.trim().length > 0;
 			rawOutput = rawOutput ? `${SUBAGENT_WARNING_MISSING_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_MISSING_YIELD;
 			if (hasOutputSchema || !hasRawOutput) {
@@ -970,6 +972,8 @@ interface SubagentRunMonitor {
 	yieldTurnStopRequested(): boolean;
 	/** Resolves when the yield turn-stop session abort has settled (immediately when none fired). */
 	waitForYieldTurnStop(): Promise<void>;
+	/** The first successful terminal tool result that requested a recoverable pause. */
+	pauseRequested(): SubprocessPause | undefined;
 	/** The abort kind for this run, when an abort was requested. */
 	abortKind(): AbortReason | undefined;
 	terminalError(): string | undefined;
@@ -1062,6 +1066,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let yieldInvalidatedByAsync = false;
 	let yieldTurnStopRequested = false;
 	let yieldTurnStopPromise: Promise<void> | null = null;
+	let paused: SubprocessPause | undefined;
 
 	// Accumulate usage incrementally from message_end events (no memory for streaming events)
 	const accumulatedUsage: Usage = {
@@ -1173,6 +1178,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					});
 				})
 			: Promise.resolve();
+	};
+
+	// Terminal pause: stop the active prompt without aborting the monitor. The
+	// session stays live for lifecycle adoption/revival and the first result wins
+	// when a tool call produces multiple terminal events in the same turn.
+	const requestPause = (pause: SubprocessPause): void => {
+		if (paused || abortSent || resolved) return;
+		paused = pause;
+		void abortActiveSession();
 	};
 
 	/** Owner async work that can still re-wake the run (quiescence barrier predicate). */
@@ -1460,16 +1474,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const handler = subprocessToolRegistry.getHandler(event.toolName);
 				const eventRecord: unknown = event;
 				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
+				const toolEvent = {
+					toolName: event.toolName,
+					toolCallId: event.toolCallId,
+					args: eventArgs,
+					result: event.result,
+					isError: event.isError,
+				};
 				if (handler) {
 					// Extract data using handler
 					if (handler.extractData) {
-						const data = handler.extractData({
-							toolName: event.toolName,
-							toolCallId: event.toolCallId,
-							args: eventArgs,
-							result: event.result,
-							isError: event.isError,
-						});
+						const data = handler.extractData(toolEvent);
 						if (data !== undefined) {
 							recordExtractedToolData(event.toolName, data);
 						}
@@ -1479,23 +1494,23 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						yieldCallPending = false;
 					}
 
-					// Check if handler wants to terminate the session
-					if (
-						handler.shouldTerminate?.({
-							toolName: event.toolName,
-							toolCallId: event.toolCallId,
-							args: eventArgs,
-							result: event.result,
-							isError: event.isError,
-						})
-					) {
-						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
-							// Terminal yield with owner jobs still pending: park the
-							// run behind the quiescence barrier instead of completing
-							// it (see requestYieldTurnStop).
-							requestYieldTurnStop();
-						} else {
-							requestAbort("terminate");
+					// Terminal disposition is evaluated only for successful results. The
+					// explicit disposition wins over the legacy boolean compatibility hook.
+					if (!event.isError && !paused) {
+						const disposition =
+							handler.terminalDisposition?.(toolEvent) ??
+							(handler.shouldTerminate?.(toolEvent) ? "terminate" : undefined);
+						if (disposition === "pause") {
+							requestPause({ toolName: event.toolName, toolCallId: event.toolCallId });
+						} else if (disposition === "terminate") {
+							if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
+								// Terminal yield with owner jobs still pending: park the
+								// run behind the quiescence barrier instead of completing
+								// it (see requestYieldTurnStop).
+								requestYieldTurnStop();
+							} else {
+								requestAbort("terminate");
+							}
 						}
 					}
 				}
@@ -1804,6 +1819,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				}
 			}
 		},
+		pauseRequested: () => paused,
 		// A soft stop that never escalated still identifies as a budget abort so
 		// the lifecycle can park the agent as resumable instead of killing it.
 		abortKind: () => abortReason ?? (budgetStopRequested ? "budget" : undefined),
@@ -1913,8 +1929,12 @@ async function driveSessionToYield(
 			// prompt. Swallow it and drive the barrier/forced final yield
 			// below; real caller/timeout aborts (monitor signal) and genuine
 			// failures keep the old path.
-			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
+			const recoverableStop =
+				monitor.budgetStopRequested() || monitor.yieldTurnStopRequested() || monitor.pauseRequested() !== undefined;
 			if (!recoverableStop || abortSignal.aborted) throw err;
+		}
+		if (monitor.pauseRequested()) {
+			return { exitCode: 0, aborted: false };
 		}
 
 		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
@@ -2139,6 +2159,9 @@ interface FinalizeRunArgs {
 async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	const { monitor, done, index, id, agent, task, assignment, signal, modelOverride, modelRole } = args;
 	const progress = monitor.progress;
+	const paused =
+		monitor.pauseRequested() !== undefined && !done.aborted && !signal?.aborted && !monitor.runtimeLimitExceeded();
+	const pause = paused ? monitor.pauseRequested() : undefined;
 	let exitCode = done.exitCode;
 	let stderr = done.error ?? "";
 
@@ -2156,6 +2179,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			stderr,
 			doneAborted: Boolean(done.aborted),
 			signalAborted: Boolean(signal?.aborted),
+			paused,
 			yieldItems,
 			outputSchema: args.outputSchema,
 			outputSchemaMode: args.outputSchemaMode,
@@ -2214,7 +2238,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		exitCode = 1;
 	}
 	const wasAborted =
-		runtimeLimitExceeded || Boolean(done.aborted) || abortedViaYield || (!hasYield && Boolean(signal?.aborted));
+		!paused &&
+		(runtimeLimitExceeded || Boolean(done.aborted) || abortedViaYield || (!hasYield && Boolean(signal?.aborted)));
 	const finalAbortReason = wasAborted
 		? runtimeLimitExceeded
 			? monitor.resolveAbortReasonText()
@@ -2267,9 +2292,10 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		modelRole,
 		resolvedModel: progress.resolvedModel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
-		error: exitCode !== 0 && stderr ? stderr : undefined,
-		aborted: wasAborted,
-		abortReason: finalAbortReason,
+		error: paused ? undefined : exitCode !== 0 && stderr ? stderr : undefined,
+		aborted: paused ? undefined : wasAborted,
+		abortReason: paused ? undefined : finalAbortReason,
+		...(pause ? { paused: pause } : {}),
 		usage: monitor.hasUsage() ? monitor.accumulatedUsage : undefined,
 		outputPath,
 		extractedToolData: progress.extractedToolData,
@@ -3338,6 +3364,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					: "No isolated changes were applied.";
 			const lateCleanups: Promise<void>[] = [];
 			let deferredSessionShutdown: Promise<void> | undefined;
+			const pauseRequested = monitor.pauseRequested() !== undefined && !abortSignal.aborted;
 			const deferCleanup = (completion: Promise<void>): void => {
 				lateCleanups.push(completion);
 				exitCode = 1;
@@ -3378,7 +3405,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				unsubscribe = null;
 			}
 			const jobManager = AsyncJobManager.instance();
-			if (jobManager) {
+			// A paused session remains adopted and its extension owns the decision
+			// whether outstanding async work may coexist with the durable pause.
+			if (jobManager && !pauseRequested) {
 				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt);
 				if (!reap.settled) {
 					deferCleanup(reap.completion);
@@ -3410,7 +3439,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					},
 				});
 			}
-			if (jobManager) {
+			if (jobManager && !pauseRequested) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
 						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now());
