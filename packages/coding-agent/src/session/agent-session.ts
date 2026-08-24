@@ -420,6 +420,9 @@ type DurablePromptReservation = {
 /** Admission policy for an autonomous IRC/Agent Hub follow-up turn. */
 export type FollowUpAdmission = (records: readonly CustomMessage[]) => void | Promise<void>;
 
+/** Durable lifecycle notification after an admitted IRC/Agent Hub wake has fully settled. */
+export type FollowUpSettlement = (records: readonly CustomMessage[], error?: unknown) => void | Promise<void>;
+
 type ProviderTurnAdmissionOptions = {
 	durableReservation?: DurablePromptReservation;
 	defer?: boolean;
@@ -594,6 +597,7 @@ export class AgentSession {
 		| ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
 	#ircWakeTurnAdmission: FollowUpAdmission | undefined;
+	#ircWakeTurnSettlement: FollowUpSettlement | undefined;
 	#nextIrcWakeAdmission = 0;
 	#nextIrcWakeAdmissionToCommit = 0;
 	readonly #settledIrcWakeAdmissions = new Map<number, SettledIrcWakeAdmission>();
@@ -1003,6 +1007,11 @@ export class AgentSession {
 						await finishObservation?.(turnError);
 					} catch (error) {
 						logger.warn("IRC wake turn observer failed to finish", { error: String(error) });
+					}
+					try {
+						await this.#ircWakeTurnSettlement?.(records, turnError);
+					} catch (error) {
+						logger.warn("IRC wake turn settlement failed", { error: String(error) });
 					}
 				});
 			});
@@ -8062,6 +8071,11 @@ export class AgentSession {
 	/** Installs lifecycle admission ahead of autonomous IRC wake turns. */
 	setIrcWakeTurnAdmission(admission: FollowUpAdmission | undefined): void {
 		this.#ircWakeTurnAdmission = admission;
+	}
+
+	/** Installs durable lifecycle settlement after an admitted autonomous IRC wake. */
+	setIrcWakeTurnSettlement(settlement: FollowUpSettlement | undefined): void {
+		this.#ircWakeTurnSettlement = settlement;
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

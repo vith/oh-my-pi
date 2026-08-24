@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -241,6 +241,58 @@ describe("AgentSession IRC wake admission", () => {
 			expect(observerStarts).toBe(0);
 			expect(providerStarts()).toBe(0);
 			expect(session.drainPendingIrcInboxMessages("child").map(record => record.body)).toEqual(["do not start"]);
+		} finally {
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("settles an admitted wake after its observer even when the observer finish fails", async () => {
+		const { session, tempDir } = await createParkedSession();
+		try {
+			const events: string[] = [];
+			const settled = Promise.withResolvers<unknown>();
+			vi.spyOn(session.agent, "prompt").mockRejectedValue(new Error("wake provider failed"));
+			session.setIrcWakeTurnObserver(() => {
+				events.push("observer-start");
+				return error => {
+					events.push(`observer-finish:${error instanceof Error ? error.message : "none"}`);
+					throw new Error("observer finish failed");
+				};
+			});
+			session.setIrcWakeTurnSettlement((_records, error) => {
+				events.push(`settlement:${error instanceof Error ? error.message : "none"}`);
+				settled.resolve(error);
+			});
+
+			await session.deliverIrcMessage(message("irc-settlement-error", "settle after failure"));
+			await expect(settled.promise).resolves.toBeInstanceOf(Error);
+			expect(events).toEqual([
+				"observer-start",
+				"observer-finish:wake provider failed",
+				"settlement:wake provider failed",
+			]);
+		} finally {
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("never settles a batch whose lifecycle admission refused the wake", async () => {
+		const { session, providerStarts, tempDir } = await createParkedSession();
+		try {
+			const settlements: string[] = [];
+			session.setIrcWakeTurnAdmission(async () => {
+				throw new Error("durable admission refused");
+			});
+			session.setIrcWakeTurnSettlement(records => {
+				settlements.push(String(records.length));
+			});
+
+			await session.deliverIrcMessage(message("irc-refused-settlement", "do not settle"));
+			await Bun.sleep(20);
+			expect(providerStarts()).toBe(0);
+			expect(settlements).toEqual([]);
 		} finally {
 			await session.dispose();
 			tempDir.removeSync();

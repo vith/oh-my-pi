@@ -22,7 +22,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
-import type { AgentSession, FollowUpAdmission } from "../session/agent-session";
+import type { AgentSession, FollowUpAdmission, FollowUpSettlement } from "../session/agent-session";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
 	type AgentRef,
@@ -109,6 +109,7 @@ export class AgentLifecycleManager {
 			current.#revivals.clear();
 			current.#parks.clear();
 			current.#followUpAdmissions.clear();
+			current.#followUpSettlements.clear();
 			current.#persistedReviverFactory = undefined;
 		}
 		AgentLifecycleManager.#global = undefined;
@@ -126,6 +127,8 @@ export class AgentLifecycleManager {
 	readonly #revivals = new Map<string, RevivingAgent>();
 	/** Admission policies survive warm parking and cold reconstruction by registry id. */
 	readonly #followUpAdmissions = new Map<string, FollowUpAdmission>();
+	/** Settlement policies survive warm parking and cold reconstruction by registry id. */
+	readonly #followUpSettlements = new Map<string, FollowUpSettlement>();
 	#unsubscribe: (() => void) | undefined;
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 	/** TTL applied when a cold-revived ref is adopted on demand. */
@@ -161,6 +164,17 @@ export class AgentLifecycleManager {
 	}
 
 	/**
+	 * Notify lifecycle ownership only after an admitted Agent Hub follow-up has
+	 * completed its prompt and post-prompt recovery. Retained for warm and cold
+	 * revival just like the admission policy.
+	 */
+	setFollowUpSettlement(id: string, settlement: FollowUpSettlement | undefined): void {
+		if (settlement) this.#followUpSettlements.set(id, settlement);
+		else this.#followUpSettlements.delete(id);
+		this.#registry.get(id)?.session?.setIrcWakeTurnSettlement(settlement);
+	}
+
+	/**
 	 * Take ownership of a finished subagent. Caller has already set registry
 	 * status to "idle". Arms the TTL timer (idleTtlMs <= 0 adopts without one).
 	 * When `expected` is given, the adoption is refused if the id no longer
@@ -177,7 +191,7 @@ export class AgentLifecycleManager {
 		clearTimeout(existing?.timer);
 		const adopted: AdoptedAgent = { ref, idleTtlMs: opts.idleTtlMs, revive: opts.revive };
 		this.#adopted.set(id, adopted);
-		this.#installFollowUpAdmission(id, ref.session);
+		this.#installFollowUpPolicies(id, ref.session);
 		this.#armTimer(id, adopted);
 	}
 
@@ -342,7 +356,7 @@ export class AgentLifecycleManager {
 					// Park cleared the idle timer; re-arm so TTL park still works.
 					const adopted = this.#adopted.get(id);
 					if (adopted && adopted.ref === parked && parked.status === "idle") this.#armTimer(id, adopted);
-					this.#installFollowUpAdmission(id, kept);
+					this.#installFollowUpPolicies(id, kept);
 					return kept;
 				}
 			} else {
@@ -359,7 +373,7 @@ export class AgentLifecycleManager {
 			);
 		}
 		if (ref.session) {
-			this.#installFollowUpAdmission(id, ref.session);
+			this.#installFollowUpPolicies(id, ref.session);
 			return ref.session;
 		}
 		const inflight = this.#revivals.get(id);
@@ -447,6 +461,7 @@ export class AgentLifecycleManager {
 			this.#adopted.delete(id);
 		}
 		this.#followUpAdmissions.delete(id);
+		this.#followUpSettlements.delete(id);
 
 		const park = this.#parks.get(id);
 		if (park && park.ref === ref) {
@@ -500,13 +515,14 @@ export class AgentLifecycleManager {
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#followUpAdmissions.clear();
+		this.#followUpSettlements.clear();
 		this.#persistedReviverFactory = undefined;
 		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
 	}
 
 	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {
 		const session = await revive(ref);
-		this.#installFollowUpAdmission(id, session);
+		this.#installFollowUpPolicies(id, session);
 		if (this.#disposed) {
 			// The owning lifecycle tore down while the reviver was in flight; dispose
 			// the freshly built session instead of attaching it, and fail the waiter.
@@ -558,9 +574,11 @@ export class AgentLifecycleManager {
 		adopted.timer = timer;
 	}
 
-	#installFollowUpAdmission(id: string, session: AgentSession | null | undefined): void {
+	#installFollowUpPolicies(id: string, session: AgentSession | null | undefined): void {
 		const admission = this.#followUpAdmissions.get(id);
 		if (admission) session?.setIrcWakeTurnAdmission(admission);
+		const settlement = this.#followUpSettlements.get(id);
+		if (settlement) session?.setIrcWakeTurnSettlement(settlement);
 	}
 
 	#onRegistryEvent(event: RegistryEvent): void {

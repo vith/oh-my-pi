@@ -11,6 +11,11 @@ interface SessionStub {
 	disposeCalls: () => number;
 }
 
+interface FollowUpPolicySessionStub extends SessionStub {
+	admission: () => unknown;
+	settlement: () => unknown;
+}
+
 /** Minimal session: the lifecycle manager only ever calls dispose() on it. */
 function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 	let calls = 0;
@@ -21,6 +26,30 @@ function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 		},
 	};
 	return { session: stub as unknown as AgentSession, disposeCalls: () => calls };
+}
+
+/** A lifecycle-owned session exposes both independent Agent Hub policy hooks. */
+function makeFollowUpPolicySessionStub(): FollowUpPolicySessionStub {
+	let admission: unknown;
+	let settlement: unknown;
+	let calls = 0;
+	const stub = {
+		dispose: async () => {
+			calls++;
+		},
+		setIrcWakeTurnAdmission: (next: unknown) => {
+			admission = next;
+		},
+		setIrcWakeTurnSettlement: (next: unknown) => {
+			settlement = next;
+		},
+	};
+	return {
+		session: stub as unknown as AgentSession,
+		disposeCalls: () => calls,
+		admission: () => admission,
+		settlement: () => settlement,
+	};
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -102,6 +131,49 @@ describe("AgentLifecycleManager", () => {
 		expect(ref?.session).toBeNull();
 		expect(ref?.sessionFile).toBe("/tmp/1-Sub.jsonl");
 		expect(lifecycle.has("1-Sub")).toBe(true);
+	});
+
+	it("retains distinct follow-up admission and settlement policies through warm and cold revival", async () => {
+		const warm = makeFollowUpPolicySessionStub();
+		const cold = makeFollowUpPolicySessionStub();
+		const ref = registry.register({
+			id: "policy-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: warm.session,
+			sessionFile: "/tmp/policy-Sub.jsonl",
+			status: "idle",
+		});
+		const admission = async () => {};
+		const settlement = async () => {};
+		lifecycle.adopt("policy-Sub", { idleTtlMs: 0, revive: async () => cold.session }, ref);
+		lifecycle.setFollowUpAdmission("policy-Sub", admission);
+		lifecycle.setFollowUpSettlement("policy-Sub", settlement);
+
+		// A live/warm session receives both policies immediately and again on access.
+		expect(warm.admission()).toBe(admission);
+		expect(warm.settlement()).toBe(settlement);
+		expect(await lifecycle.ensureLive("policy-Sub")).toBe(warm.session);
+		expect(warm.settlement()).toBe(settlement);
+
+		await lifecycle.park("policy-Sub");
+		expect(registry.get("policy-Sub")?.status).toBe("parked");
+		expect(await lifecycle.ensureLive("policy-Sub")).toBe(cold.session);
+		expect(cold.admission()).toBe(admission);
+		expect(cold.settlement()).toBe(settlement);
+
+		await lifecycle.release("policy-Sub");
+		const replacement = makeFollowUpPolicySessionStub();
+		registry.register({
+			id: "policy-Sub",
+			displayName: "replacement",
+			kind: "sub",
+			session: replacement.session,
+			status: "idle",
+		});
+		lifecycle.adopt("policy-Sub", { idleTtlMs: 0 });
+		expect(replacement.admission()).toBeUndefined();
+		expect(replacement.settlement()).toBeUndefined();
 	});
 
 	it("running disarms the timer; returning to idle re-arms a fresh TTL", async () => {
