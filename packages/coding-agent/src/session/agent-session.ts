@@ -417,6 +417,9 @@ type DurablePromptReservation = {
 	release(): void;
 };
 
+/** Admission policy for an autonomous IRC/Agent Hub follow-up turn. */
+export type FollowUpAdmission = (records: readonly CustomMessage[]) => void | Promise<void>;
+
 type ProviderTurnAdmissionOptions = {
 	durableReservation?: DurablePromptReservation;
 	defer?: boolean;
@@ -585,6 +588,7 @@ export class AgentSession {
 	#ircWakeTurnObserver:
 		| ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
+	#ircWakeTurnAdmission: FollowUpAdmission | undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
@@ -876,6 +880,22 @@ export class AgentSession {
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
 	#wakeForIrc(records: CustomMessage[]): void {
+		void this.#admitAndWakeForIrc(records);
+	}
+
+	async #admitAndWakeForIrc(records: CustomMessage[]): Promise<void> {
+		if (this.#modeExitDrainSuppressionDepth > 0) {
+			this.#irc.deferWake(records);
+			return;
+		}
+		try {
+			await this.#ircWakeTurnAdmission?.(records);
+		} catch (error) {
+			this.#irc.deferWake(records);
+			logger.warn("IRC wake turn admission refused", { error: String(error) });
+			return;
+		}
+		// Admission is async, so mode exit may have started while it was pending.
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.deferWake(records);
 			return;
@@ -884,11 +904,11 @@ export class AgentSession {
 			defer: true,
 		});
 		if (admission) {
-			void admission.then(admitted => {
-				if (admitted && !this.isStreaming) this.#wakeForIrc(records);
-				else this.#irc.deferWake(records);
-			});
-			return;
+			const admitted = await admission;
+			if (!admitted || this.isStreaming || this.#modeExitDrainSuppressionDepth > 0) {
+				this.#irc.deferWake(records);
+				return;
+			}
 		}
 		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
 		// already-resumable follow-up can ride the wake turn normally without reordering.
@@ -7991,6 +8011,11 @@ export class AgentSession {
 		observer: ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 	): void {
 		this.#ircWakeTurnObserver = observer;
+	}
+
+	/** Installs lifecycle admission ahead of autonomous IRC wake turns. */
+	setIrcWakeTurnAdmission(admission: FollowUpAdmission | undefined): void {
+		this.#ircWakeTurnAdmission = admission;
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

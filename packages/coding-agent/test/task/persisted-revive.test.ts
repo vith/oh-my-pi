@@ -40,14 +40,17 @@ function createRef(sessionFile: string): AgentRef {
 }
 
 type IrcWakeObserver = (records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
+type FollowUpAdmission = (records: readonly CustomMessage[]) => void | Promise<void>;
 
 interface RevivedSessionHandle {
 	session: AgentSession;
 	observer: () => IrcWakeObserver | undefined;
+	admission: () => FollowUpAdmission | undefined;
 }
 
 function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
+	let admission: FollowUpAdmission | undefined;
 	const session = {
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
@@ -57,11 +60,14 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
+		setIrcWakeTurnAdmission: (next: FollowUpAdmission | undefined) => {
+			admission = next;
+		},
 		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () => undefined,
 		extensionRunner,
 	} as unknown as AgentSession;
-	return { session, observer: () => observer };
+	return { session, observer: () => observer, admission: () => admission };
 }
 
 async function createPersistedSession(
@@ -130,6 +136,37 @@ afterEach(async () => {
 });
 
 describe("persisted subagent revival", () => {
+	it("installs the stored follow-up admission before exposing a cold-revived session", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const manager = new AgentLifecycleManager(registry);
+		const ref = createRef("/tmp/persisted-admission.jsonl");
+		registry.register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: ref.kind,
+			parentId: ref.parentId,
+			session: null,
+			sessionFile: ref.sessionFile,
+			status: "parked",
+		});
+		const handle = createRevivedSession([]);
+		const admission: FollowUpAdmission = async () => {};
+		manager.setFollowUpAdmission(ref.id, admission);
+		manager.setPersistedSubagentReviverFactory(async expected => async () => {
+			expect(expected.id).toBe(ref.id);
+			return handle.session;
+		}, 0);
+
+		try {
+			expect(await manager.ensureLive(ref.id)).toBe(handle.session);
+			expect(handle.admission()).toBe(admission);
+		} finally {
+			await manager.dispose();
+			AgentRegistry.resetGlobalForTests();
+		}
+	});
+
 	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
 		const cwd = makeTempDir("@pi-revive-ext-init-");
 		const sessionFile = await createPersistedSession(cwd);

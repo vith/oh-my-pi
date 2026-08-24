@@ -42,7 +42,7 @@ import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
-import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
+import type { AgentSession, AgentSessionEvent, FollowUpAdmission, Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
@@ -2358,6 +2358,8 @@ export interface IrcWakeTurnMonitorOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	artifactsDir?: string;
+	/** Lifecycle admission that must complete before an autonomous IRC wake starts. */
+	beforeWake?: FollowUpAdmission;
 }
 
 /**
@@ -2372,6 +2374,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const { id, agent } = options;
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	session.setIrcWakeTurnAdmission(options.beforeWake);
 	session.setIrcWakeTurnObserver(records => {
 		const ircTask =
 			records
