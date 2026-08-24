@@ -16,7 +16,7 @@ interface FollowUpPolicySessionStub extends SessionStub {
 	settlement: () => unknown;
 }
 
-/** Minimal session: the lifecycle manager only ever calls dispose() on it. */
+/** Minimal lifecycle session: policy clear hooks are harmless no-ops here. */
 function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 	let calls = 0;
 	const stub = {
@@ -24,6 +24,8 @@ function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 			calls++;
 			await dispose?.();
 		},
+		setIrcWakeTurnAdmission: (_next: unknown) => {},
+		setIrcWakeTurnSettlement: (_next: unknown) => {},
 	};
 	return { session: stub as unknown as AgentSession, disposeCalls: () => calls };
 }
@@ -174,6 +176,44 @@ describe("AgentLifecycleManager", () => {
 		lifecycle.adopt("policy-Sub", { idleTtlMs: 0 });
 		expect(replacement.admission()).toBeUndefined();
 		expect(replacement.settlement()).toBeUndefined();
+	});
+
+	it("clears live follow-up policies synchronously for tombstone release, manager dispose, and global reset", async () => {
+		const released = makeFollowUpPolicySessionStub();
+		const releasedRef = registerIdleSub("release-policy-Sub", released.session);
+		lifecycle.adopt("release-policy-Sub", { idleTtlMs: 0 }, releasedRef);
+		lifecycle.setFollowUpAdmission("release-policy-Sub", async () => {});
+		lifecycle.setFollowUpSettlement("release-policy-Sub", async () => {});
+		const tombstone = lifecycle.release("release-policy-Sub", releasedRef, { tombstone: true });
+		expect(released.admission()).toBeUndefined();
+		expect(released.settlement()).toBeUndefined();
+		await tombstone;
+
+		const disposed = makeFollowUpPolicySessionStub();
+		registerIdleSub("dispose-policy-Sub", disposed.session);
+		lifecycle.adopt("dispose-policy-Sub", { idleTtlMs: 0 });
+		lifecycle.setFollowUpAdmission("dispose-policy-Sub", async () => {});
+		lifecycle.setFollowUpSettlement("dispose-policy-Sub", async () => {});
+		const managerDispose = lifecycle.dispose();
+		expect(disposed.admission()).toBeUndefined();
+		expect(disposed.settlement()).toBeUndefined();
+		await managerDispose;
+
+		const resetLifecycle = AgentLifecycleManager.global();
+		const reset = makeFollowUpPolicySessionStub();
+		const resetRef = registry.register({
+			id: "reset-policy-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: reset.session,
+			status: "idle",
+		});
+		resetLifecycle.adopt("reset-policy-Sub", { idleTtlMs: 0 }, resetRef);
+		resetLifecycle.setFollowUpAdmission("reset-policy-Sub", async () => {});
+		resetLifecycle.setFollowUpSettlement("reset-policy-Sub", async () => {});
+		AgentLifecycleManager.resetGlobalForTests();
+		expect(reset.admission()).toBeUndefined();
+		expect(reset.settlement()).toBeUndefined();
 	});
 
 	it("running disarms the timer; returning to idle re-arms a fresh TTL", async () => {
@@ -746,6 +786,8 @@ describe("AgentLifecycleManager", () => {
 					registry.unregister(workerId, live);
 				}
 			},
+			setIrcWakeTurnAdmission: (_next: unknown) => {},
+			setIrcWakeTurnSettlement: (_next: unknown) => {},
 		} as unknown as AgentSession;
 		const ref = registry.register({
 			id: workerId,

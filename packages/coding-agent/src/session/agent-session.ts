@@ -598,6 +598,8 @@ export class AgentSession {
 		| undefined;
 	#ircWakeTurnAdmission: FollowUpAdmission | undefined;
 	#ircWakeTurnSettlement: FollowUpSettlement | undefined;
+	/** Invalidates a stale wake's captured settlement policy without suppressing its normal turn recovery. */
+	#ircWakeTurnSettlementGeneration = 0;
 	#nextIrcWakeAdmission = 0;
 	#nextIrcWakeAdmissionToCommit = 0;
 	readonly #settledIrcWakeAdmissions = new Map<number, SettledIrcWakeAdmission>();
@@ -966,6 +968,11 @@ export class AgentSession {
 			this.agent.replaceQueues([...this.agent.peekSteeringQueue()], []);
 			if (parkedQueueDrainBlocked) this.#queuedMessageDrainBlocked = false;
 		}
+		// A lifecycle policy can be cleared or replaced while this prompt is in
+		// flight. Bind this accepted wake to the policy that admitted it; the
+		// finally block must never hand an old turn to a replacement owner.
+		const settlement = this.#ircWakeTurnSettlement;
+		const settlementGeneration = this.#ircWakeTurnSettlementGeneration;
 		let finishObservation: ((error?: unknown) => void | Promise<void>) | undefined;
 		try {
 			finishObservation = this.#ircWakeTurnObserver?.(records);
@@ -1008,10 +1015,12 @@ export class AgentSession {
 					} catch (error) {
 						logger.warn("IRC wake turn observer failed to finish", { error: String(error) });
 					}
-					try {
-						await this.#ircWakeTurnSettlement?.(records, turnError);
-					} catch (error) {
-						logger.warn("IRC wake turn settlement failed", { error: String(error) });
+					if (!this.#isDisposed && settlementGeneration === this.#ircWakeTurnSettlementGeneration) {
+						try {
+							await settlement?.(records, turnError);
+						} catch (error) {
+							logger.warn("IRC wake turn settlement failed", { error: String(error) });
+						}
 					}
 				});
 			});
@@ -4081,6 +4090,8 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#ircWakeTurnAdmission = undefined;
+		this.setIrcWakeTurnSettlement(undefined);
 		this.#settledIrcWakeAdmissions.clear();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -8076,6 +8087,7 @@ export class AgentSession {
 	/** Installs durable lifecycle settlement after an admitted autonomous IRC wake. */
 	setIrcWakeTurnSettlement(settlement: FollowUpSettlement | undefined): void {
 		this.#ircWakeTurnSettlement = settlement;
+		this.#ircWakeTurnSettlementGeneration++;
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */

@@ -4,6 +4,8 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -293,6 +295,105 @@ describe("AgentSession IRC wake admission", () => {
 			await Bun.sleep(20);
 			expect(providerStarts()).toBe(0);
 			expect(settlements).toEqual([]);
+		} finally {
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not settle an admitted wake after direct disposal while its provider is in flight", async () => {
+		const firstProviderRelease = Promise.withResolvers<void>();
+		const { session, firstProviderStarted, tempDir } = await createParkedSession({
+			holdFirstProvider: firstProviderRelease.promise,
+		});
+		try {
+			const settlements: string[] = [];
+			session.setIrcWakeTurnSettlement(records => {
+				settlements.push(String(records[0]?.details && Reflect.get(records[0].details, "message")));
+			});
+
+			await session.deliverIrcMessage(message("irc-dispose-settlement", "do not settle after dispose"));
+			await firstProviderStarted;
+			session.beginDispose();
+			firstProviderRelease.resolve();
+			await session.waitForIdle();
+			await Bun.sleep(20);
+
+			expect(settlements).toEqual([]);
+		} finally {
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not settle an admitted wake after lifecycle tombstone release while its provider is in flight", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const firstProviderRelease = Promise.withResolvers<void>();
+		const { session, firstProviderStarted, tempDir } = await createParkedSession({
+			holdFirstProvider: firstProviderRelease.promise,
+		});
+		const registry = AgentRegistry.global();
+		const lifecycle = AgentLifecycleManager.global();
+		const ref = registry.register({
+			id: "tombstone-settlement-child",
+			displayName: "child",
+			kind: "sub",
+			session,
+			sessionFile: `${tempDir.path()}/tombstone-settlement-child.jsonl`,
+			status: "idle",
+		});
+		lifecycle.adopt(ref.id, { idleTtlMs: 0 }, ref);
+		try {
+			const settlements: string[] = [];
+			lifecycle.setFollowUpSettlement(ref.id, records => {
+				settlements.push(String(records[0]?.details && Reflect.get(records[0].details, "message")));
+			});
+
+			await session.deliverIrcMessage(message("irc-tombstone-settlement", "do not settle after tombstone"));
+			await firstProviderStarted;
+			const tombstone = lifecycle.release(ref.id, ref, { tombstone: true });
+			firstProviderRelease.resolve();
+			await tombstone;
+			await Bun.sleep(20);
+
+			expect(settlements).toEqual([]);
+		} finally {
+			await lifecycle.dispose();
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not deliver an old admitted wake to a replacement settlement policy", async () => {
+		const firstProviderRelease = Promise.withResolvers<void>();
+		const { session, firstProviderStarted, tempDir } = await createParkedSession({
+			holdFirstProvider: firstProviderRelease.promise,
+		});
+		try {
+			const oldSettlements: string[] = [];
+			const currentSettlements: string[] = [];
+			session.setIrcWakeTurnSettlement(records => {
+				oldSettlements.push(String(records[0]?.details && Reflect.get(records[0].details, "message")));
+			});
+			await session.deliverIrcMessage(message("irc-policy-old", "old policy wake"));
+			await firstProviderStarted;
+			session.setIrcWakeTurnSettlement(records => {
+				currentSettlements.push(String(records[0]?.details && Reflect.get(records[0].details, "message")));
+			});
+			firstProviderRelease.resolve();
+			await session.waitForIdle();
+			await Bun.sleep(20);
+
+			expect(oldSettlements).toEqual([]);
+			expect(currentSettlements).toEqual([]);
+
+			await session.deliverIrcMessage(message("irc-policy-current", "current policy wake"));
+			await session.waitForIdle();
+			await Bun.sleep(20);
+			expect(currentSettlements).toEqual(["current policy wake"]);
 		} finally {
 			await session.dispose();
 			tempDir.removeSync();
