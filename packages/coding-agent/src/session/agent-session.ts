@@ -895,8 +895,8 @@ export class AgentSession {
 			logger.warn("IRC wake turn admission refused", { error: String(error) });
 			return;
 		}
-		// Admission is async, so mode exit may have started while it was pending.
-		if (this.#modeExitDrainSuppressionDepth > 0) {
+		// Admission is async, so mode exit/disposal may have started while it was pending.
+		if (this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed) {
 			this.#irc.deferWake(records);
 			return;
 		}
@@ -905,10 +905,20 @@ export class AgentSession {
 		});
 		if (admission) {
 			const admitted = await admission;
-			if (!admitted || this.isStreaming || this.#modeExitDrainSuppressionDepth > 0) {
+			if (!admitted || this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed) {
 				this.#irc.deferWake(records);
 				return;
 			}
+			if (this.isStreaming) {
+				this.#deferIrcWakeUntilSettled(records);
+				return;
+			}
+		} else if (this.isStreaming) {
+			// A concurrent lifecycle admission may have started a wake while this
+			// batch awaited its own callback. Do not let agent-core reject the busy
+			// prompt and drop these records; defer them for the settling wake drain.
+			this.#deferIrcWakeUntilSettled(records);
+			return;
 		}
 		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
 		// already-resumable follow-up can ride the wake turn normally without reordering.
@@ -967,6 +977,12 @@ export class AgentSession {
 					}
 				});
 			});
+	}
+
+	/** Defer a batch that lost the race to an in-flight wake and re-drive it once that wake settles. */
+	#deferIrcWakeUntilSettled(records: CustomMessage[]): void {
+		this.#irc.deferWake(records);
+		this.#inFlightSettledCallbacks.push(() => this.#resumeStrandedIrcAsides());
 	}
 
 	/** Remove advisor concern/blocker cards from the agent-core steer/follow-up

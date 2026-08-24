@@ -18,9 +18,10 @@ afterAll(() => {
 	authStorage.close();
 });
 
-async function createParkedSession(): Promise<{
+async function createParkedSession(options?: { holdFirstProvider?: Promise<void> }): Promise<{
 	session: AgentSession;
 	providerStarts: () => number;
+	firstProviderStarted: Promise<void>;
 	tempDir: TempDir;
 }> {
 	const tempDir = TempDir.createSync("@pi-irc-admission-");
@@ -28,9 +29,11 @@ async function createParkedSession(): Promise<{
 		responses: [
 			{ content: ["first wake"], stopReason: "stop" },
 			{ content: ["second wake"], stopReason: "stop" },
+			{ content: ["third wake"], stopReason: "stop" },
 		],
 	});
 	let providerStarts = 0;
+	const firstProviderStarted = Promise.withResolvers<void>();
 	const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false });
 	settings.setModelRole("default", `${model.provider}/${model.id}`);
 	const agent = new Agent({
@@ -42,8 +45,10 @@ async function createParkedSession(): Promise<{
 			messages: [],
 		},
 		convertToLlm,
-		streamFn: (...args) => {
+		streamFn: async (...args) => {
 			providerStarts++;
+			if (providerStarts === 1) firstProviderStarted.resolve();
+			if (providerStarts === 1) await options?.holdFirstProvider;
 			return model.stream(...args);
 		},
 	});
@@ -55,36 +60,23 @@ async function createParkedSession(): Promise<{
 			modelRegistry,
 		}),
 		providerStarts: () => providerStarts,
+		firstProviderStarted: firstProviderStarted.promise,
 		tempDir,
 	};
 }
 
+function message(id: string, body: string): IrcMessage {
+	return { id, from: "Main", to: "child", body, ts: Date.now() } as IrcMessage;
+}
+
 describe("AgentSession IRC wake admission", () => {
-	it("does not start a Hub follow-up before admission and retries a refused record once", async () => {
+	it("does not start a Hub follow-up before admission and returns a refused record to pending", async () => {
 		const { session, providerStarts, tempDir } = await createParkedSession();
 		try {
-			const wakeBodies: string[][] = [];
-			const replayed = Promise.withResolvers<void>();
-			session.setIrcWakeTurnObserver(records => {
-				wakeBodies.push(
-					records.map(record =>
-						typeof record.content === "string" ? record.content : JSON.stringify(record.content),
-					),
-				);
-				if (wakeBodies.length === 3) replayed.resolve();
-				return undefined;
-			});
 			const gate = Promise.withResolvers<void>();
 			session.setIrcWakeTurnAdmission(async () => gate.promise);
 
-			const first = await session.deliverIrcMessage({
-				id: "irc-admission-first",
-				from: "Main",
-				to: "child",
-				body: "wait for me",
-				ts: Date.now(),
-			} as IrcMessage);
-			expect(first).toBe("woken");
+			expect(await session.deliverIrcMessage(message("irc-admission-first", "wait for me"))).toBe("woken");
 			await Promise.resolve();
 			expect(providerStarts()).toBe(0);
 
@@ -95,37 +87,104 @@ describe("AgentSession IRC wake admission", () => {
 			session.setIrcWakeTurnAdmission(async () => {
 				throw new Error("parent turn still owns follow-up");
 			});
-			await session.deliverIrcMessage({
-				id: "irc-admission-refused",
-				from: "Main",
-				to: "child",
-				body: "keep this pending",
-				ts: Date.now(),
-			} as IrcMessage);
+			await session.deliverIrcMessage(message("irc-admission-refused", "keep this pending"));
 			await Promise.resolve();
 			expect(providerStarts()).toBe(1);
+			expect(session.drainPendingIrcInboxMessages("child").map(record => record.body)).toEqual([
+				"keep this pending",
+			]);
+		} finally {
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
 
-			session.setIrcWakeTurnAdmission(undefined);
-			await session.deliverIrcMessage({
-				id: "irc-admission-later",
-				from: "Main",
-				to: "child",
-				body: "wake again",
-				ts: Date.now(),
-			} as IrcMessage);
-			await replayed.promise;
-			await session.waitForIdle();
+	it("defers a concurrently admitted wake until the active wake settles", async () => {
+		const firstProviderRelease = Promise.withResolvers<void>();
+		const { session, providerStarts, firstProviderStarted, tempDir } = await createParkedSession({
+			holdFirstProvider: firstProviderRelease.promise,
+		});
+		try {
+			const observedBodies: string[] = [];
+			const firstAdmissionEntered = Promise.withResolvers<void>();
+			const secondAdmissionEntered = Promise.withResolvers<void>();
+			const firstAdmissionRelease = Promise.withResolvers<void>();
+			const secondAdmissionRelease = Promise.withResolvers<void>();
+			let admissionCount = 0;
+			session.setIrcWakeTurnObserver(records => {
+				const body = records
+					.map(record => String(record.details && Reflect.get(record.details, "message")))
+					.join(",");
+				observedBodies.push(body);
+				return undefined;
+			});
+			session.setIrcWakeTurnAdmission(async () => {
+				admissionCount++;
+				if (admissionCount === 1) {
+					firstAdmissionEntered.resolve();
+					await firstAdmissionRelease.promise;
+					return;
+				}
+				secondAdmissionEntered.resolve();
+				await secondAdmissionRelease.promise;
+			});
 
-			// The later wake starts one new provider turn; then the refused record is re-drained exactly once.
+			await session.deliverIrcMessage(message("irc-concurrent-first", "first"));
+			await firstAdmissionEntered.promise;
+			await session.deliverIrcMessage(message("irc-concurrent-second", "second"));
+			await secondAdmissionEntered.promise;
+			firstAdmissionRelease.resolve();
+			await firstProviderStarted;
+			secondAdmissionRelease.resolve();
+			await Bun.sleep(50);
+
+			// Regression target: without the availability check, this starts a second observer/prompt and loses its batch.
+			expect(providerStarts()).toBe(1);
+			expect(observedBodies).toEqual(["first"]);
+
+			firstProviderRelease.resolve();
+			await Bun.sleep(50);
 			expect(providerStarts()).toBe(2);
-			expect(wakeBodies).toHaveLength(3);
-			expect(wakeBodies.map(records => records.join("\n"))).toEqual(
-			expect.arrayContaining([
-				expect.stringContaining("wait for me"),
-				expect.stringContaining("wake again"),
-				expect.stringContaining("keep this pending"),
-			]),
-		);
+			expect(observedBodies).toEqual(["first"]);
+			expect(
+				session.agent.state.messages.flatMap(message =>
+					message.role === "custom" && message.customType === "irc:incoming"
+						? [String(message.details && Reflect.get(message.details, "message"))]
+						: [],
+				),
+			).toEqual(["first", "second"]);
+		} finally {
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("defers a wake whose lifecycle admission resolves after disposal", async () => {
+		const { session, providerStarts, tempDir } = await createParkedSession();
+		try {
+			const admissionEntered = Promise.withResolvers<void>();
+			const admissionRelease = Promise.withResolvers<void>();
+			let observerStarts = 0;
+			session.setIrcWakeTurnObserver(() => {
+				observerStarts++;
+				return undefined;
+			});
+			session.setIrcWakeTurnAdmission(async () => {
+				admissionEntered.resolve();
+				await admissionRelease.promise;
+			});
+
+			await session.deliverIrcMessage(message("irc-disposed", "do not start"));
+			await admissionEntered.promise;
+			session.beginDispose();
+			admissionRelease.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+
+			// Regression target: a post-admission disposal must leave the record pending, not start a dead turn.
+			expect(observerStarts).toBe(0);
+			expect(providerStarts()).toBe(0);
+			expect(session.drainPendingIrcInboxMessages("child").map(record => record.body)).toEqual(["do not start"]);
 		} finally {
 			await session.dispose();
 			tempDir.removeSync();
