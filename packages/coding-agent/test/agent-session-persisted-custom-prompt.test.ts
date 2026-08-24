@@ -288,6 +288,103 @@ describe("AgentSession persisted custom prompt", () => {
 		await sessionManager.close();
 	});
 
+	it("defers a queued nextTurn trigger until cancelled durable reconciliation restores its context", async () => {
+		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		await sessionManager.ensureOnDisk();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+
+		const durableFlushCompleted = Promise.withResolvers<void>();
+		const releaseDurableContinuation = Promise.withResolvers<void>();
+		const flush = sessionManager.flush.bind(sessionManager);
+		let blockFirstFlush = true;
+		vi.spyOn(sessionManager, "flush").mockImplementation(async () => {
+			await flush();
+			if (!blockFirstFlush) return;
+			blockFirstFlush = false;
+			durableFlushCompleted.resolve();
+			await releaseDurableContinuation.promise;
+		});
+
+		const durableMarker = "DURABLE-PORT-8080";
+		const queuedMarker = "QUEUED-NEXT-TURN";
+		const providerStarted = Promise.withResolvers<void>();
+		let providerStarts = 0;
+		let durableMarkersAtProvider = 0;
+		let queuedMarkersAtProvider = 0;
+		const mock = createMockModel({
+			handler: context => {
+				providerStarts++;
+				const providerText = context.messages.map(message => textFromProviderContent(message.content)).join("\n");
+				durableMarkersAtProvider = providerText.match(new RegExp(durableMarker, "g"))?.length ?? 0;
+				queuedMarkersAtProvider = providerText.match(new RegExp(queuedMarker, "g"))?.length ?? 0;
+				providerStarted.resolve();
+				return { content: ["Queued turn answered with durable context"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		const durableTurn = session.promptCustomMessagePersisted({
+			customType: "subagent-durable-follow-up",
+			content: durableMarker,
+			display: true,
+			details: { deliveryKey: "resolution:r1" },
+			attribution: "user",
+		});
+		await durableFlushCompleted.promise;
+		await session.abort();
+
+		try {
+			const started = await session.sendCustomMessage(
+				{
+					customType: "queued-next-turn",
+					content: queuedMarker,
+					display: false,
+					attribution: "agent",
+				},
+				{ deliverAs: "nextTurn", triggerTurn: true },
+			);
+			expect(started).toBe(false);
+			await Bun.sleep(50);
+			await sessionManager.flush();
+			expect({
+				delivery: await inspectDurableFollowUp(sessionFile, "resolution:r1"),
+				providerStarts,
+			}).toEqual({ delivery: "appended", providerStarts: 0 });
+		} finally {
+			releaseDurableContinuation.resolve();
+			await durableTurn;
+		}
+
+		await providerStarted.promise;
+		await session.waitForIdle();
+		await sessionManager.flush();
+		expect(providerStarts).toBe(1);
+		expect(durableMarkersAtProvider).toBe(1);
+		expect(queuedMarkersAtProvider).toBe(1);
+		expect(await inspectDurableFollowUp(sessionFile, "resolution:r1")).toBe("answered");
+		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);
+		await sessionManager.close();
+	});
+
 	it("keeps the durable message singular through forced pre-prompt compaction", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
 		authStorage = await AuthStorage.create(":memory:");

@@ -412,6 +412,17 @@ type AgentContinueSkipReason =
 	| "should-continue-false"
 	| "post-restore-unavailable";
 
+type DurablePromptReservation = {
+	released: Promise<void>;
+	release(): void;
+};
+
+type ProviderTurnAdmissionOptions = {
+	durableReservation?: DurablePromptReservation;
+	defer?: boolean;
+	signal?: AbortSignal;
+};
+
 type ScheduledAgentContinueOptions = {
 	delayMs?: number;
 	generation?: number;
@@ -643,7 +654,7 @@ export class AgentSession {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
-	#durablePromptReserved = false;
+	#durablePromptReservation: DurablePromptReservation | undefined;
 	#abortInProgress = false;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
@@ -717,6 +728,55 @@ export class AgentSession {
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
 		}
+	}
+
+	#reserveDurablePrompt(): DurablePromptReservation {
+		if (this.isStreaming) throw new AgentBusyError();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const reservation = { released: promise, release: resolve };
+		this.#durablePromptReservation = reservation;
+		return reservation;
+	}
+
+	#releaseDurablePrompt(reservation: DurablePromptReservation): void {
+		if (this.#durablePromptReservation === reservation) this.#durablePromptReservation = undefined;
+		reservation.release();
+	}
+
+	#admitProviderTurn(options?: ProviderTurnAdmissionOptions): Promise<boolean> | undefined {
+		const reservation = this.#durablePromptReservation;
+		if (!reservation || options?.durableReservation === reservation) return undefined;
+		if (!options?.defer) throw new AgentBusyError();
+		return this.#waitForDurablePromptRelease(options.signal);
+	}
+
+	async #waitForDurablePromptRelease(signal?: AbortSignal): Promise<boolean> {
+		while (this.#durablePromptReservation) {
+			if (signal?.aborted || this.#isDisposed) return false;
+			const reservation = this.#durablePromptReservation;
+			if (!signal) {
+				await reservation.released;
+				continue;
+			}
+			const aborted = Promise.withResolvers<void>();
+			const onAbort = () => aborted.resolve();
+			signal.addEventListener("abort", onAbort, { once: true });
+			try {
+				await Promise.race([reservation.released, aborted.promise]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+		}
+		return !signal?.aborted && !this.#isDisposed;
+	}
+
+	async #continueAgentWithAdmission(signal?: AbortSignal): Promise<void> {
+		const admission = this.#admitProviderTurn({ defer: true, signal });
+		if (admission && !(await admission)) {
+			signal?.throwIfAborted();
+			throw new Error("Session unavailable while waiting for provider-turn admission.");
+		}
+		await this.agent.continue(signal);
 	}
 
 	#endInFlight(onSettled?: () => void | Promise<void>): void {
@@ -818,6 +878,16 @@ export class AgentSession {
 	#wakeForIrc(records: CustomMessage[]): void {
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.deferWake(records);
+			return;
+		}
+		const admission = this.#admitProviderTurn({
+			defer: true,
+		});
+		if (admission) {
+			void admission.then(admitted => {
+				if (admitted && !this.isStreaming) this.#wakeForIrc(records);
+				else this.#irc.deferWake(records);
+			});
 			return;
 		}
 		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
@@ -1231,6 +1301,12 @@ export class AgentSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
+				const admission = this.#admitProviderTurn({
+					defer: true,
+				});
+				if (admission && !(await admission)) {
+					throw new Error("Session unavailable while waiting for provider-turn admission.");
+				}
 				this.#beginInFlight();
 				try {
 					await this.agent.prompt(messages.length === 1 ? first : messages);
@@ -1337,6 +1413,7 @@ export class AgentSession {
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			schedulePostPromptTask: (task, options) => this.#schedulePostPromptTask(task, options),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
+			continueAgent: signal => this.#continueAgentWithAdmission(signal),
 			promptGeneration: () => this.#promptGeneration,
 		};
 		this.#ttsr = new TtsrCoordinator(ttsrHost, config.ttsrManager);
@@ -1368,6 +1445,7 @@ export class AgentSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
+			continueAgent: signal => this.#continueAgentWithAdmission(signal),
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
@@ -3218,6 +3296,15 @@ export class AgentSession {
 	#scheduleAgentContinue(options?: ScheduledAgentContinueOptions): void {
 		this.#schedulePostPromptTask(
 			async signal => {
+				const admission = this.#admitProviderTurn({ defer: true, signal });
+				if (admission && !(await admission)) {
+					this.#skipAgentContinue(signal.aborted ? "aborted" : "session-unavailable", options);
+					return;
+				}
+				if (options?.generation !== undefined && this.#promptGeneration !== options.generation) {
+					this.#skipAgentContinue("stale-generation", options);
+					return;
+				}
 				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
 				// alongside us (e.g. via a scheduler we don't own), refuse to start a fresh
 				// streaming turn — agent.continue() here would race the handoff's session
@@ -3256,7 +3343,11 @@ export class AgentSession {
 							return;
 						}
 					}
-					await this.agent.continue(signal);
+					if (options?.generation !== undefined && this.#promptGeneration !== options.generation) {
+						this.#skipAgentContinue("stale-generation", options);
+						return;
+					}
+					await this.#continueAgentWithAdmission(signal);
 				} catch (error) {
 					logger.warn("agent.continue failed after scheduling", {
 						error: error instanceof Error ? error.message : String(error),
@@ -3298,7 +3389,7 @@ export class AgentSession {
 	}
 
 	#scheduleAutoContinuePrompt(generation: number): boolean {
-		const continuePrompt = async () => {
+		const continuePrompt = async (signal: AbortSignal) => {
 			// Compaction summarizes away the first-message eager preludes, so re-assert the
 			// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
 			// at invocation (past the abort check below), so an aborted continuation queues
@@ -3315,6 +3406,7 @@ export class AgentSession {
 				{
 					skipPostPromptRecoveryWait: true,
 					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
+					deferProviderAdmission: { signal },
 				},
 			);
 		};
@@ -3329,7 +3421,7 @@ export class AgentSession {
 					});
 					return;
 				}
-				await continuePrompt();
+				await continuePrompt(signal);
 			},
 			{ generation },
 		);
@@ -4416,7 +4508,9 @@ export class AgentSession {
 
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
-		return this.agent.state.isStreaming || this.#promptInFlightCount > 0 || this.#durablePromptReserved;
+		return (
+			this.agent.state.isStreaming || this.#promptInFlightCount > 0 || this.#durablePromptReservation !== undefined
+		);
 	}
 
 	get isAborting(): boolean {
@@ -5544,8 +5638,7 @@ export class AgentSession {
 	async promptCustomMessagePersisted<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 	): Promise<void> {
-		if (this.isStreaming) throw new AgentBusyError();
-		this.#durablePromptReserved = true;
+		const reservation = this.#reserveDurablePrompt();
 		this.#beginInFlight();
 		try {
 			const textContent =
@@ -5567,6 +5660,7 @@ export class AgentSession {
 
 			await this.#promptWithMessage(customMessage, textContent, {
 				reservedInFlight: true,
+				durableReservation: reservation,
 				beforeProvider: async () => {
 					this.sessionManager.appendCustomMessageEntry(
 						customMessage.customType,
@@ -5583,7 +5677,7 @@ export class AgentSession {
 				},
 			});
 		} finally {
-			this.#durablePromptReserved = false;
+			this.#releaseDurablePrompt(reservation);
 			this.#endInFlight();
 		}
 	}
@@ -5597,12 +5691,25 @@ export class AgentSession {
 			acceptTerminalEmptyStop?: boolean;
 			/** The caller already reserved the prompt before an awaited setup boundary. */
 			reservedInFlight?: boolean;
+			/** Admission token held by the durable prompt itself. */
+			durableReservation?: DurablePromptReservation;
+			/** Internal scheduled starts defer behind a durable reservation instead of failing busy. */
+			deferProviderAdmission?: { signal?: AbortSignal };
 			/** Runs after normal setup and compaction, immediately before the provider path. */
 			beforeProvider?: () => Promise<void>;
 			/** Reconciles an already-persisted prompt into live context if its provider turn is cancelled. */
 			reconcileAfterProviderCancellation?: () => void;
 		},
 	): Promise<void> {
+		const admission = this.#admitProviderTurn({
+			durableReservation: options?.durableReservation,
+			defer: options?.deferProviderAdmission !== undefined,
+			signal: options?.deferProviderAdmission?.signal,
+		});
+		if (admission && !(await admission)) {
+			options?.deferProviderAdmission?.signal?.throwIfAborted();
+			throw new Error("Session unavailable while waiting for provider-turn admission.");
+		}
 		const ownsInFlight = options?.reservedInFlight !== true;
 		if (ownsInFlight) this.#beginInFlight();
 		const generation = this.#promptGeneration;
@@ -5828,11 +5935,18 @@ export class AgentSession {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			if (this.#promptGeneration !== generation) return;
+			const finalAdmission = this.#admitProviderTurn({ durableReservation: options?.durableReservation });
+			if (finalAdmission) await finalAdmission;
 			try {
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
 			}
+			// The durable message is now in the completed provider run's live context.
+			// Release before awaiting recovery tasks: those tasks may themselves need
+			// provider admission, so holding the reservation here would self-deadlock.
+			if (options?.durableReservation) this.#releaseDurablePrompt(options.durableReservation);
 			if (!options?.skipPostPromptRecoveryWait) {
 				await this.#waitForPostPromptRecovery(generation);
 			}
@@ -6202,7 +6316,7 @@ export class AgentSession {
 		}
 		this.#scheduledHiddenNextTurnGeneration = generation;
 		this.#schedulePostPromptTask(
-			async () => {
+			async signal => {
 				if (this.#scheduledHiddenNextTurnGeneration === generation) {
 					this.#scheduledHiddenNextTurnGeneration = undefined;
 				}
@@ -6210,7 +6324,7 @@ export class AgentSession {
 					return;
 				}
 				try {
-					await this.#promptQueuedHiddenNextTurnMessages();
+					await this.#promptQueuedHiddenNextTurnMessages(signal);
 				} catch {
 					// Leave the hidden next-turn messages queued for the next explicit prompt.
 				}
@@ -6226,7 +6340,7 @@ export class AgentSession {
 		);
 	}
 
-	async #promptQueuedHiddenNextTurnMessages(): Promise<void> {
+	async #promptQueuedHiddenNextTurnMessages(signal: AbortSignal): Promise<void> {
 		if (this.#pendingNextTurnMessages.length === 0) {
 			return;
 		}
@@ -6244,6 +6358,7 @@ export class AgentSession {
 			await this.#promptWithMessage(message, textContent, {
 				prependMessages,
 				skipPostPromptRecoveryWait: true,
+				deferProviderAdmission: { signal },
 			});
 		} catch (error) {
 			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
@@ -6282,7 +6397,10 @@ export class AgentSession {
 		message: CustomMessage,
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<void> {
+		const admission = this.#admitProviderTurn();
+		if (admission) await admission;
 		this.#beginInFlight();
+		const generation = this.#promptGeneration;
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
@@ -6290,6 +6408,9 @@ export class AgentSession {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
+			if (this.#promptGeneration !== generation) return;
+			const finalAdmission = this.#admitProviderTurn();
+			if (finalAdmission) await finalAdmission;
 			await this.agent.prompt(message);
 			await this.#waitForPostPromptRecovery();
 		} finally {
