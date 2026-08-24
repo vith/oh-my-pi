@@ -217,6 +217,77 @@ describe("AgentSession persisted custom prompt", () => {
 		await sessionManager.close();
 	});
 
+	it("keeps direct prompts fenced after abort until durable reconciliation completes", async () => {
+		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		await sessionManager.ensureOnDisk();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+
+		const durableFlushCompleted = Promise.withResolvers<void>();
+		const releaseDurableContinuation = Promise.withResolvers<void>();
+		const flush = sessionManager.flush.bind(sessionManager);
+		let blockFirstFlush = true;
+		vi.spyOn(sessionManager, "flush").mockImplementation(async () => {
+			await flush();
+			if (!blockFirstFlush) return;
+			blockFirstFlush = false;
+			durableFlushCompleted.resolve();
+			await releaseDurableContinuation.promise;
+		});
+
+		let providerStarts = 0;
+		const mock = createMockModel({
+			handler: () => {
+				providerStarts++;
+				return { content: ["Unrelated answer"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		const durableTurn = session.promptCustomMessagePersisted({
+			customType: "subagent-durable-follow-up",
+			content: "Use port 8080.",
+			display: true,
+			details: { deliveryKey: "resolution:r1" },
+			attribution: "user",
+		});
+		await durableFlushCompleted.promise;
+		await session.abort();
+
+		let competingPromptError: unknown;
+		try {
+			await session.prompt("competing direct prompt");
+		} catch (error) {
+			competingPromptError = error;
+		} finally {
+			releaseDurableContinuation.resolve();
+			await durableTurn;
+		}
+
+		expect(await inspectDurableFollowUp(sessionFile, "resolution:r1")).toBe("appended");
+		expect(competingPromptError).toBeInstanceOf(AgentBusyError);
+		expect(providerStarts).toBe(0);
+		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);
+		await sessionManager.close();
+	});
+
 	it("keeps the durable message singular through forced pre-prompt compaction", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
 		authStorage = await AuthStorage.create(":memory:");

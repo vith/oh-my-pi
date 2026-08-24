@@ -643,6 +643,7 @@ export class AgentSession {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
+	#durablePromptReserved = false;
 	#abortInProgress = false;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
@@ -4415,7 +4416,7 @@ export class AgentSession {
 
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
-		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
+		return this.agent.state.isStreaming || this.#promptInFlightCount > 0 || this.#durablePromptReserved;
 	}
 
 	get isAborting(): boolean {
@@ -5544,6 +5545,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 	): Promise<void> {
 		if (this.isStreaming) throw new AgentBusyError();
+		this.#durablePromptReserved = true;
 		this.#beginInFlight();
 		try {
 			const textContent =
@@ -5581,6 +5583,7 @@ export class AgentSession {
 				},
 			});
 		} finally {
+			this.#durablePromptReserved = false;
 			this.#endInFlight();
 		}
 	}
