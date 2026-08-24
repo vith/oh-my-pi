@@ -69,30 +69,86 @@ function message(id: string, body: string): IrcMessage {
 	return { id, from: "Main", to: "child", body, ts: Date.now() } as IrcMessage;
 }
 
+function deliveredIrcBodies(session: AgentSession): string[] {
+	return session.agent.state.messages.flatMap(message =>
+		message.role === "custom" && message.customType === "irc:incoming"
+			? [String(message.details && Reflect.get(message.details, "message"))]
+			: [],
+	);
+}
+
 describe("AgentSession IRC wake admission", () => {
-	it("does not start a Hub follow-up before admission and returns a refused record to pending", async () => {
-		const { session, providerStarts, tempDir } = await createParkedSession();
+	it("delivers refused batches with a later accepted wake in arrival order", async () => {
+		const firstProviderRelease = Promise.withResolvers<void>();
+		const { session, providerStarts, firstProviderStarted, tempDir } = await createParkedSession({
+			holdFirstProvider: firstProviderRelease.promise,
+		});
 		try {
-			const gate = Promise.withResolvers<void>();
-			session.setIrcWakeTurnAdmission(async () => gate.promise);
-
-			expect(await session.deliverIrcMessage(message("irc-admission-first", "wait for me"))).toBe("woken");
-			await Promise.resolve();
-			expect(providerStarts()).toBe(0);
-
-			gate.resolve();
-			await session.waitForIdle();
-			expect(providerStarts()).toBe(1);
-
+			const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			const releases = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			let admissionCount = 0;
 			session.setIrcWakeTurnAdmission(async () => {
-				throw new Error("parent turn still owns follow-up");
+				const index = admissionCount++;
+				entered[index]?.resolve();
+				await releases[index]?.promise;
+				if (index < 2) throw new Error(`refuse-${index}`);
 			});
-			await session.deliverIrcMessage(message("irc-admission-refused", "keep this pending"));
-			await Promise.resolve();
+
+			await session.deliverIrcMessage(message("irc-refused-first", "refused first"));
+			await entered[0]?.promise;
+			await session.deliverIrcMessage(message("irc-refused-second", "refused second"));
+			await entered[1]?.promise;
+			await session.deliverIrcMessage(message("irc-refused-trigger", "accepted trigger"));
+			await entered[2]?.promise;
+
+			// Resolve the later refusal first: completion order must not reorder the pending IRC records.
+			releases[1]?.resolve();
+			releases[0]?.resolve();
+			releases[2]?.resolve();
+			await firstProviderStarted;
 			expect(providerStarts()).toBe(1);
-			expect(session.drainPendingIrcInboxMessages("child").map(record => record.body)).toEqual([
-				"keep this pending",
-			]);
+			firstProviderRelease.resolve();
+			await Bun.sleep(50);
+
+			expect(deliveredIrcBodies(session)).toEqual(["refused first", "refused second", "accepted trigger"]);
+		} finally {
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("keeps three admitted wake batches in arrival order when later admissions resolve first", async () => {
+		const firstProviderRelease = Promise.withResolvers<void>();
+		const { session, providerStarts, firstProviderStarted, tempDir } = await createParkedSession({
+			holdFirstProvider: firstProviderRelease.promise,
+		});
+		try {
+			const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			const releases = [Promise.withResolvers<void>(), Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			let admissionCount = 0;
+			session.setIrcWakeTurnAdmission(async () => {
+				const index = admissionCount++;
+				entered[index]?.resolve();
+				await releases[index]?.promise;
+			});
+
+			await session.deliverIrcMessage(message("irc-order-first", "first"));
+			await entered[0]?.promise;
+			await session.deliverIrcMessage(message("irc-order-second", "second"));
+			await entered[1]?.promise;
+			await session.deliverIrcMessage(message("irc-order-third", "third"));
+			await entered[2]?.promise;
+
+			// R3 and R2 resolve first while R1 is still pending; all records still belong to their arrival order.
+			releases[2]?.resolve();
+			releases[1]?.resolve();
+			releases[0]?.resolve();
+			await firstProviderStarted;
+			expect(providerStarts()).toBe(1);
+			firstProviderRelease.resolve();
+			await Bun.sleep(50);
+
+			expect(deliveredIrcBodies(session)).toEqual(["first", "second", "third"]);
 		} finally {
 			await session.dispose();
 			tempDir.removeSync();

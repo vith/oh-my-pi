@@ -426,6 +426,11 @@ type ProviderTurnAdmissionOptions = {
 	signal?: AbortSignal;
 };
 
+type SettledIrcWakeAdmission = {
+	records: CustomMessage[];
+	refused: boolean;
+};
+
 type ScheduledAgentContinueOptions = {
 	delayMs?: number;
 	generation?: number;
@@ -589,6 +594,9 @@ export class AgentSession {
 		| ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
 	#ircWakeTurnAdmission: FollowUpAdmission | undefined;
+	#nextIrcWakeAdmission = 0;
+	#nextIrcWakeAdmissionToCommit = 0;
+	readonly #settledIrcWakeAdmissions = new Map<number, SettledIrcWakeAdmission>();
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
@@ -880,22 +888,43 @@ export class AgentSession {
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
 	#wakeForIrc(records: CustomMessage[]): void {
-		void this.#admitAndWakeForIrc(records);
+		const sequence = this.#nextIrcWakeAdmission++;
+		void this.#awaitIrcWakeAdmission(sequence, records);
 	}
 
-	async #admitAndWakeForIrc(records: CustomMessage[]): Promise<void> {
-		if (this.#modeExitDrainSuppressionDepth > 0) {
+	async #awaitIrcWakeAdmission(sequence: number, records: CustomMessage[]): Promise<void> {
+		let refused = this.#modeExitDrainSuppressionDepth > 0;
+		if (!refused) {
+			try {
+				await this.#ircWakeTurnAdmission?.(records);
+			} catch (error) {
+				refused = true;
+				logger.warn("IRC wake turn admission refused", { error: String(error) });
+			}
+		}
+		if (this.#isDisposed) {
 			this.#irc.deferWake(records);
 			return;
 		}
-		try {
-			await this.#ircWakeTurnAdmission?.(records);
-		} catch (error) {
-			this.#irc.deferWake(records);
-			logger.warn("IRC wake turn admission refused", { error: String(error) });
-			return;
+		this.#settledIrcWakeAdmissions.set(sequence, { records, refused });
+		this.#commitSettledIrcWakeAdmissions();
+	}
+
+	#commitSettledIrcWakeAdmissions(): void {
+		while (true) {
+			const settled = this.#settledIrcWakeAdmissions.get(this.#nextIrcWakeAdmissionToCommit);
+			if (!settled) return;
+			this.#settledIrcWakeAdmissions.delete(this.#nextIrcWakeAdmissionToCommit++);
+			if (settled.refused) {
+				this.#irc.deferWake(settled.records);
+				continue;
+			}
+			const earlierRecords = this.#irc.drainPending();
+			void this.#wakeAfterIrcAdmission([...earlierRecords, ...settled.records]);
 		}
-		// Admission is async, so mode exit/disposal may have started while it was pending.
+	}
+
+	async #wakeAfterIrcAdmission(records: CustomMessage[]): Promise<void> {
 		if (this.#modeExitDrainSuppressionDepth > 0 || this.#isDisposed) {
 			this.#irc.deferWake(records);
 			return;
@@ -4043,6 +4072,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#settledIrcWakeAdmissions.clear();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#detachUsageBeforeQueueDequeue?.();
