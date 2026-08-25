@@ -145,6 +145,8 @@ function createPauseSession(
 			disposeCount += 1;
 		},
 		setIrcWakeTurnObserver: () => {},
+		setIrcWakeTurnAdmission: (_next: unknown) => {},
+		setIrcWakeTurnSettlement: (_next: unknown) => {},
 		subscribeRunState: () => () => {},
 	};
 	harness.session = session as unknown as AgentSession;

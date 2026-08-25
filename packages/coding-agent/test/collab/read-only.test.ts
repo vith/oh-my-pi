@@ -227,6 +227,8 @@ describe("collab read-only links", () => {
 				aborts++;
 			},
 			dispose: async () => {},
+			setIrcWakeTurnAdmission: (_next: unknown) => {},
+			setIrcWakeTurnSettlement: (_next: unknown) => {},
 		} as unknown as AgentSession;
 		const ref = registry.register({
 			id,

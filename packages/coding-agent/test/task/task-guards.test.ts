@@ -109,6 +109,8 @@ function createFakeSession(config: FakeSessionConfig = {}): FakeSessionHandle {
 		},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
+		setIrcWakeTurnAdmission: (_next: unknown) => {},
+		setIrcWakeTurnSettlement: (_next: unknown) => {},
 		subscribeRunState: () => () => {},
 	};
 	return {
