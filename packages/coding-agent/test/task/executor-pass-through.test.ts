@@ -50,6 +50,8 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 		abort: async () => {},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
+		setIrcWakeTurnAdmission: (_next: unknown) => {},
+		setIrcWakeTurnSettlement: (_next: unknown) => {},
 		subscribeRunState: () => () => {},
 	};
 	return session as unknown as AgentSession;

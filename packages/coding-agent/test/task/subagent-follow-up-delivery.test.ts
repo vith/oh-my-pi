@@ -184,6 +184,8 @@ function createDurableSession(manager: SessionManager): DurableSessionHarness {
 		abort: async () => {},
 		hasPendingAsyncWork: () => false,
 		setIrcWakeTurnObserver: () => {},
+		setIrcWakeTurnAdmission: (_next: unknown) => {},
+		setIrcWakeTurnSettlement: (_next: unknown) => {},
 		subscribeRunState: () => () => {},
 	};
 	return { session: session as unknown as AgentSession, modelRequests: () => requests };
@@ -277,6 +279,8 @@ function createDeferredDurableSession(manager: SessionManager): DeferredDurableS
 		abort: async () => {},
 		hasPendingAsyncWork: () => false,
 		setIrcWakeTurnObserver: () => {},
+		setIrcWakeTurnAdmission: (_next: unknown) => {},
+		setIrcWakeTurnSettlement: (_next: unknown) => {},
 		subscribeRunState: () => () => {},
 	};
 	return {
