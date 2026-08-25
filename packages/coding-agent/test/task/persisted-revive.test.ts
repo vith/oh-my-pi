@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -10,12 +12,14 @@ import type { AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const tempDirs: TempDir[] = [];
 
@@ -40,14 +44,17 @@ function createRef(sessionFile: string): AgentRef {
 }
 
 type IrcWakeObserver = (records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
+type FollowUpAdmission = (records: readonly CustomMessage[]) => void | Promise<void>;
 
 interface RevivedSessionHandle {
 	session: AgentSession;
 	observer: () => IrcWakeObserver | undefined;
+	admission: () => FollowUpAdmission | undefined;
 }
 
 function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
+	let admission: FollowUpAdmission | undefined;
 	const session = {
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
@@ -57,11 +64,14 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
+		setIrcWakeTurnAdmission: (next: FollowUpAdmission | undefined) => {
+			admission = next;
+		},
 		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () => undefined,
 		extensionRunner,
 	} as unknown as AgentSession;
-	return { session, observer: () => observer };
+	return { session, observer: () => observer, admission: () => admission };
 }
 
 async function createPersistedSession(
@@ -123,6 +133,35 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 	});
 }
 
+function createRealColdRevivedSession(cwd: string): {
+	session: AgentSession;
+	providerStarts: () => number;
+	close: () => void;
+} {
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.setRuntimeApiKey("mock", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage);
+	const model = createMockModel({ responses: [{ content: ["cold wake"], stopReason: "stop" }] });
+	let providerStarts = 0;
+	const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false });
+	settings.setModelRole("default", `${model.provider}/${model.id}`);
+	const session = new AgentSession({
+		agent: new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["cold revive"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (...args) => {
+				providerStarts++;
+				return model.stream(...args);
+			},
+		}),
+		sessionManager: SessionManager.inMemory(cwd),
+		settings,
+		modelRegistry,
+	});
+	return { session, providerStarts: () => providerStarts, close: () => authStorage.close() };
+}
+
 afterEach(async () => {
 	vi.restoreAllMocks();
 	MCPManager.resetForTests();
@@ -130,6 +169,60 @@ afterEach(async () => {
 });
 
 describe("persisted subagent revival", () => {
+	it("gates the first Hub follow-up of a real cold-revived session on its stored admission", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const manager = new AgentLifecycleManager(registry);
+		const cwd = makeTempDir("@pi-persisted-admission-");
+		const ref = createRef(path.join(cwd, "persisted-admission.jsonl"));
+		registry.register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: ref.kind,
+			parentId: ref.parentId,
+			session: null,
+			sessionFile: ref.sessionFile,
+			status: "parked",
+		});
+		const admissionEntered = Promise.withResolvers<void>();
+		const admissionRelease = Promise.withResolvers<void>();
+		let recreated: ReturnType<typeof createRealColdRevivedSession> | undefined;
+		const admission: FollowUpAdmission = async () => {
+			admissionEntered.resolve();
+			await admissionRelease.promise;
+		};
+		manager.setFollowUpAdmission(ref.id, admission);
+		manager.setPersistedSubagentReviverFactory(
+			async expected => async () => {
+				expect(expected.id).toBe(ref.id);
+				recreated = createRealColdRevivedSession(cwd);
+				return recreated.session;
+			},
+			0,
+		);
+
+		try {
+			const session = await manager.ensureLive(ref.id);
+			await session.deliverIrcMessage({
+				id: "cold-revive-hub-follow-up",
+				from: "Main",
+				to: ref.id,
+				body: "wait for parent admission",
+				ts: Date.now(),
+			});
+			await admissionEntered.promise;
+			expect(recreated?.providerStarts()).toBe(0);
+
+			admissionRelease.resolve();
+			await session.waitForIdle();
+			expect(recreated?.providerStarts()).toBe(1);
+		} finally {
+			await manager.dispose();
+			recreated?.close();
+			AgentRegistry.resetGlobalForTests();
+		}
+	});
+
 	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
 		const cwd = makeTempDir("@pi-revive-ext-init-");
 		const sessionFile = await createPersistedSession(cwd);

@@ -379,6 +379,59 @@ describe("durable subagent follow-up delivery", () => {
 		await expect(inspectDurableFollowUp(unknownEntryFile, "resolution:r1")).rejects.toThrow("invalid");
 	});
 
+	it("rejects a truncated assistant entry instead of treating it as a durable answer", async () => {
+		const sessionFile = path.join(tempDir.path(), "truncated-assistant.jsonl");
+		await writeTranscript(sessionFile, [
+			sessionEntry("init", null, { type: "session_init", systemPrompt: "test", task: "test", tools: [] }),
+			sessionEntry("delivery", "init", {
+				type: "custom_message",
+				customType: "subagent-durable-follow-up",
+				content: "Use port 8080.",
+				display: true,
+				attribution: "user",
+				details: { deliveryKey: "resolution:r1" },
+			}),
+			sessionEntry("truncated-answer", "delivery", { type: "message", message: { role: "assistant" } }),
+		]);
+
+		await expect(inspectDurableFollowUp(sessionFile, "resolution:r1")).rejects.toThrow("invalid");
+	});
+
+	it("rejects malformed parent structure on an inactive transcript branch", async () => {
+		const orphanFile = path.join(tempDir.path(), "off-branch-orphan.jsonl");
+		await writeTranscript(orphanFile, [
+			sessionEntry("init", null, { type: "session_init", systemPrompt: "test", task: "test", tools: [] }),
+			sessionEntry("delivery", "init", {
+				type: "custom_message",
+				customType: "subagent-durable-follow-up",
+				content: "Use port 8080.",
+				display: true,
+				attribution: "user",
+				details: { deliveryKey: "resolution:r1" },
+			}),
+			sessionEntry("orphan", "missing-parent", { type: "custom", customType: "off-branch" }),
+			sessionEntry("active-leaf", "delivery", { type: "custom", customType: "active-branch" }),
+		]);
+		await expect(inspectDurableFollowUp(orphanFile, "resolution:r1")).rejects.toThrow("invalid");
+
+		const cycleFile = path.join(tempDir.path(), "off-branch-cycle.jsonl");
+		await writeTranscript(cycleFile, [
+			sessionEntry("init", null, { type: "session_init", systemPrompt: "test", task: "test", tools: [] }),
+			sessionEntry("delivery", "init", {
+				type: "custom_message",
+				customType: "subagent-durable-follow-up",
+				content: "Use port 8080.",
+				display: true,
+				attribution: "user",
+				details: { deliveryKey: "resolution:r1" },
+			}),
+			sessionEntry("cycle-a", "cycle-b", { type: "custom", customType: "off-branch" }),
+			sessionEntry("cycle-b", "cycle-a", { type: "custom", customType: "off-branch" }),
+			sessionEntry("active-leaf", "delivery", { type: "custom", customType: "active-branch" }),
+		]);
+		await expect(inspectDurableFollowUp(cycleFile, "resolution:r1")).rejects.toThrow("invalid");
+	});
+
 	it("appends a follow-up once and never starts a second model turn for the same key", async () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
 		manager.appendSessionInit({ systemPrompt: "test", task: "test", tools: ["yield"] });

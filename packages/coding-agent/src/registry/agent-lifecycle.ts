@@ -22,7 +22,7 @@
 
 import * as fs from "node:fs/promises";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
-import type { AgentSession } from "../session/agent-session";
+import type { AgentSession, FollowUpAdmission, FollowUpSettlement } from "../session/agent-session";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
 	type AgentRef,
@@ -108,6 +108,9 @@ export class AgentLifecycleManager {
 			current.#adopted.clear();
 			current.#revivals.clear();
 			current.#parks.clear();
+			current.#clearAllLiveFollowUpPolicies();
+			current.#followUpAdmissions.clear();
+			current.#followUpSettlements.clear();
 			current.#persistedReviverFactory = undefined;
 		}
 		AgentLifecycleManager.#global = undefined;
@@ -123,6 +126,10 @@ export class AgentLifecycleManager {
 	readonly #parks = new Map<string, ParkInFlight>();
 	/** In-flight revives, bound to the parked ref that initiated them, so concurrent {@link ensureLive} calls coalesce. */
 	readonly #revivals = new Map<string, RevivingAgent>();
+	/** Admission policies survive warm parking and cold reconstruction by registry id. */
+	readonly #followUpAdmissions = new Map<string, FollowUpAdmission>();
+	/** Settlement policies survive warm parking and cold reconstruction by registry id. */
+	readonly #followUpSettlements = new Map<string, FollowUpSettlement>();
 	#unsubscribe: (() => void) | undefined;
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 	/** TTL applied when a cold-revived ref is adopted on demand. */
@@ -147,6 +154,28 @@ export class AgentLifecycleManager {
 	}
 
 	/**
+	 * Gate autonomous Agent Hub follow-ups for this lifecycle-owned agent. The
+	 * policy is applied immediately to a live session and retained for its next
+	 * warm or cold revival.
+	 */
+	setFollowUpAdmission(id: string, admission: FollowUpAdmission | undefined): void {
+		if (admission) this.#followUpAdmissions.set(id, admission);
+		else this.#followUpAdmissions.delete(id);
+		this.#registry.get(id)?.session?.setIrcWakeTurnAdmission(admission);
+	}
+
+	/**
+	 * Notify lifecycle ownership only after an admitted Agent Hub follow-up has
+	 * completed its prompt and post-prompt recovery. Retained for warm and cold
+	 * revival just like the admission policy.
+	 */
+	setFollowUpSettlement(id: string, settlement: FollowUpSettlement | undefined): void {
+		if (settlement) this.#followUpSettlements.set(id, settlement);
+		else this.#followUpSettlements.delete(id);
+		this.#registry.get(id)?.session?.setIrcWakeTurnSettlement(settlement);
+	}
+
+	/**
 	 * Take ownership of a finished subagent. Caller has already set registry
 	 * status to "idle". Arms the TTL timer (idleTtlMs <= 0 adopts without one).
 	 * When `expected` is given, the adoption is refused if the id no longer
@@ -163,6 +192,7 @@ export class AgentLifecycleManager {
 		clearTimeout(existing?.timer);
 		const adopted: AdoptedAgent = { ref, idleTtlMs: opts.idleTtlMs, revive: opts.revive };
 		this.#adopted.set(id, adopted);
+		this.#installFollowUpPolicies(id, ref.session);
 		this.#armTimer(id, adopted);
 	}
 
@@ -327,6 +357,7 @@ export class AgentLifecycleManager {
 					// Park cleared the idle timer; re-arm so TTL park still works.
 					const adopted = this.#adopted.get(id);
 					if (adopted && adopted.ref === parked && parked.status === "idle") this.#armTimer(id, adopted);
+					this.#installFollowUpPolicies(id, kept);
 					return kept;
 				}
 			} else {
@@ -342,7 +373,10 @@ export class AgentLifecycleManager {
 				`Unknown agent "${id}" — it was never registered or has been released. If a transcript exists, read history://${id}.`,
 			);
 		}
-		if (ref.session) return ref.session;
+		if (ref.session) {
+			this.#installFollowUpPolicies(id, ref.session);
+			return ref.session;
+		}
 		const inflight = this.#revivals.get(id);
 		if (inflight?.ref === ref) return inflight.promise;
 		const revival = this.#resolveAndRevive(id, ref);
@@ -423,10 +457,15 @@ export class AgentLifecycleManager {
 			adopted && (expected === undefined || adopted.ref === expected || adopted.ref.session === expected);
 		const ref = currentMatches ? current : adoptedMatches ? adopted.ref : undefined;
 		if (!ref) return false;
+		// Clear the exact session's hooks synchronously before a tombstone write,
+		// status change, park await, or disposal can let an in-flight wake settle.
+		this.#clearLiveFollowUpPolicies(ref.session);
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
 			this.#adopted.delete(id);
 		}
+		this.#followUpAdmissions.delete(id);
+		this.#followUpSettlements.delete(id);
 
 		const park = this.#parks.get(id);
 		if (park && park.ref === ref) {
@@ -460,7 +499,20 @@ export class AgentLifecycleManager {
 		this.#unsubscribe?.();
 		this.#disposed = true;
 		this.#unsubscribe = undefined;
-		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
+		this.#clearAllLiveFollowUpPolicies();
+		const ids = [
+			...new Set([
+				...this.#adopted.keys(),
+				...this.#parks.keys(),
+				...this.#followUpAdmissions.keys(),
+				...this.#followUpSettlements.keys(),
+			]),
+		];
+		// Prevent a cold revival already in flight from installing a policy after
+		// the synchronous live-session clear above and before this async cleanup
+		// completes.
+		this.#followUpAdmissions.clear();
+		this.#followUpSettlements.clear();
 		await Promise.all(
 			ids.map(async id => {
 				const release = this.release(id).then(() => {});
@@ -485,6 +537,7 @@ export class AgentLifecycleManager {
 
 	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {
 		const session = await revive(ref);
+		this.#installFollowUpPolicies(id, session);
 		if (this.#disposed) {
 			// The owning lifecycle tore down while the reviver was in flight; dispose
 			// the freshly built session instead of attaching it, and fail the waiter.
@@ -534,6 +587,25 @@ export class AgentLifecycleManager {
 		}, adopted.idleTtlMs);
 		timer.unref?.();
 		adopted.timer = timer;
+	}
+
+	#installFollowUpPolicies(id: string, session: AgentSession | null | undefined): void {
+		const admission = this.#followUpAdmissions.get(id);
+		if (admission) session?.setIrcWakeTurnAdmission(admission);
+		const settlement = this.#followUpSettlements.get(id);
+		if (settlement) session?.setIrcWakeTurnSettlement(settlement);
+	}
+
+	/** Clear both hooks on one exact live session, never a replacement ref. */
+	#clearLiveFollowUpPolicies(session: AgentSession | null | undefined): void {
+		session?.setIrcWakeTurnAdmission(undefined);
+		session?.setIrcWakeTurnSettlement(undefined);
+	}
+
+	/** Clear every session reached by a retained policy before losing its map entry. */
+	#clearAllLiveFollowUpPolicies(): void {
+		const ids = new Set([...this.#followUpAdmissions.keys(), ...this.#followUpSettlements.keys()]);
+		for (const id of ids) this.#clearLiveFollowUpPolicies(this.#registry.get(id)?.session);
 	}
 
 	#onRegistryEvent(event: RegistryEvent): void {
