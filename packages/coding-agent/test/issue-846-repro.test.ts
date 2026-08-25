@@ -79,8 +79,13 @@ describe("issue #846: phase1 stage1 failures must be logged", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
-		process.env.XDG_DATA_HOME = savedXdgData;
-		process.env.XDG_STATE_HOME = savedXdgState;
+		// `process.env.X = undefined` stores the STRING "undefined", which is a
+		// relative path — every later test in this process then resolves XDG
+		// paths into the repo root. Delete instead when the var was unset.
+		if (savedXdgData === undefined) delete process.env.XDG_DATA_HOME;
+		else process.env.XDG_DATA_HOME = savedXdgData;
+		if (savedXdgState === undefined) delete process.env.XDG_STATE_HOME;
+		else process.env.XDG_STATE_HOME = savedXdgState;
 		await Bun.sleep(0);
 		for (const dir of tempDirs.splice(0)) {
 			await dir.remove();
