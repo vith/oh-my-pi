@@ -4,6 +4,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface SessionStub {
@@ -65,6 +66,32 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 /** Settle the async park chain (timer callback → park() → dispose → setStatus). */
 async function flushAsync(): Promise<void> {
 	for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
+/**
+ * Minimal transcript the persisted-subagent scan accepts: a `session` header
+ * first (the scan rejects anything else as an unreadable transcript) followed
+ * by the `session_init` a spawned subagent records.
+ */
+function persistedTranscript(id: string): string {
+	return `${[
+		JSON.stringify({
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id,
+			timestamp: "2026-08-01T09:25:44.000Z",
+			cwd: "/tmp",
+		}),
+		JSON.stringify({
+			type: "session_init",
+			id: "init",
+			parentId: null,
+			timestamp: "2026-08-01T09:25:45.000Z",
+			systemPrompt: "worker",
+			task: "# Target\nDo the work.",
+			tools: ["read"],
+		}),
+	].join("\n")}\n`;
 }
 
 const TTL = 20;
@@ -770,8 +797,14 @@ describe("AgentLifecycleManager", () => {
 		const rootSessionFile = path.join(tempDir.path(), "main.jsonl");
 		const workerId = "Killed-Sub";
 		const workerSessionFile = path.join(tempDir.path(), "main", `${workerId}.jsonl`);
-		await Bun.write(rootSessionFile, "");
-		await Bun.write(workerSessionFile, "");
+		// A sibling that was never killed: it proves the rescan really walked the
+		// directory, so the killed row's `aborted` comes from its tombstone rather
+		// than from the scan having skipped the whole tree.
+		const survivorId = "Parked-Sub";
+		const survivorSessionFile = path.join(tempDir.path(), "main", `${survivorId}.jsonl`);
+		await Bun.write(rootSessionFile, persistedTranscript("main"));
+		await Bun.write(workerSessionFile, persistedTranscript(workerId));
+		await Bun.write(survivorSessionFile, persistedTranscript(survivorId));
 
 		// Mirror the real wrapped session dispose (createAgentSession's
 		// `unregisterUnlessParked`): disposing a live session unregisters the ref
@@ -813,6 +846,7 @@ describe("AgentLifecycleManager", () => {
 		expect(await Bun.file(`${workerSessionFile}.tombstone`).exists()).toBe(true);
 		const restoredRegistry = new AgentRegistry();
 		await registerPersistedSubagents(restoredRegistry, rootSessionFile);
+		expect(restoredRegistry.get(survivorId)?.status).toBe("parked");
 		expect(restoredRegistry.get(workerId)?.status).toBe("aborted");
 	});
 
