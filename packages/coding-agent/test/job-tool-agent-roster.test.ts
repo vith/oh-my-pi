@@ -187,6 +187,8 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 			dispose: async () => {
 				disposes += 1;
 			},
+			setIrcWakeTurnAdmission: (_next: unknown) => {},
+			setIrcWakeTurnSettlement: (_next: unknown) => {},
 		};
 		return { session, abortCalls: () => aborts, disposeCalls: () => disposes };
 	}
