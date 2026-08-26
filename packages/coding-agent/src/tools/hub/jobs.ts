@@ -7,6 +7,7 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../../async";
 import { settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
@@ -342,7 +343,10 @@ export async function executeCancel(
 			// registration kill before reporting the row as already done.
 			const regOutcome = await cancelAgentRegistration(session, ownerId, id);
 			cancelOutcomes.push(
-				regOutcome.status === "cancelled"
+				// Keep a real kill attempt's verdict — both the success and the
+				// failure. Only `not_found` (no lingering registration behind the
+				// row) falls through to the settled-row report.
+				regOutcome.status === "cancelled" || regOutcome.status === "failed"
 					? regOutcome
 					: {
 							id,
@@ -399,9 +403,15 @@ async function cancelAgentRegistration(
 			registry?.unregister(id);
 		}
 	} catch (error) {
+		// A throw here is a real defect on the kill path (a broken abort, a
+		// broken release), not the benign "it had already finished" case — the
+		// agent is still alive. Log the thrown value itself so its stack reaches
+		// the log, and report a status the caller can tell apart from
+		// `already_completed`.
+		logger.error("hub cancel: agent registration kill failed", { id, error });
 		return {
 			id,
-			status: "already_completed",
+			status: "failed",
 			message: `Agent ${id} could not be fully cancelled: ${error instanceof Error ? error.message : String(error)}.`,
 		};
 	}

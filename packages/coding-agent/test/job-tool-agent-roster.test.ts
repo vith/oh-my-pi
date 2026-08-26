@@ -6,11 +6,12 @@
  * QA report "job list returned no status output despite known running
  * background jobs and subagents".
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { logger } from "@oh-my-pi/pi-utils";
 import { type CoordinationDetails, HubTool } from "../src/tools/hub";
 
 const managers: AsyncJobManager[] = [];
@@ -60,6 +61,7 @@ const runsUntilAborted = ({ signal }: { signal: AbortSignal }) =>
 	});
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const manager of managers.splice(0)) {
 		await manager.dispose({ timeoutMs: 200 });
 	}
@@ -314,5 +316,98 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 			{ id: "DoneJob", status: "already_completed" },
 		]);
 		expect(resultText(result)).toContain("already completed");
+	});
+});
+
+describe("hub cancel when the kill path itself throws", () => {
+	/** A session that survives abort/dispose — the failure comes from the lifecycle. */
+	function liveSession() {
+		return {
+			abort: async () => {},
+			dispose: async () => {},
+			setIrcWakeTurnAdmission: (_next: unknown) => {},
+			setIrcWakeTurnSettlement: (_next: unknown) => {},
+		};
+	}
+
+	/**
+	 * The shape of the 2026-08-26 incident: `AgentLifecycleManager.release`
+	 * threw a TypeError from `#clearLiveFollowUpPolicies`, and the cancel path
+	 * folded it into `already_completed` — a normal outcome meaning "nothing to
+	 * do" — so a live, un-cancelled agent looked like a finished one.
+	 */
+	function throwingLifecycle(error: Error): AgentLifecycleManager {
+		return {
+			release: async () => {
+				throw error;
+			},
+		} as unknown as AgentLifecycleManager;
+	}
+
+	function registerIdleSub(registry: AgentRegistry, id: string, session: unknown): void {
+		registry.register({
+			id,
+			displayName: id,
+			kind: "sub",
+			parentId: "Main",
+			session: session as never,
+			status: "idle",
+		});
+	}
+
+	test("a release that throws is reported as failed, not already_completed", async () => {
+		const registry = new AgentRegistry();
+		registerIdleSub(registry, "Wedged", liveSession());
+		const lifecycle = throwingLifecycle(new TypeError("session.setIrcWakeTurnAdmission is not a function"));
+		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle }));
+
+		const result = await tool.execute("call", { op: "cancel", ids: ["Wedged"] });
+
+		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Wedged", status: "failed" }]);
+		expect(resultText(result)).toContain("could not be fully cancelled");
+		// The agent really is still there — that is what makes "already_completed" a lie.
+		expect(registry.get("Wedged")).toBeDefined();
+	});
+
+	test("a release that throws stays failed even when a settled job row is still retained", async () => {
+		const registry = new AgentRegistry();
+		const manager = createManager();
+		// Job id == agent id for task spawns: the settled row outlives the
+		// registration, and this branch has its own already_completed fallback.
+		manager.register("task", "Wedged", async () => "done", { id: "Wedged", agentId: "Wedged", ownerId: "Main" });
+		await manager.waitForAll();
+		registerIdleSub(registry, "Wedged", liveSession());
+		const lifecycle = throwingLifecycle(new TypeError("session.setIrcWakeTurnAdmission is not a function"));
+		const tool = new HubTool(createToolSession({ manager, registry, agentId: "Main", lifecycle }));
+
+		const result = await tool.execute("call", { op: "cancel", ids: ["Wedged"] });
+
+		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Wedged", status: "failed" }]);
+		expect(resultText(result)).toContain("could not be fully cancelled");
+		expect(registry.get("Wedged")).toBeDefined();
+	});
+
+	test("the swallowed error is logged with the thrown value, not just its message", async () => {
+		const registry = new AgentRegistry();
+		registerIdleSub(registry, "Wedged", liveSession());
+		const boom = new TypeError("session.setIrcWakeTurnAdmission is not a function");
+		const tool = new HubTool(
+			createToolSession({
+				manager: createManager(),
+				registry,
+				agentId: "Main",
+				lifecycle: throwingLifecycle(boom),
+			}),
+		);
+		const error = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+		await tool.execute("call", { op: "cancel", ids: ["Wedged"] });
+
+		// The whole Error goes to the log so its stack survives; the outcome
+		// message alone left the 2026-08-26 TypeError with no stack anywhere.
+		expect(error).toHaveBeenCalledWith(
+			"hub cancel: agent registration kill failed",
+			expect.objectContaining({ id: "Wedged", error: boom }),
+		);
 	});
 });
