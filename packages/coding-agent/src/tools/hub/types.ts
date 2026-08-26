@@ -52,7 +52,13 @@ export interface JobSnapshot {
 	errorText?: string;
 }
 
-export type CancelStatus = "cancelled" | "not_found" | "already_completed";
+/**
+ * Outcome of one `hub cancel` target. `already_completed` is a *normal* result
+ * ("nothing left to kill"); `failed` means the kill was attempted and threw, so
+ * the agent is presumed still alive. Keeping those apart is what stops a
+ * programming error inside the kill path from reading as a no-op.
+ */
+export type CancelStatus = "cancelled" | "not_found" | "already_completed" | "failed";
 
 export interface CancelOutcome {
 	id: string;
