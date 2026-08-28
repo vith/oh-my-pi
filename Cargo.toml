@@ -17,7 +17,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "17.3.8+vith-fork.236.5f31bad7e7"
+version = "18.0.9+vith-fork.268.3fb1cd3956"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
