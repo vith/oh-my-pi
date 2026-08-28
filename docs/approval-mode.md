@@ -52,6 +52,12 @@ Rules live in YAML files organized in layers, highest precedence first:
 | Curated | code constants | engine (lowest) |
 | Legacy | migrated settings keys (`tools.approval.*`, `bash.patterns`) | not file-backed; see [Legacy settings](#legacy-settings-and-migration) |
 
+For MCP tools, key the policy by the exact final registered name. The ordinary form is
+`mcp__<sanitized_server>_<sanitized_tool>`. A redundant `<server>_` prefix is removed from the tool name,
+so server `echo` tool `echo_it` is registered as `mcp__echo_it`. Names longer than 64 characters are
+capped with a deterministic hash suffix; use the final capped name rather than the uncapped pattern. See
+[MCP tool naming](./mcp-server-tool-authoring.md#naming-and-collision-domain).
+
 Deny rules from any layer beat every allow. Among non-denies, first match wins in the order dynamic → project → user → curated. `/permissions list` shows the three file-backed layers only (curated and legacy policy are surfaced through `/permissions test` and `/permissions migrate`).
 
 Rule shape:

@@ -39,12 +39,17 @@ pub mod grep;
 pub mod highlight;
 pub mod html;
 pub mod iofs;
+pub mod js;
 pub mod keys;
 pub mod live;
 /// PDF inspection and Markdown conversion.
 pub mod pdf;
 pub mod sixel;
 pub mod snapcompact;
+pub mod spelling;
+pub mod svg;
+pub mod utok;
+pub mod vcs;
 pub use pi_ast::language;
 
 pub mod power;
@@ -60,6 +65,7 @@ pub mod task;
 pub(crate) mod testing;
 pub mod text;
 pub mod tokens;
+pub mod tty_writer;
 pub(crate) mod utils;
 pub mod vectors;
 pub mod workspace;

@@ -14,6 +14,7 @@ const BASE_SETTINGS = {
 	"async.enabled": false,
 	"bash.autoBackground.enabled": false,
 	"bashInterceptor.enabled": false,
+	"bash.patterns": [{ match: "rm -rf *", approval: "deny" }],
 } as const;
 
 function emptyWorkspaceTree(cwd: string) {
@@ -160,6 +161,21 @@ describe("tools.approvalMode setting", () => {
 			bashTool().execute("critical", { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" }, undefined, undefined, {
 				settings,
 				home: tempDir,
+			} as AgentToolContext),
+		).rejects.toThrow(/is blocked: Denied: piece/);
+	});
+
+	it("attributes bash pattern denies to tool policy", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "yolo",
+			"tools.approval": { bash: "allow" },
+		});
+		// Fork engine: the curated critical deny (engine step 4) outranks the
+		// legacy per-tool allow and names the denied piece; a legacy
+		// `bash.patterns` deny only surfaces when no curated pattern matches.
+		await expect(
+			bashTool().execute("pattern-deny", { command: "rm -rf /tmp/never-run" }, undefined, undefined, {
+				settings,
 			} as AgentToolContext),
 		).rejects.toThrow(/is blocked: Denied: piece/);
 	});
