@@ -263,7 +263,7 @@ fn create_windows_napi_tokio_runtime() -> Option<tokio::runtime::Runtime> {
 /// MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
 /// `packages/natives/native/index.js` (which derives the name from
 /// `package.json#version`).
-#[napi(js_name = "__piNativesV18_0_9_vith_fork_268_3fb1cd3956")]
+#[napi(js_name = "__piNativesV18_0_10_vith_fork_274_30ed4776e7")]
 pub const fn pi_natives_version_sentinel() {}
 
 /// Native module entry point: install crash diagnostics before any tool can

@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/pi-natives",
-  "version": "18.0.9+vith-fork.268.3fb1cd3956",
+  "version": "18.0.10+vith-fork.274.30ed4776e7",
   "description": "Native Rust bindings for PDF conversion, audio, WebRTC, grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
   "homepage": "https://omp.sh",
