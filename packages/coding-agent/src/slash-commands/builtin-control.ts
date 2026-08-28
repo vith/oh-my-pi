@@ -7,6 +7,7 @@ import type { SlashCommandSpec } from "./types";
 export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "force",
+		icon: "hammer",
 		description: "Force next turn to use a specific tool",
 		aliases: ["force:"],
 		inlineHint: "<tool-name> [prompt]",
@@ -56,6 +57,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "live",
+		icon: "voice",
 		description: "Start Codex-backed realtime voice mode",
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
@@ -64,6 +66,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "pause",
+		icon: "pause",
 		description: "Freeze all agents (main, subagents, advisor) until resumed",
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
@@ -125,6 +128,7 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "quit",
 		aliases: ["q"],
+		icon: "power",
 		description: "Quit the application",
 		handleTui: shutdownHandlerTui,
 	},
