@@ -11,6 +11,14 @@
 ### Added
 
 - The live desktop notification is also dismissed when the terminal window regains focus (OSC 1004 focus reporting) or is clicked while a toast is on screen (transient button-event tracking armed only while a toast is live), so returning to the window clears the toast even before typing.
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Press the Right Arrow at the end of a line to accept autocomplete suggestions, inline ghost-text completions, and spelling corrections, just like Tab.
+- Added a smooth brand-color transition and an elapsed turn timer to the status line while the agent is working.
+- Added a full-width “band” composer style for flush status lines.
+
 ## [18.0.9] - 2026-08-28
 
 ### Added
