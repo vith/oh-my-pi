@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-agent-core",
-  "version": "18.0.10+vith-fork.274.30ed4776e7",
+  "version": "18.2.8+vith-fork.278.93a18ca81f",
   "description": "General-purpose agent with transport abstraction, state management, and attachment support",
   "homepage": "https://omp.sh",
   "author": "Stencil Labs, Inc.",
