@@ -2,9 +2,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
+import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import type { Settings } from "../../config/settings";
 import { type ApprovalPolicy, getToolDecision, normalizePolicy, type ResolvedApproval } from "../approval";
 import { bashApprovalPatternToRegExp, normalizeBashApprovalPattern } from "../bash";
+import { CRITICAL_BASH_PATTERNS } from "./critical-patterns";
+import { extractLiteralAndChainSegments, type LiteralShellCommandSegment } from "../shell-tokenize";
 import { CURATED_ALLOW_TOOLS, isSafeConsumerStage, matchCuratedDeny } from "./curated";
 import { findNearestProjectRoot, loadRuleLayers, type PermissionRule, type RuleLayer } from "./rules";
 import { sessionRuleKey, sessionRules } from "./session-rules";
@@ -53,6 +56,12 @@ export interface EngineContext {
 	 * back to the cwd.
 	 */
 	sessionId?: string;
+	/**
+	 * Resolved shell executable for `bash.allowCompoundCommands` gating
+	 * (upstream compound approval). Absent callers keep the legacy per-piece
+	 * evaluation regardless of the setting.
+	 */
+	shell?: string;
 }
 
 type DecisionSource = EngineDecision["source"];
@@ -613,6 +622,7 @@ function evaluatePermissionCore(
 	ctx: EngineContext,
 	legacyAllowEnabled: boolean,
 	decision: Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy },
+	skipCuratedDeny = false,
 ): EngineDecision {
 	if (decision.policy === "deny") {
 		return {
@@ -632,7 +642,12 @@ function evaluatePermissionCore(
 	const { rules } = loadRuleLayers(ctx.cwd, ctx.home);
 	const command = bashCommandArg(args);
 
-	const curated = matchCuratedDeny(tool.name, command);
+	// Compound `&&` chains under `bash.allowCompoundCommands` skip the curated
+	// deny here: pattern-allowed critical segments surface as a critical
+	// prompt later (upstream parity) instead of denying. Sub-command
+	// recursion re-enters with the default, so curated denies still fire
+	// inside substitutions.
+	const curated = skipCuratedDeny ? null : matchCuratedDeny(tool.name, command);
 	if (curated) {
 		return {
 			policy: "deny",
@@ -792,9 +807,10 @@ function evaluatePermissionInner(
 	args: unknown,
 	ctx: EngineContext,
 	legacyAllowEnabled: boolean,
+	skipCuratedDeny = false,
 ): EngineDecision {
 	const decision = getToolDecision(tool as ApprovalSubjectLike, args);
-	const result = evaluatePermissionCore(tool, args, ctx, legacyAllowEnabled, decision);
+	const result = evaluatePermissionCore(tool, args, ctx, legacyAllowEnabled, decision, skipCuratedDeny);
 	const attached = decision.engineDecision;
 	if (attached === undefined) return result;
 	return {
@@ -827,8 +843,15 @@ function evaluateBashPiece(
 	ctx: EngineContext,
 	legacyAllowEnabled: boolean,
 	depth: number,
+	skipCuratedDeny = false,
 ): BashPieceResult {
-	const decision = evaluatePermissionInner(BASH_TOOL, { command: piece.text }, ctx, legacyAllowEnabled);
+	const decision = evaluatePermissionInner(
+		BASH_TOOL,
+		{ command: piece.text },
+		ctx,
+		legacyAllowEnabled,
+		skipCuratedDeny,
+	);
 	if (decision.policy !== "allow") {
 		return {
 			evaluation: {
@@ -931,6 +954,197 @@ function evaluateBashPiece(
 }
 
 /**
+ * Upstream `bash.allowCompoundCommands` gate: a literal `&&` chain eligible
+ * for per-segment allows. Null unless the setting is enabled, the resolved
+ * shell is POSIX, and every segment is literal (no expansion, globbing,
+ * redirection, comments, assignments, or stateful builtins) — otherwise the
+ * legacy split evaluation below applies. The extractor guarantees two or
+ * more segments when non-null.
+ */
+function compoundSegmentsFor(command: string, ctx: EngineContext): LiteralShellCommandSegment[] | null {
+	if (!ctx.settings.get("bash.allowCompoundCommands")) return null;
+	if (ctx.shell === undefined || !isPosixShell(ctx.shell)) return null;
+	return extractLiteralAndChainSegments(command);
+}
+
+/**
+ * Whole-or-segment restriction check over raw texts: the anchored glob
+ * matches the whole command or any piece text as written. Quoting is never
+ * stripped, so a quoted binary (`"rm" -rf /x`) keeps evading an anchored
+ * glob exactly as in per-piece evaluation.
+ */
+function findWholeChainRestriction(
+	command: string,
+	segments: readonly LiteralShellCommandSegment[],
+	ctx: EngineContext,
+): PermissionRule | undefined {
+	let prompt: PermissionRule | undefined;
+	for (const rule of legacyBashPatterns(ctx.settings)) {
+		if (rule.action !== "deny" && rule.action !== "prompt") continue;
+		const pattern = rule.match.command;
+		if (typeof pattern !== "string") continue;
+		if (!matchPatternValue("command", command, pattern)) continue;
+		if (segments.some(segment => matchPatternValue("command", segment.text, pattern))) continue;
+		if (rule.action === "deny") return rule;
+		prompt ??= rule;
+	}
+	return prompt;
+}
+
+/**
+ * Legacy compound approval for non-literal chains: the first deny/prompt
+ * `bash.patterns` rule matching the whole command or any raw piece text.
+ * Allow rules never ride a compound (shell control), so they are skipped.
+ */
+function findCompoundRestriction(
+	command: string,
+	pieceTexts: readonly string[],
+	ctx: EngineContext,
+): PermissionRule | undefined {
+	for (const rule of legacyBashPatterns(ctx.settings)) {
+		if (rule.action !== "deny" && rule.action !== "prompt") continue;
+		const pattern = rule.match.command;
+		if (typeof pattern !== "string") continue;
+		if (matchPatternValue("command", command, pattern)) return rule;
+		if (pieceTexts.some(text => matchPatternValue("command", text, pattern))) return rule;
+	}
+	return undefined;
+}
+
+function denyDecision(
+	evaluations: PieceEvaluation[],
+	overrides: {
+		reason: string;
+		ruleId?: string;
+		layer?: RuleLayer;
+		source: DecisionSource;
+	},
+): EngineDecision {
+	return {
+		policy: "deny",
+		tier: "exec",
+		reason: overrides.reason,
+		ruleId: overrides.ruleId,
+		layer: overrides.layer,
+		source: overrides.source,
+		override: false,
+		pieces: evaluations,
+	};
+}
+
+/**
+ * Upstream per-segment evaluation for a literal `&&` chain: allows vouch per
+ * segment (curated denies yield to the critical prompt below so a
+ * pattern-allowed critical segment prompts instead of denying), whole-chain
+ * restrictions veto, and critical shapes prompt with override instead of
+ * allowing. Unmatched segments fall through to posture so the wrapper keeps
+ * the standalone tool-policy and mode fallback.
+ */
+function evaluateCompoundCommand(
+	command: string,
+	segments: LiteralShellCommandSegment[],
+	ctx: EngineContext,
+	depth: number,
+): EngineDecision {
+	const veto = findWholeChainRestriction(command, segments, ctx);
+	const pieces: ShellPiece[] = segments.map((segment, index) => ({
+		text: segment.text,
+		operator: index < segments.length - 1 ? "&&" : null,
+	}));
+	const results: BashPieceResult[] = [];
+	for (const piece of pieces) {
+		const result = evaluateBashPiece(piece, ctx, /*legacyAllowEnabled*/ true, depth, /*skipCuratedDeny*/ true);
+		results.push(result);
+		if (result.evaluation.policy === "deny") {
+			const denied = result.evaluation;
+			return denyDecision(
+				results.map(item => item.evaluation),
+				{
+					reason: denyReason(denied),
+					ruleId: denied.ruleId,
+					layer: denied.layer,
+					source: result.source,
+				},
+			);
+		}
+	}
+	const evaluations = results.map(result => result.evaluation);
+	const pending = results.filter(result => result.evaluation.policy === "prompt");
+	if (veto?.action === "deny") {
+		return denyDecision(evaluations, {
+			reason: `Blocked by bash pattern: ${veto.match.command}`,
+			ruleId: veto.id,
+			layer: veto.layer,
+			source: "rule",
+		});
+	}
+	const rulePrompt = pending.find(result => result.source !== "posture");
+	if (veto?.action === "prompt" || rulePrompt !== undefined) {
+		if (veto?.action === "prompt") {
+			return {
+				policy: "prompt",
+				tier: "exec",
+				reason: `Prompt required by bash pattern: ${veto.match.command}`,
+				ruleId: veto.id,
+				layer: veto.layer,
+				source: "rule",
+				override: false,
+				pieces: evaluations,
+			};
+		}
+		const decisive = rulePrompt as BashPieceResult;
+		return {
+			policy: "prompt",
+			tier: "exec",
+			ruleId: decisive.evaluation.ruleId,
+			layer: decisive.evaluation.layer,
+			source: decisive.source,
+			override: false,
+			pieces: evaluations,
+		};
+	}
+	const critical =
+		command !== "" &&
+		(CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command)) ||
+			segments.some(segment => CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(segment.argv.join(" ")))));
+	if (critical) {
+		return {
+			policy: "prompt",
+			tier: "exec",
+			reason: "Critical pattern detected",
+			layer: "curated",
+			source: "curated",
+			override: true,
+			pieces: evaluations,
+		};
+	}
+	if (pending.length > 0) {
+		const decisive = pending.find(result => result.source !== "posture") ?? pending[0];
+		return {
+			policy: "prompt",
+			tier: "exec",
+			ruleId: decisive.evaluation.ruleId,
+			layer: decisive.evaluation.layer,
+			source: decisive.source,
+			override: false,
+			pieces: evaluations,
+		};
+	}
+
+	const decisive = results.find(result => result.source !== "posture") ?? results[results.length - 1];
+	return {
+		policy: "allow",
+		tier: "exec",
+		ruleId: decisive?.evaluation.ruleId,
+		layer: decisive?.evaluation.layer,
+		reason: decisive?.evaluation.reason,
+		source: decisive?.source ?? "posture",
+		override: false,
+		pieces: evaluations,
+	};
+}
+
+/**
  * Split a bash command, evaluate each piece through the same pipeline, and
  * compose: any deny denies the whole call (the reason names the piece); pending
  * pieces are listed for the dialog; otherwise the call is allowed.
@@ -938,8 +1152,16 @@ function evaluateBashPiece(
  * A parse failure collapses the whole command into one piece (fail-closed).
  * Legacy `bash.patterns` allow rules only apply when the whole command is a
  * single piece; deny/prompt patterns match any piece text.
+ *
+ * With `bash.allowCompoundCommands` on a POSIX shell, a literal `&&` chain
+ * takes the per-segment path above; other multi-piece commands surface a
+ * whole-or-segment restriction explicitly (singles keep the bare posture
+ * fallback so the gate applies the mode).
  */
 export function evaluateBashCommand(command: string, ctx: EngineContext, depth = 0): EngineDecision {
+	const compound = compoundSegmentsFor(command, ctx);
+	if (compound !== null) return evaluateCompoundCommand(command, compound, ctx, depth);
+
 	const out = parseCommand(command);
 	const pieces: ShellPiece[] =
 		out.ok && out.pieces.length > 0 ? out.pieces : [{ text: command.trim(), operator: null }];
@@ -960,6 +1182,34 @@ export function evaluateBashCommand(command: string, ctx: EngineContext, depth =
 			override: false,
 			pieces: evaluations,
 		};
+	}
+
+	if (pieces.length > 1) {
+		const restriction = findCompoundRestriction(
+			command,
+			pieces.map(piece => piece.text),
+			ctx,
+		);
+		if (restriction?.action === "deny") {
+			return denyDecision(evaluations, {
+				reason: `Blocked by bash pattern: ${restriction.match.command}`,
+				ruleId: restriction.id,
+				layer: restriction.layer,
+				source: "rule",
+			});
+		}
+		if (restriction?.action === "prompt") {
+			return {
+				policy: "prompt",
+				tier: "exec",
+				reason: `Prompt required by bash pattern: ${restriction.match.command}`,
+				ruleId: restriction.id,
+				layer: restriction.layer,
+				source: "rule",
+				override: false,
+				pieces: evaluations,
+			};
+		}
 	}
 
 	// Ruling R3: the piece tokenizer normalizes some critical shapes (fork

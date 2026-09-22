@@ -96,9 +96,11 @@ Each piece is evaluated independently through the full pipeline:
 - **Pending pieces → sequential per-piece dialogs** in command order (see below).
 - **Every piece allowed → the original command executes unchanged** — no rewriting, no re-issue; `&&`/`||` short-circuit and `&` semantics are preserved by construction.
 
+**Literal `&&` chains** (`bash.allowCompoundCommands`, default off): when enabled on a POSIX shell, a flat chain joined only by `&&` whose segments are literal arguments is evaluated per segment — allow rules may vouch for individual segments. Deny/prompt rules matching the complete chain but no individual segment remain whole-chain vetoes (a later veto deny overrides an earlier veto prompt). Critical shapes still prompt with override instead of allowing. A chain with any unmatched segment keeps the standalone `exec` tier with no explicit policy, so the tool-wide policy and mode decide. Anything else (expansion, globbing, redirection, other operators, stateful builtins, non-POSIX shells) keeps the per-piece behavior above.
+
 A leading `cd <path> && …` wrapper is folded into the tool's `cwd` at execution time (single-line, no shell expansion). The engine evaluates the command as submitted, and the splitter treats `cd …` as its own piece, so navigation rules and the follow-up command are checked separately.
 
-`bash.patterns` only feeds the `bash` tool's approval decision. The `eval` tool declares the `exec` tier and can spawn a shell via subprocess, so a `bash.patterns` `deny` rule does not apply to the same command run through `eval` — under `yolo`, that `exec` call resolves to `allow`. To gate the shell `eval` can reach, add a `tools.approval.eval` policy (`prompt` or `deny`) alongside `bash.patterns`.
+This pattern policy controls approval for the `bash` tool; it is not process or filesystem containment. An approved command retains the shell's ambient filesystem, network, and subprocess access. The `eval` tool also declares the `exec` tier and can spawn a shell via subprocess, so a `bash.patterns` `deny` rule does not apply to the same command run through `eval` — under `yolo`, that `exec` call resolves to `allow`. To gate the shell `eval` can reach, add a `tools.approval.eval` policy (`prompt` or `deny`) alongside `bash.patterns`.
 
 **PTY carve-out**: `pty: true` calls (interactive sessions) cannot be split or piece-dialoged. The whole command is analyzed as one unit — the strictest piece decision decides the call (deny → deny; pending → one whole-command dialog), with candidates scoped to the whole command text.
 
@@ -118,7 +120,16 @@ For a pending call (interactive session), the dialog replaces the old binary App
 
 **LLM-suggested rules** (optional, `permissions.llmSuggestions`, default on): while a piece is pending, the dialog fires a one-shot side completion on the session's active model (8s timeout, 256-token budget, at most 3 rules) with the pending piece, the cwd, and a summary of current rules. The dialog appears immediately with the mechanical candidates; suggestions append as extra options behind a spinner. Suggestions arriving after the user chose are dropped; any failure (no model, no key, provider error, timeout, unparseable output) degrades silently to candidates-only. Suggested rules are never auto-applied — they are options the user explicitly picks.
 
-**Provider safety checks** (computer tool `pendingSafetyChecks`) are stronger than any rule or mode: they force a dialog with only `Approve`/`Deny` and no candidates, in every posture. Without an interactive UI the call fails closed.
+## Computer tier
+
+The disabled-by-default Eval [`computer` API](./computer-use.md) chooses its tier per call:
+
+- direct helpers (`computer.windows()`, `win.screenshot()`, `win.ax()`, `el.bounds()`, `computer.clipboard.read()`, …) use `read` when the invoked method is inspection-only and `exec` for input, focus, mutation, and `clipboard.write`; read calls also run under the worker's read-only guard;
+- `computer.run(fnOrCode, options)` uses `read` only for `read_only: true` (JavaScript trailing option or Python keyword); `read_only: false`, a missing field, malformed arguments, or any other value uses `exec`.
+
+The approval prompt shows `read-only` when applicable, followed by the resolved JavaScript (truncated to 2,000 characters by the standard formatter). For `computer.run`, `read_only` is a trust declaration enforced by the approval tier, not static analysis of the script.
+
+Separately, provider-originated computer-use calls may carry `pendingSafetyChecks` metadata. Any pending check forces an interactive prompt regardless of yolo or per-tool `allow`: the dialog offers only `Approve`/`Deny` with no rule candidates, in every posture. The prompt lists each safety-check code, message, and sanitized/truncated data. Without an interactive UI, the call fails closed with `pending provider safety checks but no interactive UI is available`.
 
 ## Denied calls
 
