@@ -1,0 +1,25 @@
+# Woodpecker CI for the self-hosted Forgejo mirror
+# (https://git.n3t.work/vith/oh-my-pi, runs on the n3t.work ARM box).
+#
+# Checks only: lint + typecheck on pushes to integration and on pull
+# requests. No release builds, no native addon builds, no test buckets —
+# those need platform-specific native addons and stay local / on GitHub CI.
+steps:
+  lint:
+    image: oven/bun:1.4.2
+    commands:
+      - bun install --frozen-lockfile
+      - bun run check:tools
+    when:
+      - event: [push, pull_request]
+        branch: integration
+
+  types:
+    image: oven/bun:1.4.2
+    depends_on: [lint]
+    commands:
+      - bun install --frozen-lockfile
+      - bun run ci:check:full
+    when:
+      - event: [push, pull_request]
+        branch: integration
