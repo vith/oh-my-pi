@@ -1,7 +1,7 @@
 import { Box, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
 import type { CustomMessage } from "../../session/messages";
-import { replaceTabs } from "../../tools/render-utils";
-import { theme } from "../theme/theme";
+import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 
 /** Entry data appended to the parked subagent's session (spec §6). */
 export interface PermissionPendingDetails {

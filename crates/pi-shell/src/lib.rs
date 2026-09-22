@@ -1,8 +1,10 @@
 pub mod cancel;
 pub mod minimizer;
+pub mod output_decode;
 pub mod parsing;
 pub mod process;
 pub mod shell;
+
 #[cfg(windows)]
 pub mod windows;
 

@@ -2,7 +2,7 @@
 //! compact JSON node list.
 
 use brush_parser::{
-	Parser, ParserOptions, SourceInfo,
+	Parser, ParserOptions,
 	ast::*,
 	word::{self, ParameterExpr, WordPiece},
 };
@@ -12,9 +12,8 @@ use serde_json::{Value, json};
 /// runtime uses.
 pub fn parse_script(command: &str) -> Result<Program, brush_parser::ParseError> {
 	let options = ParserOptions::default();
-	let source_info = SourceInfo::default();
 	let reader = std::io::Cursor::new(command.as_bytes());
-	let mut parser = Parser::new(reader, &options, &source_info);
+	let mut parser = Parser::new(reader, &options);
 	parser.parse_program()
 }
 
@@ -139,6 +138,7 @@ fn command_node(cmd: &Command, options: &ParserOptions) -> Value {
 				CompoundCommand::Subshell(_) => "subshell",
 				CompoundCommand::Arithmetic(_) => "arithmetic",
 				CompoundCommand::ArithmeticForClause(_) => "arithmeticForClause",
+				CompoundCommand::Coprocess(_) => "coprocess",
 			};
 			let mut node = json!({
 				"kind": kind,
@@ -153,7 +153,7 @@ fn command_node(cmd: &Command, options: &ParserOptions) -> Value {
 		Command::Function(_) => {
 			json!({ "kind": "functionDefinition", "text": cmd.to_string(), "children": [] })
 		},
-		Command::ExtendedTest(_) => {
+		Command::ExtendedTest(..) => {
 			json!({ "kind": "extendedTest", "text": cmd.to_string(), "children": [] })
 		},
 	}

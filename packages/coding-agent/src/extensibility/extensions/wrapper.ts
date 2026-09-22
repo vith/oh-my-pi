@@ -11,7 +11,7 @@ import type {
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { type SettingPath, Settings, type SettingValue } from "../../config/settings";
-import type { Theme } from "../../modes/theme/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { type ApprovalMode, formatApprovalPrompt, truncateForPrompt } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
@@ -255,9 +255,10 @@ function raceParkedApproval(
  * - Emits tool_call event before execution (can block)
  * - Emits tool_result event after execution (can modify result)
  */
-export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetails = unknown>
-	implements AgentTool<TParameters, TDetails>
-{
+export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetails = unknown> implements AgentTool<
+	TParameters,
+	TDetails
+> {
 	declare name: string;
 	declare description: string;
 	declare parameters: TParameters;
@@ -447,10 +448,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// safety checks are stronger: yolo, per-tool allow, and xdev approval
 		// never acknowledge them on the user's behalf.
 		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
+		const acpBypass =
+			context !== undefined &&
+			Object.hasOwn(context, "acpApprovedArgs") &&
+			Bun.deepEquals(effectiveParams, context.acpApprovedArgs);
 		const approvalCheck = {
 			required:
 				pendingSafetyChecks.length > 0 ||
 				(decision.policy === "prompt" &&
+					!acpBypass &&
 					(decision.source === "tool" || decision.source === "user" || decision.override || !xdevBypass)),
 			reason: decision.reason,
 		};
@@ -610,14 +616,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		let executionError: Error | undefined;
 
 		try {
-			// A denied file write or delete inside this tool can be brokered to an
-			// extension handler, and that registry is PROCESS-WIDE — so the session is
-			// named here, the one place where every tool's execution and the runner
-			// that owns the handlers are both in scope (`sdk.ts` wraps the whole tool
-			// registry with this class whenever a runner exists). Inert with no
-			// fallback registered: no scope is entered.
-			result = await withFileMutationSession(this.runner.sessionId, () =>
-				this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+			// Name the owning session for process-wide file-mutation fallbacks and
+			// expose its settings to registered tools and any fallback handlers they
+			// trigger. `sdk.ts` wraps the whole tool registry with this class whenever
+			// a runner exists.
+			result = await this.runner.runScoped(() =>
+				withFileMutationSession(this.runner.sessionId, () =>
+					this.tool.execute(toolCallId, effectiveParams, signal, onUpdate, context),
+				),
 			);
 		} catch (err) {
 			executionError = err instanceof Error ? err : new Error(String(err));
@@ -642,7 +648,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				),
 				content: result.content,
 				details: result.details,
-				isError: !!executionError,
+				isError: !!executionError || result.isError === true,
 			});
 
 			if (resultResult) {

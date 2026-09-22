@@ -675,6 +675,22 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it("routes resize by the injected ConPTY override, not the ambient platform", () => {
+		// The override must gate every ConPTY-dependent path uniformly. Reading
+		// isConPTYHosted() here instead made a { conpty: false } terminal report
+		// non-ConPTY writes and kitty flags but ConPTY resize routing on Windows
+		// and WSL, so no test could model the opposite host.
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const posix = setupTerminal({ conpty: false });
+		expect(posix.terminal.hostOwnsGridOnResize).toBe(false);
+		posix.terminal.stop();
+
+		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+		const conpty = setupTerminal({ conpty: true });
+		expect(conpty.terminal.hostOwnsGridOnResize).toBe(true);
+		conpty.terminal.stop();
+	});
+
 	it("shutdown balances the single kitty push performed on detection", () => {
 		const { terminal, writes } = setupTerminal();
 
@@ -775,6 +791,19 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		const { terminal, reports } = setup();
 		process.stdin.emit("data", "\x1b[?2026;0$y");
 		expect(reports).toContainEqual({ mode: 2026, supported: false });
+		terminal.stop();
+	});
+
+	it("forwards DECRPM status so subscribers can distinguish unrecognized from permanently reset", () => {
+		const { terminal } = setup();
+		const statuses: Array<{ mode: number; status?: number }> = [];
+		terminal.onPrivateModeReport?.((mode, _supported, _confirmed, status) => {
+			statuses.push({ mode, status });
+		});
+		process.stdin.emit("data", "\x1b[?2026;0$y");
+		process.stdin.emit("data", "\x1b[?2048;4$y");
+		expect(statuses).toContainEqual({ mode: 2026, status: 0 });
+		expect(statuses).toContainEqual({ mode: 2048, status: 4 });
 		terminal.stop();
 	});
 

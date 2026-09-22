@@ -1,9 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { KeybindingsManager, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui/keybindings";
 import type { PermissionDialogOption } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { PermissionDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/permission-dialog";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
@@ -25,11 +25,11 @@ describe("PermissionDialogComponent", () => {
 
 	beforeEach(() => {
 		setThemeInstance(darkTheme!);
-		setKeybindings(KeybindingsManager.inMemory({ "tui.select.cancel": "ctrl+g" }));
+		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.cancel": "ctrl+g" }));
 	});
 
 	afterEach(() => {
-		setKeybindings(KeybindingsManager.inMemory());
+		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
 	});
 
 	it("renders the title, context lines, and numbered options with YAML previews", () => {
@@ -161,11 +161,9 @@ describe("PermissionDialogComponent", () => {
 
 	it("fires a lazy suggestion starter on mount and appends its options (issue 13)", async () => {
 		const selected: number[] = [];
-		const starter = vi.fn(
-			async (): Promise<PermissionDialogOption[]> => [
-				{ label: "Allow bash: git push", description: "action: allow" },
-			],
-		);
+		const starter = vi.fn(async (): Promise<PermissionDialogOption[]> => [
+			{ label: "Allow bash: git push", description: "action: allow" },
+		]);
 		const component = new PermissionDialogComponent(
 			"Allow tool: bash",
 			[],

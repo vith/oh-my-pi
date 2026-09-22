@@ -7,15 +7,17 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { MODEL_ROLE_IDS } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -67,6 +69,32 @@ describe("selector setting side effects", () => {
 		expect(invalidate).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
+	it("applies tui.hyperlinks changes to live renderers", () => {
+		const originalHyperlinks = TERMINAL.hyperlinks;
+		const statusInvalidate = vi.fn();
+		const invalidate = vi.fn();
+		const requestRender = vi.fn();
+		const controller = new SelectorController({
+			statusLine: { invalidate: statusInvalidate },
+			ui: { invalidate, requestRender },
+		} as unknown as InteractiveModeContext);
+
+		try {
+			setTerminalHyperlinks(false);
+			Settings.instance.override("tui.hyperlinks", "always");
+			controller.handleSettingChange("tui.hyperlinks", "always");
+			expect(TERMINAL.hyperlinks).toBe(true);
+
+			Settings.instance.override("tui.hyperlinks", "off");
+			controller.handleSettingChange("tui.hyperlinks", "off");
+			expect(TERMINAL.hyperlinks).toBe(false);
+			expect(statusInvalidate).toHaveBeenCalledTimes(2);
+			expect(invalidate).toHaveBeenCalledTimes(2);
+			expect(requestRender).toHaveBeenCalledTimes(2);
+		} finally {
+			setTerminalHyperlinks(originalHyperlinks);
+		}
+	});
 	it("applies memory backend changes to the live session", () => {
 		const applyMemoryBackend = vi.fn(async () => {});
 		const controller = new SelectorController({
@@ -92,6 +120,22 @@ describe("selector setting side effects", () => {
 
 		expect(setAdvisorEnabled).toHaveBeenCalledWith(false);
 		expect(invalidate).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("re-enables live advisor runtime to rebuild when advisor.maxNotesPerUpdate changes in /settings", () => {
+		const setAdvisorEnabled = vi.fn();
+		const isAdvisorEnabled = vi.fn().mockReturnValue(true);
+		const requestRender = vi.fn();
+		const controller = new SelectorController({
+			session: { setAdvisorEnabled, isAdvisorEnabled },
+			ui: { requestRender },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("advisor.maxNotesPerUpdate", 3);
+
+		expect(isAdvisorEnabled).toHaveBeenCalledTimes(1);
+		expect(setAdvisorEnabled).toHaveBeenCalledWith(true);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
@@ -139,12 +183,12 @@ describe("selector setting side effects", () => {
 			const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
 			assistant.setToolResultImagesVisible = setToolResultImagesVisible;
 			const clearInlineImages = vi.fn();
-			const requestRender = vi.fn();
+			const resetDisplay = vi.fn();
 			const ctx = {
 				hideToolActivity: !hidden,
 				toolOutputExpanded: true,
 				chatContainer: { children: [tool, readGroup, assistant], setToolActivityVisible },
-				ui: { clearInlineImages, requestRender },
+				ui: { clearInlineImages, resetDisplay },
 			};
 			const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
 
@@ -157,10 +201,10 @@ describe("selector setting side effects", () => {
 			expect(setReadExpanded).toHaveBeenCalledTimes(hidden ? 0 : 1);
 			expect(ctx.toolOutputExpanded).toBe(hidden);
 			expect(clearInlineImages).toHaveBeenCalledTimes(hidden ? 1 : 0);
-			expect(requestRender).toHaveBeenCalledTimes(1);
+			expect(resetDisplay).toHaveBeenCalledTimes(1);
 			if (hidden) {
 				expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
-					requestRender.mock.invocationCallOrder[0],
+					resetDisplay.mock.invocationCallOrder[0],
 				);
 			}
 		});
@@ -199,6 +243,7 @@ describe("selector setting side effects", () => {
 			modelRoles: { default: `${previousModel.provider}/${previousModel.id}:high` },
 		});
 		const setModel = vi.fn(async () => ({ switched: true }));
+		const assignmentApplied = Promise.withResolvers<void>();
 		const autoApplied = Promise.withResolvers<void>();
 		const setThinkingLevel = vi.fn((level: ThinkingLevel | typeof AUTO_THINKING, persist: boolean) => {
 			if (level === AUTO_THINKING && persist) {
@@ -240,7 +285,7 @@ describe("selector setting side effects", () => {
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
 			keybindings: { getKeys: () => [], getDisplayString: () => "" },
-			showStatus: vi.fn(),
+			showStatus: vi.fn(() => assignmentApplied.resolve()),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
 
@@ -254,6 +299,8 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\n"); // Enter the role rows.
 			hub.handleInput("\n"); // Assign DEFAULT.
 			hub.handleInput("\n"); // Pick the scoped replacement model.
+			await assignmentApplied.promise;
+			await Promise.resolve();
 
 			const levels = [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(nextModel)];
 			const highIndex = levels.indexOf(ThinkingLevel.High);
@@ -344,7 +391,8 @@ describe("selector setting side effects", () => {
 		try {
 			hub.handleInput("\x1b[A"); // All models → Roles.
 			hub.handleInput("\n"); // Enter the role rows.
-			for (let i = 0; i < 8; i++) hub.handleInput("\x1b[B"); // Default → task.
+			const taskOffset = MODEL_ROLE_IDS.indexOf("task") - MODEL_ROLE_IDS.indexOf("default");
+			for (let i = 0; i < taskOffset; i++) hub.handleInput("\x1b[B"); // Default → task.
 			hub.handleInput("t");
 
 			const levels = [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(taskModel)];
@@ -521,6 +569,7 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\x1b[B"); // Project scope → global scope.
 			hub.handleInput("\n");
 			await assignmentApplied.promise;
+			await Promise.resolve();
 
 			expect(setModel).not.toHaveBeenCalled();
 			expect(settings.getGlobalModelRole("default")).toBe(globalSelector);
@@ -540,6 +589,7 @@ describe("selector setting side effects", () => {
 			hub.handleInput("\x1b[B"); // Project scope → global scope.
 			hub.handleInput("\n");
 			await capturedRuntimeAssignmentApplied.promise;
+			await Promise.resolve();
 
 			expect(setModel).not.toHaveBeenCalled();
 			expect(settings.getGlobalModelRole("default")).toBe(globalSelector);
@@ -829,6 +879,7 @@ describe("selector setting side effects", () => {
 				hub.handleInput("\n"); // Pick the project model.
 				hub.handleInput("\n"); // Save to project scope.
 				await projectAssignmentApplied.promise;
+				await Promise.resolve();
 				hub.handleInput("\x1b[C"); // Inherit → off.
 				hub.handleInput("\x1b[C"); // Off → auto.
 				hub.handleInput("\n");
@@ -854,6 +905,7 @@ describe("selector setting side effects", () => {
 				hub.handleInput("\x1b[B"); // Project scope → global scope.
 				hub.handleInput("\n"); // Save the hidden global fallback.
 				await globalAssignmentApplied.promise;
+				await Promise.resolve();
 
 				expect(settings.getGlobalModelRole("default")).toBe(projectSelector);
 				expect(settings.getModelRole("default")).toBe(overlaySelector);

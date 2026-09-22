@@ -54,6 +54,8 @@ export interface UsageScope {
 	tier?: string;
 	windowId?: string;
 	shared?: boolean;
+	/** Stable identity shared by routing-specific copies of one upstream quota. */
+	sharedGroup?: string;
 }
 
 /** Normalized limit entry for a single window or quota bucket. */
@@ -271,6 +273,7 @@ export const usageScopeSchema = type({
 	"tier?": "string",
 	"windowId?": "string",
 	"shared?": "boolean",
+	"sharedGroup?": "string",
 });
 
 export const usageLimitSchema = type({
@@ -353,12 +356,18 @@ export interface UsageProvider {
 	id: Provider;
 	fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null>;
 	/** Parse provider rate-limit response headers (lowercased keys) into a usage report, if supported. */
-	parseRateLimitHeaders?(headers: Record<string, string>, now?: number): UsageReport | null;
+	parseRateLimitHeaders?(
+		headers: Record<string, string>,
+		now?: number,
+		context?: { responseStatus?: number },
+	): UsageReport | null;
 	supports?(params: UsageFetchParams): boolean;
 	/** True when fetchUsage contacts upstream and can authenticate the credential for health checks. */
 	validatesCredentials?: boolean;
 	/** Whether a failed refresh may serve the previous successful report. Defaults to true. */
 	retainLastGoodOnFailure?: boolean;
+	/** Provider-specific cool-down after a failed refresh. Defaults to the shared short backoff. */
+	failureBackoffMs?: number;
 }
 
 /** Request context used when ranking usage for a specific model. */
@@ -409,6 +418,15 @@ export interface CredentialRankingStrategy {
 	 * block written under one scope is invisible to requests and to healing.
 	 */
 	blockScopes?(context?: CredentialRankingContext): string[];
+	/**
+	 * Backoff scopes a fresh usage report can vouch for, each with the limits
+	 * gating it. {@link AuthStorage} clears a stale block under a returned scope
+	 * once every listed limit is below exhaustion, so a 429 whose retry-after
+	 * overstated the real reset does not sideline a recovered account until the
+	 * clock runs out. Scopes not returned expire by clock only. Codex heals
+	 * through its meter metadata instead and omits this.
+	 */
+	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[] }[];
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;

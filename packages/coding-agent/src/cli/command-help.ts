@@ -20,11 +20,16 @@ export const benchHelp = {
 } satisfies CommandMetadata;
 
 export const browserRelayHelp = {
-	description: "Run the local CDP relay that lets the browser tool drive your own Chrome tabs",
+	description: "Run the local CDP relay that lets the browser prelude drive your own Chrome tabs",
 } satisfies CommandMetadata;
 
 export const cleanseHelp = {
 	description: "Detect and fix project diagnostics with weighted parallel subagents",
+} satisfies CommandMetadata;
+
+export const collabHelp = {
+	description:
+		"List active local Collab host metadata without URLs; use collab link <instanceId|pid> to retrieve a control link (--view for view-only)",
 } satisfies CommandMetadata;
 
 export const commitHelp = { description: "Generate a commit message and update changelogs" } satisfies CommandMetadata;
@@ -46,7 +51,7 @@ export const dryBalanceHelp = {
 } satisfies CommandMetadata;
 
 export const galleryHelp = {
-	description: "Preview tool renderers across streaming, in-progress, success, and failure states",
+	description: "Preview tool, composer, and status-line renderers in a deterministic visual gallery",
 } satisfies CommandMetadata;
 
 export const gcHelp = { description: "Run storage garbage collection" } satisfies CommandMetadata;
@@ -56,6 +61,10 @@ export const ifBenchHelp = {
 } satisfies CommandMetadata;
 export const gitHelp = {
 	description: "Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer",
+} satisfies CommandMetadata;
+
+export const findHelp = {
+	description: "Semantic search: describe a behavior, get the files and line ranges that implement it",
 } satisfies CommandMetadata;
 
 export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
@@ -109,6 +118,10 @@ export const sshHelp = { description: "Manage SSH host configurations" } satisfi
 
 export const statsHelp = { description: "View usage statistics" } satisfies CommandMetadata;
 
+export const streamHelp = {
+	description: "Broadcast local omp session screens and chat to your public live channel",
+} satisfies CommandMetadata;
+
 export const tinyModelsHelp = {
 	description: "Download tiny local models (session titles + memory)",
 } satisfies CommandMetadata;
@@ -126,5 +139,5 @@ export const usageHelp = {
 } satisfies CommandMetadata;
 
 export const worktreeHelp = {
-	description: "List or clear agent-managed git worktrees (~/.omp/wt)",
+	description: "Add, list, or clear git worktrees (clone-first when enabled)",
 } satisfies CommandMetadata;

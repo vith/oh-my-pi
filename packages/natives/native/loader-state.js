@@ -6,6 +6,7 @@ import * as path from "node:path";
 import * as zlib from "node:zlib";
 import packageJson from "../package.json" with { type: "json" };
 import { embeddedAddon } from "./embedded-addon.js";
+import { containsVersionSentinel, versionSentinelFor } from "./version-sentinel.js";
 
 /**
  * Native addon loader for `@oh-my-pi/pi-natives`.
@@ -31,7 +32,14 @@ import { embeddedAddon } from "./embedded-addon.js";
  * post-build `--reset` stub) is the authoritative compiled-mode signal.
  */
 
-const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
+const SUPPORTED_PLATFORMS = [
+	"linux-x64",
+	"linux-arm64",
+	"darwin-x64",
+	"darwin-arm64",
+	"win32-x64",
+	"win32-arm64",
+];
 
 /**
  * Streaming startup marker, enabled by `PI_DEBUG_STARTUP`. Local copy of the
@@ -698,7 +706,7 @@ export function validateLoadedBindings(ctx, bindings, candidate) {
 	// the current sentinel; otherwise a restart would simply reload stale disk.
 	let diskHasExpectedSentinel = false;
 	try {
-		diskHasExpectedSentinel = fs.readFileSync(candidate).includes(ctx.versionSentinelExport);
+		diskHasExpectedSentinel = containsVersionSentinel(fs.readFileSync(candidate), ctx.versionSentinelExport);
 	} catch {
 		// The successful require above normally guarantees readability. If the
 		// file disappears concurrently, retain the safe reinstall diagnosis.
@@ -832,7 +840,7 @@ export function initLoaderContext(overrides = {}) {
 	// physically cannot expose the symbol this loader is looking for. That
 	// turns the silent `<sym> is not a function` crash from a Windows
 	// locked-file update into an actionable load-time error.
-	const versionSentinelExport = `__piNativesV${packageVersion.replace(/[^A-Za-z0-9]/g, "_")}`;
+	const versionSentinelExport = versionSentinelFor(packageVersion);
 
 	return {
 		platformTag,

@@ -12,7 +12,8 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { logger } from "@oh-my-pi/pi-utils";
-import { type CoordinationDetails, HubTool } from "../src/tools/hub";
+import { type CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { HubTool } from "../src/tools/hub";
 
 const managers: AsyncJobManager[] = [];
 
@@ -32,7 +33,7 @@ function createToolSession(options: {
 		cwd: process.cwd(),
 		hasUI: false,
 		settings: {
-			get: (key: string) => (key === "async.pollWaitDuration" ? "5s" : undefined),
+			get: () => undefined,
 		},
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,

@@ -9,6 +9,7 @@ import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/p
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 /**
  * Contract: when `task.maxRuntimeMs` is set, a subagent whose inference call
@@ -31,6 +32,7 @@ function createHangingSession(): HangingSessionHandle {
 	let abortCount = 0;
 	const { promise: hang, resolve: releaseHang } = Promise.withResolvers<void>();
 	const session: Partial<AgentSession> = {
+		...createSessionDefaults(),
 		setIrcWakeTurnObserver: () => {},
 		setIrcWakeTurnAdmission: (_next: unknown) => {},
 		setIrcWakeTurnSettlement: (_next: unknown) => {},
@@ -43,7 +45,6 @@ function createHangingSession(): HangingSessionHandle {
 		} as never,
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
-		setActiveToolsByName: async (_names: string[]) => {},
 		subscribe: (_listener: (event: AgentSessionEvent) => void) => () => {},
 		prompt: async (_text: string, _options?: PromptOptions) => {
 			await hang;
@@ -52,14 +53,10 @@ function createHangingSession(): HangingSessionHandle {
 		waitForIdle: async () => {
 			await hang;
 		},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
-		getLastAssistantMessage: () => undefined,
 		abort: async () => {
 			abortCount += 1;
 			releaseHang();
 		},
-		dispose: async () => {},
 	};
 	return {
 		session: session as AgentSession,
@@ -127,6 +124,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		// hang; we only need to assert that NO timeout fires when maxRuntimeMs=0.
 		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
 		const fastSession: Partial<AgentSession> = {
+			...createSessionDefaults(),
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
 			setIrcWakeTurnSettlement: (_next: unknown) => {},
@@ -137,7 +135,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
-			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				// Fire a synthetic yield on the next tick to drive runSubprocess to
 				// completion without depending on the real agent loop.
@@ -156,12 +153,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				return () => {};
 			},
 			prompt: async () => true,
-			waitForIdle: async () => {},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
-			getLastAssistantMessage: () => undefined,
-			abort: async () => {},
-			dispose: async () => {},
 		};
 		mockCreateAgentSession(fastSession as AgentSession);
 
@@ -220,6 +211,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		const creationStarted = Promise.withResolvers<CreateAgentSessionOptions>();
 		const lateDisposed = Promise.withResolvers<void>();
 		const lateSession = {
+			...createSessionDefaults(),
 			dispose: async () => lateDisposed.resolve(),
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
@@ -262,6 +254,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		expect(cancelled.aborted).toBe(true);
 
 		const replacementSession = {
+			...createSessionDefaults(),
 			dispose: async () => {},
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
@@ -294,6 +287,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		let listenerRef: ((event: AgentSessionEvent) => void) | undefined;
 		let abortCount = 0;
 		const session: Partial<AgentSession> = {
+			...createSessionDefaults(),
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
 			setIrcWakeTurnSettlement: (_next: unknown) => {},
@@ -304,7 +298,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
-			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
 				return () => {};
@@ -316,9 +309,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			waitForIdle: async () => {
 				await hang;
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
-			getLastAssistantMessage: () => undefined,
 			abort: async () => {
 				abortCount += 1;
 				// Simulate a late yield arriving while the executor is tearing
@@ -335,7 +325,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				} as AgentSessionEvent);
 				releaseHang();
 			},
-			dispose: async () => {},
 		};
 		mockCreateAgentSession(session as AgentSession);
 
@@ -368,7 +357,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 					type: "toolCall" as const,
 					id: "tool-yield-budget",
 					name: "yield",
-					arguments: { result: { data: { finished: "unvalidated" } } },
+					arguments: { data: { finished: "unvalidated" } },
 				},
 			],
 			stopReason: "toolUse" as const,
@@ -378,6 +367,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		let abortCount = 0;
 		let abortCountBeforeYieldExecutionEnd: number | undefined;
 		const session: Partial<AgentSession> = {
+			...createSessionDefaults(),
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
 			setIrcWakeTurnSettlement: (_next: unknown) => {},
@@ -388,7 +378,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
-			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
 				return () => {};
@@ -417,13 +406,10 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 					isError: false,
 				} as AgentSessionEvent);
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => yieldAssistantMessage as never,
 			abort: async () => {
 				abortCount += 1;
 			},
-			dispose: async () => {},
 		};
 		mockCreateAgentSession(session as AgentSession);
 
@@ -455,7 +441,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 					type: "toolCall" as const,
 					id: "tool-yield-rejected",
 					name: "yield",
-					arguments: { result: { data: { finished: "rejected-before-validation" } } },
+					arguments: { data: { finished: "rejected-before-validation" } },
 				},
 			],
 			stopReason: "toolUse" as const,
@@ -467,7 +453,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 					type: "toolCall" as const,
 					id: "tool-yield-valid",
 					name: "yield",
-					arguments: { result: { data: { finished: "unvalidated-later" } } },
+					arguments: { data: { finished: "unvalidated-later" } },
 				},
 			],
 			stopReason: "toolUse" as const,
@@ -484,6 +470,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		let abortCountBeforeValidYieldExecutionEnd: number | undefined;
 		const promptCalls: Array<{ text: string; options?: PromptOptions }> = [];
 		const session: Partial<AgentSession> = {
+			...createSessionDefaults(),
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
 			setIrcWakeTurnSettlement: (_next: unknown) => {},
@@ -494,7 +481,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
-			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
 				return () => {};
@@ -548,13 +534,10 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 					} as AgentSessionEvent);
 				}
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => lastAssistantMessage as never,
 			abort: async () => {
 				abortCount += 1;
 			},
-			dispose: async () => {},
 		};
 		mockCreateAgentSession(session as AgentSession);
 
@@ -564,8 +547,12 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			settings,
 		});
 
+		// The rejected yield is suppressed only while it is validating (#5006):
+		// no abort before its execution end. Once it resolves as an error the
+		// run is 2 requests into a budget of 1, so the deferred budget check
+		// runs and stops the turn — the reminder then collects a valid yield.
 		expect(abortCountBeforeRejectedYieldExecutionEnd).toBe(0);
-		expect(abortCountBeforeValidYieldExecutionEnd).toBe(0);
+		expect(abortCountBeforeValidYieldExecutionEnd).toBe(1);
 		expect(promptCalls.length).toBeGreaterThanOrEqual(2);
 		expect(promptCalls[1]?.options?.synthetic).toBe(true);
 		expect(result.aborted).toBe(false);
@@ -599,7 +586,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 					type: "toolCall" as const,
 					id: "tool-yield-incremental",
 					name: "yield",
-					arguments: { type: ["findings"], result: { data: { id: "saved" } } },
+					arguments: { type: ["findings"], data: { id: "saved" } },
 				},
 			],
 			stopReason: "toolUse" as const,
@@ -620,6 +607,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		let abortCountBeforeYieldExecutionEnd: number | undefined;
 		let abortCountAfterFollowingTurn: number | undefined;
 		const session: Partial<AgentSession> = {
+			...createSessionDefaults(),
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
 			setIrcWakeTurnSettlement: (_next: unknown) => {},
@@ -630,7 +618,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
-			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
 				return () => {};
@@ -671,13 +658,10 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				} as unknown as AgentSessionEvent);
 				abortCountAfterFollowingTurn = abortCount;
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => lastAssistantMessage as never,
 			abort: async () => {
 				abortCount += 1;
 			},
-			dispose: async () => {},
 		};
 		mockCreateAgentSession(session as AgentSession);
 
@@ -709,6 +693,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		// executor must surface it on SingleResult.contextTokens.
 		const settings = Settings.isolated({ "task.maxRuntimeMs": 0 });
 		const fastSession: Partial<AgentSession> = {
+			...createSessionDefaults(),
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
 			setIrcWakeTurnSettlement: (_next: unknown) => {},
@@ -719,7 +704,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
-			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				queueMicrotask(() => {
 					listener({
@@ -744,12 +728,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				return () => {};
 			},
 			prompt: async () => true,
-			waitForIdle: async () => {},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
-			getLastAssistantMessage: () => undefined,
-			abort: async () => {},
-			dispose: async () => {},
 		};
 		mockCreateAgentSession(fastSession as AgentSession);
 
@@ -778,6 +756,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		let listenerRef: ((event: AgentSessionEvent) => void) | undefined;
 		let abortCount = 0;
 		const session: Partial<AgentSession> = {
+			...createSessionDefaults(),
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
 			setIrcWakeTurnSettlement: (_next: unknown) => {},
@@ -788,7 +767,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
-			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
 				return () => {};
@@ -807,9 +785,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			waitForIdle: async () => {
 				await hang;
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
-			getLastAssistantMessage: () => undefined,
 			abort: async () => {
 				abortCount += 1;
 				// Genuine delay: the defect is the real interleaving between the
@@ -819,7 +794,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				await Bun.sleep(1500);
 				releaseHang();
 			},
-			dispose: async () => {},
 		};
 		mockCreateAgentSession(session as AgentSession);
 
@@ -839,6 +813,7 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 		let listenerRef: ((event: AgentSessionEvent) => void) | undefined;
 		let abortCount = 0;
 		const session: Partial<AgentSession> = {
+			...createSessionDefaults(),
 			setIrcWakeTurnObserver: () => {},
 			setIrcWakeTurnAdmission: (_next: unknown) => {},
 			setIrcWakeTurnSettlement: (_next: unknown) => {},
@@ -849,7 +824,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			sessionManager: { appendSessionInit: () => {} } as never,
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
-			setActiveToolsByName: async () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listenerRef = listener;
 				return () => {};
@@ -868,10 +842,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				} as AgentSessionEvent);
 				return true;
 			},
-			waitForIdle: async () => {},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
-			getLastAssistantMessage: () => undefined,
 			abort: async () => {
 				abortCount += 1;
 				// Genuine delay: post-yield teardown must outlast the real
@@ -879,7 +849,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				// committed. See the budget test above for why fake timers do not fit.
 				await Bun.sleep(1500);
 			},
-			dispose: async () => {},
 		};
 		mockCreateAgentSession(session as AgentSession);
 

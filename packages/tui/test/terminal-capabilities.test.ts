@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	detectStyledUnderlineSupport,
 	detectTerminalId,
 	getTerminalInfo,
 	hyperlinksUserOverride,
@@ -11,7 +12,60 @@ import {
 	shouldEnableHyperlinksByDefault,
 	shouldEnableSynchronizedOutputByDefault,
 	synchronizedOutputUserOverride,
+	isInsideHerdr,
+	isInsideTerminalMultiplexer,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
+
+describe("isInsideHerdr", () => {
+	it("is true for HERDR_ENV=1", () => {
+		expect(isInsideHerdr({ HERDR_ENV: "1" })).toBe(true);
+	});
+
+	it("is true for each pane identity var", () => {
+		expect(isInsideHerdr({ HERDR_PANE_ID: "abc" })).toBe(true);
+		expect(isInsideHerdr({ HERDR_TAB_ID: "t1" })).toBe(true);
+		expect(isInsideHerdr({ HERDR_WORKSPACE_ID: "w1" })).toBe(true);
+	});
+
+	it("is false for empty identity vars", () => {
+		expect(isInsideHerdr({ HERDR_PANE_ID: "" })).toBe(false);
+		expect(isInsideHerdr({ HERDR_TAB_ID: "" })).toBe(false);
+		expect(isInsideHerdr({ HERDR_WORKSPACE_ID: "" })).toBe(false);
+	});
+
+	it("is false for client-only Herdr vars", () => {
+		expect(isInsideHerdr({ HERDR_SOCKET_PATH: "/tmp/x" })).toBe(false);
+		expect(isInsideHerdr({ HERDR_BIN_PATH: "/usr/bin/herdr" })).toBe(false);
+		expect(isInsideHerdr({ HERDR_SESSION: "s1" })).toBe(false);
+		expect(isInsideHerdr({ HERDR_CONFIG_PATH: "/tmp/herdr.toml" })).toBe(false);
+		expect(isInsideHerdr({ HERDR_CLIENT_SOCKET_PATH: "/tmp/client.sock" })).toBe(false);
+	});
+
+	it("is false for HERDR_ENV=0", () => {
+		expect(isInsideHerdr({ HERDR_ENV: "0" })).toBe(false);
+	});
+});
+
+describe("isInsideTerminalMultiplexer", () => {
+	it("is true for HERDR_PANE_ID without HERDR_ENV", () => {
+		expect(isInsideTerminalMultiplexer({ HERDR_PANE_ID: "p1" })).toBe(true);
+	});
+
+	it("is true for a wmux pane (WMUX=1 and native WMUX_SURFACE_ID)", () => {
+		expect(isInsideTerminalMultiplexer({ WMUX: "1" })).toBe(true);
+		expect(isInsideTerminalMultiplexer({ WMUX_SURFACE_ID: "3f2a" })).toBe(true);
+	});
+
+	it("is false for WMUX=0 or an empty surface id", () => {
+		expect(isInsideTerminalMultiplexer({ WMUX: "0" })).toBe(false);
+		expect(isInsideTerminalMultiplexer({ WMUX_SURFACE_ID: "" })).toBe(false);
+	});
+
+	it("is false for client-only wmux CLI vars", () => {
+		expect(isInsideTerminalMultiplexer({ WMUX_CLI: "C:/wmux/wmux.exe" })).toBe(false);
+		expect(isInsideTerminalMultiplexer({ WMUX_PIPE: "\\\\.\\pipe\\wmux" })).toBe(false);
+	});
+});
 
 describe("detectTerminalId", () => {
 	it("recognizes Warp before the true-color fallback", () => {
@@ -54,12 +108,20 @@ describe("shouldEnableSynchronizedOutputByDefault", () => {
 		}
 	});
 
-	it("enables sync in Windows Terminal / WSL via WT_SESSION regardless of terminal id", () => {
+	it("enables sync only when WT_SESSION does not contradict the terminal identity", () => {
 		expect(shouldEnableSynchronizedOutputByDefault({ WT_SESSION: "abc" }, "trueColor")).toBe(true);
-		// WSL shape: Linux + WT_SESSION + COLORTERM=truecolor collapses to trueColor id.
-		expect(shouldEnableSynchronizedOutputByDefault({ WT_SESSION: "abc", COLORTERM: "truecolor" }, "trueColor")).toBe(
-			true,
-		);
+		expect(
+			shouldEnableSynchronizedOutputByDefault(
+				{ WT_SESSION: "abc", TERM_PROGRAM: "Windows_Terminal", COLORTERM: "truecolor" },
+				"trueColor",
+			),
+		).toBe(true);
+		expect(
+			shouldEnableSynchronizedOutputByDefault(
+				{ WT_SESSION: "0", TERM_PROGRAM: "Tabby", COLORTERM: "truecolor" },
+				"trueColor",
+			),
+		).toBe(false);
 	});
 
 	it("enables sync when TERM_FEATURES advertises the Sy capability, even through SSH/mux", () => {
@@ -86,6 +148,27 @@ describe("shouldEnableSynchronizedOutputByDefault", () => {
 		expect(shouldEnableSynchronizedOutputByDefault({ CMUX_WORKSPACE_ID: "workspace" }, "wezterm")).toBe(false);
 		expect(shouldEnableSynchronizedOutputByDefault({ TERM: "tmux-256color" }, "iterm2")).toBe(false);
 		expect(shouldEnableSynchronizedOutputByDefault({ TERM: "screen-256color" }, "kitty")).toBe(false);
+	});
+
+	it("enables sync inside Herdr even when a Kitty/Ghostty identity leaks", () => {
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_ENV: "1" }, "kitty")).toBe(true);
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_ENV: "1" }, "ghostty")).toBe(true);
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_ENV: "1" }, "trueColor")).toBe(true);
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_ENV: "1" }, "base")).toBe(true);
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_PANE_ID: "p1" }, "kitty")).toBe(true);
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_PANE_ID: "p1" }, "ghostty")).toBe(true);
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_PANE_ID: "p1", TMUX: "1" }, "kitty")).toBe(true);
+	});
+
+	it("does not treat client-only Herdr vars as inside a pane", () => {
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_SOCKET_PATH: "/tmp/x", TMUX: "1" }, "kitty")).toBe(false);
+	});
+
+	it("still lets a user opt-out inside Herdr", () => {
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_ENV: "1", PI_NO_SYNC_OUTPUT: "1" }, "ghostty")).toBe(
+			false,
+		);
+		expect(shouldEnableSynchronizedOutputByDefault({ HERDR_ENV: "1", PI_TUI_SYNC_OUTPUT: "0" }, "kitty")).toBe(false);
 	});
 
 	it("keeps known-unsupported and unknown profiles off", () => {
@@ -121,22 +204,11 @@ describe("Warp terminal capabilities", () => {
 	});
 
 	it("resolves the process-wide Warp terminal id and image protocol from TERM_PROGRAM", async () => {
-		const env: Record<string, string | undefined> = {
-			...Bun.env,
+		const env = subprocessEnv({
 			TERM_PROGRAM: "WarpTerminal",
 			COLORTERM: "truecolor",
-		};
-		for (const key of [
-			"PI_FORCE_IMAGE_PROTOCOL",
-			"WSL_DISTRO_NAME",
-			"WSL_INTEROP",
-			"KITTY_WINDOW_ID",
-			"GHOSTTY_RESOURCES_DIR",
-			"WEZTERM_PANE",
-			"ITERM_SESSION_ID",
-			"VSCODE_PID",
-			"ALACRITTY_WINDOW_ID",
-		]) {
+		});
+		for (const key of ["WSL_DISTRO_NAME", "WSL_INTEROP"]) {
 			delete env[key];
 		}
 
@@ -227,6 +299,10 @@ function subprocessEnv(overrides: Record<string, string | undefined>): Record<st
 		"PASEO_TERMINAL_ID",
 		"KITTY_WINDOW_ID",
 		"GHOSTTY_RESOURCES_DIR",
+		"HERDR_ENV",
+		"HERDR_PANE_ID",
+		"HERDR_TAB_ID",
+		"HERDR_WORKSPACE_ID",
 		"WEZTERM_PANE",
 		"ITERM_SESSION_ID",
 		"VSCODE_PID",
@@ -236,6 +312,36 @@ function subprocessEnv(overrides: Record<string, string | undefined>): Record<st
 	}
 	return { ...env, ...overrides };
 }
+
+describe("Herdr image protocol mask", () => {
+	it("rejects a leaked Ghostty protocol when Herdr owns the pane grid", () => {
+		const env = {
+			COLORTERM: "truecolor",
+			GHOSTTY_RESOURCES_DIR: "/usr/share/ghostty",
+			HERDR_ENV: "1",
+			TERM: "xterm-256color",
+			TERM_PROGRAM: "ghostty",
+		};
+		const terminalId = detectTerminalId(env);
+
+		expect(terminalId).toBe("ghostty");
+		expect(resolveImageProtocol(terminalId, env, true)).toBeNull();
+	});
+
+	it("rejects a leaked Ghostty protocol when HERDR_PANE_ID is set without HERDR_ENV", () => {
+		const env = {
+			COLORTERM: "truecolor",
+			GHOSTTY_RESOURCES_DIR: "/usr/share/ghostty",
+			HERDR_PANE_ID: "p1",
+			TERM: "xterm-256color",
+			TERM_PROGRAM: "ghostty",
+		};
+		const terminalId = detectTerminalId(env);
+
+		expect(terminalId).toBe("ghostty");
+		expect(resolveImageProtocol(terminalId, env, true)).toBeNull();
+	});
+});
 
 describe("Paseo embedder carve-out", () => {
 	it("detects Paseo via PASEO_TERMINAL_ID", () => {
@@ -470,5 +576,41 @@ describe("shouldEnableHyperlinksByDefault", () => {
 		expect(shouldEnableHyperlinksByDefault({ PI_FORCE_HYPERLINKS: "1" }, "base")).toBe(true);
 		expect(shouldEnableHyperlinksByDefault({ PI_FORCE_HYPERLINKS: "1", TMUX: "1" }, "wezterm")).toBe(true);
 		expect(shouldEnableHyperlinksByDefault({ PI_FORCE_HYPERLINKS: "1", STY: "1.pts-0" }, "kitty")).toBe(true);
+	});
+});
+
+describe("detectStyledUnderlineSupport", () => {
+	it("enables the colon form only on terminals that implement styled underlines", () => {
+		expect(detectStyledUnderlineSupport("kitty", {})).toBe(true);
+		expect(detectStyledUnderlineSupport("ghostty", {})).toBe(true);
+		expect(detectStyledUnderlineSupport("wezterm", {})).toBe(true);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "3.5.0" })).toBe(true);
+	});
+
+	it("keeps Apple Terminal and other unproven hosts on the flat underline", () => {
+		// Apple Terminal advertises no id marker and resolves to `base`, where the
+		// colon-form reset paints a black bar — so base and every fallback stay off.
+		expect(detectTerminalId({ TERM_PROGRAM: "Apple_Terminal" })).toBe("base");
+		expect(detectStyledUnderlineSupport("base")).toBe(false);
+		expect(detectStyledUnderlineSupport("trueColor")).toBe(false);
+		expect(detectStyledUnderlineSupport("vscode")).toBe(false);
+		expect(detectStyledUnderlineSupport("alacritty")).toBe(false);
+		expect(detectStyledUnderlineSupport("warp")).toBe(false);
+		expect(detectStyledUnderlineSupport("orca")).toBe(false);
+	});
+
+	it("enables iTerm2 only on a confirmed version >= 3.5, else flat fallback", () => {
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "2.1.4" })).toBe(false);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "3.4.0" })).toBe(false);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "3.5.0" })).toBe(true);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "4.0.0" })).toBe(true);
+		expect(detectStyledUnderlineSupport("iterm2", {})).toBe(false);
+	});
+
+	it("disables the colon form under a multiplexer even when a proven terminal id leaks through", () => {
+		expect(detectStyledUnderlineSupport("kitty", { TMUX: "/tmp/tmux-1000/default,1,0" })).toBe(false);
+		expect(detectStyledUnderlineSupport("ghostty", { STY: "1234.pts-0.host" })).toBe(false);
+		expect(detectStyledUnderlineSupport("wezterm", { TERM: "screen-256color" })).toBe(false);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "3.5.0", ZELLIJ: "0" })).toBe(false);
 	});
 });

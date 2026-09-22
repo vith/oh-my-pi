@@ -7,6 +7,7 @@ import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
+import { redactMemorySecrets as redactSecrets } from "../memory-backend/redact";
 import { truncateApproxTokens } from "../mnemopi/config";
 import consolidateInputTemplate from "../prompts/memories/sharpshooter-consolidate-input.md" with { type: "text" };
 import consolidateSystemTemplate from "../prompts/memories/sharpshooter-consolidate-system.md" with { type: "text" };
@@ -83,6 +84,7 @@ export async function runSharpshooterConsolidation(options: {
 	cwd: string;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	sessionId: string;
 	force?: boolean;
 }): Promise<SharpshooterConsolidationResult> {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
@@ -114,6 +116,7 @@ async function consolidateLocked(
 		cwd: string;
 		settings: Settings;
 		modelRegistry: ModelRegistry;
+		sessionId: string;
 		force?: boolean;
 	},
 	bankDir: string,
@@ -151,27 +154,30 @@ async function consolidateLocked(
 			maxFileLines: SHARPSHOOTER_MAX_FILE_LINES,
 		});
 
-		const response = await retryTransientCompletion(() =>
-			completeSimple(
-				model,
-				{
-					systemPrompt: [system],
-					messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
-					tools: [replaceMemoryFilesTool],
-				},
-				{
-					apiKey: options.modelRegistry.resolver(model),
-					maxTokens: 8192,
-					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
-					toolChoice: "required",
-				},
-			),
+		const response = await retryTransientCompletion(
+			() =>
+				completeSimple(
+					model,
+					{
+						systemPrompt: [system],
+						messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+						tools: [replaceMemoryFilesTool],
+					},
+					{
+						apiKey: options.modelRegistry.resolver(model, options.sessionId),
+						sessionId: options.sessionId,
+						maxTokens: 8192,
+						reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+						toolChoice: "required",
+					},
+				),
+			{ provider: model.provider },
 		);
 		if (response.stopReason === "error") {
 			throw new Error(response.errorMessage || "sharpshooter consolidation model error");
 		}
 
-		const files = parseReplacementFiles(response.content);
+		const files = parseReplacementFiles(response.content, currentFiles);
 		await applyReplacementFiles(bankDir, files);
 
 		const consumedFiles = groups.flatMap(group => group.deltas.map(item => item.file));
@@ -223,7 +229,10 @@ async function readProjectDocs(cwd: string): Promise<string> {
 	return truncateApproxTokens(blocks.join("\n\n"), PROJECT_DOC_TOKEN_LIMIT);
 }
 
-function parseReplacementFiles(content: readonly unknown[]): ReplacementFile[] {
+function parseReplacementFiles(
+	content: readonly unknown[],
+	currentFiles: Readonly<Record<SharpshooterMemoryFile, string>>,
+): ReplacementFile[] {
 	const toolCalls = content.filter(
 		(block): block is { type: "toolCall"; name: string; arguments: unknown } =>
 			typeof block === "object" && block !== null && "type" in block && block.type === "toolCall",
@@ -260,6 +269,10 @@ function parseReplacementFiles(content: readonly unknown[]): ReplacementFile[] {
 		}
 		files.push({ name, content: redacted });
 	}
+	const totalChars = files.reduce((sum, file) => sum + file.content.trim().length, 0);
+	if (totalChars === 0 && SHARPSHOOTER_MEMORY_FILES.some(name => currentFiles[name].trim().length > 0)) {
+		throw new Error("replace_memory_files returned all-empty content; refusing to wipe memory files");
+	}
 	return files;
 }
 
@@ -294,22 +307,6 @@ async function recordConsolidationError(
 	} catch {
 		// The original consolidation error is more actionable than a secondary state-write failure.
 	}
-}
-
-function redactSecrets(input: string): string {
-	let out = input;
-	const patterns = [
-		/(?:sk|pk|rk|tok|key|secret|token|password)[-_A-Za-z0-9]{12,}/g,
-		/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
-		/(?:AKIA|ASIA)[A-Z0-9]{16}/g,
-		/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
-		/github_pat_[A-Za-z0-9_]{20,}/g,
-		/npm_[A-Za-z0-9]{30,}/g,
-		/xox[baprs]-[A-Za-z0-9-]{10,}/g,
-		/AIza[A-Za-z0-9_-]{30,}/g,
-	];
-	for (const pattern of patterns) out = out.replace(pattern, "[REDACTED]");
-	return out;
 }
 
 function errorMessage(error: unknown): string {

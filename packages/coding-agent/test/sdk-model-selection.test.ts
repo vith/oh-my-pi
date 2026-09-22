@@ -247,6 +247,61 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("preserves an explicit model when a reused registry already finished discovery", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		modelRegistry.refreshInBackground("offline");
+		await modelRegistry.awaitInitialBackgroundRefresh();
+
+		const catalogModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!catalogModel) throw new Error("missing bundled registry model");
+		const explicitModel = buildModel({
+			id: catalogModel.id,
+			name: "Explicit Claude endpoint",
+			api: catalogModel.api,
+			provider: catalogModel.provider,
+			baseUrl: "https://explicit-sdk-endpoint.example/v1",
+			reasoning: catalogModel.reasoning,
+			input: [...catalogModel.input],
+			cost: catalogModel.cost,
+			contextWindow: 321_000,
+			maxTokens: 12_345,
+		});
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			model: explicitModel,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+
+		try {
+			// Flush a reconciler armed against the already-settled refresh; an
+			// incorrect explicit-model opt-in would replace the model here.
+			await Promise.resolve();
+			expect(session.model?.baseUrl).toBe("https://explicit-sdk-endpoint.example/v1");
+			expect(session.model?.contextWindow).toBe(321_000);
+			expect(session.model?.maxTokens).toBe(12_345);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("hydrates credential-scoped model caches before fallback validation", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
@@ -375,6 +430,90 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model).toBeUndefined();
 			expect(modelFallbackMessage).toBe('Model "missing-provider/missing-model" not found');
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("does not resolve a disabled provider through deferred subagent model selection", async () => {
+		const settings = Settings.isolated({ disabledProviders: ["runtime-provider"] });
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...buildSessionOptions("runtime-provider/runtime-model"),
+			settings,
+			modelPatternAuthFallback: "runtime-provider/runtime-fallback-model",
+		});
+
+		try {
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toBe('Model "runtime-provider/runtime-model" not found');
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("advances past a disabled first selector to an enabled discovery-backed model", async () => {
+		// A disabled provider's model already sits in the static catalog, so
+		// resolveCliModel resolves the first selector against the full registry. If
+		// that match short-circuited the deferred discovery refresh, the enabled
+		// second selector (only reachable after a models.yml discovery fetch) would
+		// never be discovered and dispatch would report it as not found.
+		const disabledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!disabledModel) {
+			throw new Error("Expected bundled anthropic model");
+		}
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		const modelsPath = path.join(tempDir, "disabled-first-models.yml");
+		await Bun.write(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					gateway: {
+						baseUrl: "http://127.0.0.1:9995",
+						api: "openai-completions",
+						auth: "none",
+						discovery: { type: "openai-models-list" },
+					},
+				},
+			}),
+		);
+		let modelListCalls = 0;
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9995/v1/models") {
+				modelListCalls++;
+				return Response.json({ data: [{ id: "dynamic-model", context_length: 65_536 }] });
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const modelRegistry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
+
+		const { session, modelFallbackMessage } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ disabledProviders: [disabledModel.provider] }),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+			modelPattern: [`${disabledModel.provider}/${disabledModel.id}`, "gateway/dynamic-model"],
+		});
+
+		try {
+			expect(modelListCalls).toBeGreaterThan(0);
+			expect(session.model?.provider).toBe("gateway");
+			expect(session.model?.id).toBe("dynamic-model");
+			expect(modelFallbackMessage).toBeUndefined();
 		} finally {
 			await session.dispose();
 		}
