@@ -11,9 +11,9 @@
 import { Container, Loader, Markdown, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import type { PermissionDialogLine, PermissionDialogOption } from "../../extensibility/extensions";
 import { resolveLazy } from "../../tools/permissions/prompt";
-import { getMarkdownTheme, theme } from "../theme/theme";
-import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
-import { DynamicBorder } from "./dynamic-border";
+import { getMarkdownTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "@oh-my-pi/pi-tui/keybinding-matchers";
+import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 
 const DEFAULT_HELP_TEXT = "j/k navigate  enter select  esc cancel — no rule written";
 const SUGGESTING_LABEL = "Suggesting rules…";

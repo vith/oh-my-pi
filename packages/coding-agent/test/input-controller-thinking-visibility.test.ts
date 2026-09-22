@@ -1,5 +1,5 @@
 import { describe, expect, it, type Mock, vi } from "bun:test";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
@@ -46,14 +46,21 @@ describe("InputController thinking visibility", () => {
 		const setHideThinkingBlock = assistant.setHideThinkingBlock as Mock<(hidden: boolean) => void>;
 		const set = vi.fn();
 		const showStatus = vi.fn();
-		const resetDisplay = vi.fn();
+		const resetOrder: string[] = [];
+		const resetDisplay = vi.fn(() => resetOrder.push("display"));
+		const resetStableEmission = vi.fn(() => resetOrder.push("stable emission"));
 		const ctx = {
 			hideThinkingBlock: false,
 			effectiveHideThinkingBlock: false,
 			hasDisplayableThinkingContent: true,
 			settings: { set },
 			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "off" },
-			chatContainer: { children: [assistant], clear: vi.fn(), addChild: vi.fn() },
+			chatContainer: {
+				children: [assistant],
+				clear: vi.fn(),
+				addChild: vi.fn(),
+				resetStableEmission,
+			},
 			streamingComponent: undefined,
 			streamingMessage: undefined,
 			showStatus,
@@ -65,7 +72,9 @@ describe("InputController thinking visibility", () => {
 		expect(ctx.hideThinkingBlock).toBe(true);
 		expect(set).toHaveBeenCalledWith("hideThinkingBlock", true);
 		expect(setHideThinkingBlock).toHaveBeenCalledWith(true);
+		expect(resetStableEmission).toHaveBeenCalledTimes(1);
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
+		expect(resetOrder).toEqual(["stable emission", "display"]);
 		expect(showStatus).toHaveBeenCalledWith("Thinking blocks: hidden");
 	});
 

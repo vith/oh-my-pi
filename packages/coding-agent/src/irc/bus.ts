@@ -1,3 +1,4 @@
+import { type IrcMessage, type IrcDeliveryReceipt } from "@oh-my-pi/pi-tui/tools/hub";
 /**
  * IrcBus - Process-global mailbox bus for agent-to-agent messaging.
  *
@@ -21,24 +22,6 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent } from "../session/agent-session-events";
 import type { CustomMessage } from "../session/messages";
-
-export interface IrcMessage {
-	id: string;
-	/** Sender agent id. */
-	from: string;
-	/** Recipient agent id (resolved; "all" is expanded by the tool, not stored). */
-	to: string;
-	body: string;
-	ts: number;
-	/** Message id being answered. */
-	replyTo?: string;
-}
-
-export interface IrcDeliveryReceipt {
-	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
-	error?: string;
-}
 
 interface IrcWaiter {
 	from?: string;
@@ -82,6 +65,8 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
+	readonly #lastSent = new Map<string, Map<string, number>>();
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -119,6 +104,32 @@ export class IrcBus {
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		const receipt = await this.#deliver(message, opts);
+		if (receipt.outcome !== "failed") {
+			let sent = this.#lastSent.get(message.from);
+			if (!sent) {
+				sent = new Map();
+				this.#lastSent.set(message.from, sent);
+			}
+			sent.set(message.to, message.ts);
+		}
+		return receipt;
+	}
+
+	/**
+	 * Whether `from` successfully sent `to` anything at or after `sinceTs`.
+	 * The wake-turn relay uses it to skip agents that already answered their
+	 * waker themselves.
+	 */
+	sentSince(from: string, to: string, sinceTs: number): boolean {
+		const ts = this.#lastSent.get(from)?.get(to);
+		return ts !== undefined && ts >= sinceTs;
+	}
+
+	async #deliver(
+		message: IrcMessage,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
 			return {
@@ -338,7 +349,7 @@ export class IrcBus {
 					settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
 					return;
 				}
-				void session.waitForIrcAutoReplies().then(() => {
+				void session.waitForIrcReplies().then(() => {
 					if (!active || registry.get(target)?.session !== session) return;
 					settle({ kind: "abort", error: new IrcAwaitTargetStopped(target) });
 				});

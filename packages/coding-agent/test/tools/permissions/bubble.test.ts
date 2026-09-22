@@ -14,7 +14,7 @@ import {
 	type PermissionControllerDeps,
 	showFirstRunNotices,
 } from "../../../src/modes/controllers/permission-controller";
-import { initTheme } from "../../../src/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { type AgentRef, AgentRegistry } from "../../../src/registry/agent-registry";
 import type { AgentSession } from "../../../src/session/agent-session";
 import type { CustomMessage } from "../../../src/session/messages";

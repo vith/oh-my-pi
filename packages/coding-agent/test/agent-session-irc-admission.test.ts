@@ -3,7 +3,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -70,12 +70,14 @@ async function createParkedSession(options?: { holdFirstProvider?: Promise<void>
 function message(id: string, body: string): IrcMessage {
 	return { id, from: "Main", to: "child", body, ts: Date.now() } as IrcMessage;
 }
+function ircRecordBody(record: object): string {
+	const details: unknown = Reflect.get(record, "details");
+	return String(details && Reflect.get(details as object, "message"));
+}
 
 function deliveredIrcBodies(session: AgentSession): string[] {
 	return session.agent.state.messages.flatMap(message =>
-		message.role === "custom" && message.customType === "irc:incoming"
-			? [String(message.details && Reflect.get(message.details, "message"))]
-			: [],
+		message.role === "custom" && message.customType === "irc:incoming" ? [ircRecordBody(message)] : [],
 	);
 }
 
@@ -170,9 +172,7 @@ describe("AgentSession IRC wake admission", () => {
 			const secondAdmissionRelease = Promise.withResolvers<void>();
 			let admissionCount = 0;
 			session.setIrcWakeTurnObserver(records => {
-				const body = records
-					.map(record => String(record.details && Reflect.get(record.details, "message")))
-					.join(",");
+				const body = records.map(record => ircRecordBody(record)).join(",");
 				observedBodies.push(body);
 				return undefined;
 			});
@@ -206,9 +206,7 @@ describe("AgentSession IRC wake admission", () => {
 			expect(observedBodies).toEqual(["first"]);
 			expect(
 				session.agent.state.messages.flatMap(message =>
-					message.role === "custom" && message.customType === "irc:incoming"
-						? [String(message.details && Reflect.get(message.details, "message"))]
-						: [],
+					message.role === "custom" && message.customType === "irc:incoming" ? [ircRecordBody(message)] : [],
 				),
 			).toEqual(["first", "second"]);
 		} finally {
@@ -309,7 +307,7 @@ describe("AgentSession IRC wake admission", () => {
 		try {
 			const settlements: string[] = [];
 			session.setIrcWakeTurnSettlement(records => {
-				settlements.push(String(records[0]?.details && Reflect.get(records[0].details, "message")));
+				settlements.push(String(records[0] && ircRecordBody(records[0])));
 			});
 
 			await session.deliverIrcMessage(message("irc-dispose-settlement", "do not settle after dispose"));
@@ -347,7 +345,7 @@ describe("AgentSession IRC wake admission", () => {
 		try {
 			const settlements: string[] = [];
 			lifecycle.setFollowUpSettlement(ref.id, records => {
-				settlements.push(String(records[0]?.details && Reflect.get(records[0].details, "message")));
+				settlements.push(String(records[0] && ircRecordBody(records[0])));
 			});
 
 			await session.deliverIrcMessage(message("irc-tombstone-settlement", "do not settle after tombstone"));
@@ -376,12 +374,12 @@ describe("AgentSession IRC wake admission", () => {
 			const oldSettlements: string[] = [];
 			const currentSettlements: string[] = [];
 			session.setIrcWakeTurnSettlement(records => {
-				oldSettlements.push(String(records[0]?.details && Reflect.get(records[0].details, "message")));
+				oldSettlements.push(String(records[0] && ircRecordBody(records[0])));
 			});
 			await session.deliverIrcMessage(message("irc-policy-old", "old policy wake"));
 			await firstProviderStarted;
 			session.setIrcWakeTurnSettlement(records => {
-				currentSettlements.push(String(records[0]?.details && Reflect.get(records[0].details, "message")));
+				currentSettlements.push(String(records[0] && ircRecordBody(records[0])));
 			});
 			firstProviderRelease.resolve();
 			await session.waitForIdle();
