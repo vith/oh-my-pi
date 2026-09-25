@@ -7,6 +7,9 @@
 
 - `/mode [allow|prompt|deny]` slash command: shows the current permission posture, or switches it persistently via `permissions.default` (the three postures tab-complete).
 - `app.permissions.cycleMode` keybinding (default `ctrl+shift+m`): cycles the permission posture allow → prompt → deny and writes it persistently.
+### Added
+
+- Added transcript scroll mode. Press Ctrl+Up or Ctrl+Down at the prompt to jump between your earlier prompts, and drag across text to copy it. Press Esc, or any key the mode does not use, to return to the prompt with your draft intact.
 
 ### Fixed
 
