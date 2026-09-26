@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { AgentTool, ToolTier } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
-import type { Settings } from "../../config/settings";
+import type { EngineSettings } from "./settings";
 import { type ApprovalPolicy, getToolDecision, normalizePolicy, type ResolvedApproval } from "../approval";
 import { bashApprovalPatternToRegExp, normalizeBashApprovalPattern } from "../bash";
 import { CRITICAL_BASH_PATTERNS } from "./critical-patterns";
@@ -47,7 +47,7 @@ export interface EngineDecision {
 }
 
 export interface EngineContext {
-	settings: Pick<Settings, "get" | "isConfigured">;
+	settings: EngineSettings;
 	cwd: string;
 	home?: string;
 	/**
@@ -109,7 +109,7 @@ export function postureFromApprovalMode(mode: unknown): Posture | undefined {
  * The mode mapping only applies when the key is explicitly configured — its
  * schema default (`yolo`) must not bypass the engine's default posture.
  */
-export function resolvePosture(settings: Pick<Settings, "get" | "isConfigured">): Posture {
+export function resolvePosture(settings: EngineSettings): Posture {
 	if (settings.isConfigured(POSTURE_KEY)) {
 		const raw = settings.get(POSTURE_KEY);
 		return raw === "allow" || raw === "deny" ? raw : "prompt";
@@ -135,7 +135,7 @@ export function resolvePosture(settings: Pick<Settings, "get" | "isConfigured">)
  * The schema default (`prompt`) is inert until configured, mirroring
  * {@link resolvePosture}.
  */
-export function resolveProjectWritesPosture(settings: Pick<Settings, "get" | "isConfigured">): Posture {
+export function resolveProjectWritesPosture(settings: EngineSettings): Posture {
 	if (settings.isConfigured(PROJECT_WRITES_KEY)) {
 		const raw = settings.get(PROJECT_WRITES_KEY);
 		return raw === "allow" || raw === "deny" ? raw : "prompt";
@@ -187,7 +187,7 @@ function resolveEffectivePosture(ctx: EngineContext, toolName: string, args: unk
 }
 
 /** Legacy `bash.patterns` settings entries as a `legacy`-layer rule list (last in layer tie-break order). */
-export function legacyBashPatterns(settings: Pick<Settings, "get" | "isConfigured">): PermissionRule[] {
+export function legacyBashPatterns(settings: EngineSettings): PermissionRule[] {
 	const raw: unknown = settings.get("bash.patterns");
 	if (!Array.isArray(raw)) return [];
 	const rules: PermissionRule[] = [];
@@ -211,10 +211,7 @@ export function legacyBashPatterns(settings: Pick<Settings, "get" | "isConfigure
 }
 
 /** Legacy `tools.approval.<tool>` policy for a tool, if any. */
-function legacyUserPolicy(
-	settings: Pick<Settings, "get" | "isConfigured">,
-	toolName: string,
-): PermissionPolicy | undefined {
+function legacyUserPolicy(settings: EngineSettings, toolName: string): PermissionPolicy | undefined {
 	const config: unknown = settings.get("tools.approval");
 	if (config === null || typeof config !== "object" || Array.isArray(config)) return undefined;
 	return normalizePolicy((config as Record<string, unknown>)[toolName]);

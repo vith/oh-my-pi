@@ -4,6 +4,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isRecord, toError } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { Settings } from "../../config/settings";
+import { cfgPermissionsDefault, engineSettingsFrom } from "./settings";
 import permissionsDescription from "../../prompts/tools/permissions.md" with { type: "text" };
 import type { ToolSession } from "../index";
 import { auditFilePath, readAudit } from "./audit";
@@ -74,10 +75,10 @@ export function cyclePosture(current: Posture): Posture {
 export async function runModeCommand(args: string, ctx: RunPermissionCommandContext): Promise<string> {
 	const value = args.trim().toLowerCase();
 	if (value === "") {
-		return `Mode: ${resolvePosture(ctx.settings)}`;
+		return `Mode: ${resolvePosture(engineSettingsFrom(ctx.settings))}`;
 	}
 	if (value === "allow" || value === "prompt" || value === "deny") {
-		ctx.settings.set("permissions.default", value);
+		ctx.settings.writeValue(cfgPermissionsDefault, value, "global");
 		return `Mode set to ${value} (permissions.default)`;
 	}
 	return `Unknown mode "${args.trim()}". Use: allow, prompt, or deny (no argument shows the current mode).`;
@@ -349,7 +350,7 @@ function parseAndNormalize(yaml: string): { rule: PermissionRule; hasExplicitId:
 async function testCommand(rest: string, ctx: RunPermissionCommandContext): Promise<string> {
 	const command = unquote(rest);
 	if (command.length === 0) return 'Usage: permissions test "<command>"';
-	const decision = evaluateBashCommand(command, { settings: ctx.settings, cwd: ctx.cwd });
+	const decision = evaluateBashCommand(command, { settings: engineSettingsFrom(ctx.settings), cwd: ctx.cwd });
 	// Whole-command winner (spec §3.1 step 2): the deciding rule's match class
 	// and specificity explain why it beat the other matches. The engine
 	// evaluates the tokenizer's normalized piece text (the parser glues `|` to
@@ -424,7 +425,7 @@ async function auditLog(ctx: RunPermissionCommandContext): Promise<string> {
 }
 
 function status(ctx: RunPermissionCommandContext): string {
-	const posture = resolvePosture(ctx.settings);
+	const posture = resolvePosture(engineSettingsFrom(ctx.settings));
 	const files = ruleFiles(ctx.cwd);
 	const { rules, errors } = loadRuleLayers(ctx.cwd);
 	const counts: Record<string, number> = { project: 0, user: 0 };

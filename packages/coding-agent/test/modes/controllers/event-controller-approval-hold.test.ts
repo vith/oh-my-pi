@@ -11,6 +11,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgToolsApproval } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
@@ -84,7 +85,7 @@ describe("EventController approval hold", () => {
 
 	it("parks later events while a gated call's dialog is open and replays them in order on release", async () => {
 		// `tools.approval.write: "prompt"` gates every write call.
-		settings.set("tools.approval", { write: "prompt" });
+		settings.writeValue(cfgToolsApproval, { write: "prompt" }, "global");
 		const { controller, chatContainer } = createFixture();
 
 		// Gated call A: its own card renders (the dialog will mount under it)…
@@ -114,7 +115,7 @@ describe("EventController approval hold", () => {
 	});
 
 	it("chains the hold across consecutive gated calls, replaying each after its own dialog", async () => {
-		settings.set("tools.approval", { write: "prompt" });
+		settings.writeValue(cfgToolsApproval, { write: "prompt" }, "global");
 		const { controller, chatContainer } = createFixture();
 
 		await controller.handleEvent(start("tc-a", "write", { path: "a.md" }));
@@ -135,7 +136,7 @@ describe("EventController approval hold", () => {
 	it("releases without replay when the hold is released by a bare end", async () => {
 		// Prediction miss shape: the hold engaged but the call ended without
 		// parking anything — later events must flow normally.
-		settings.set("tools.approval", { write: "prompt" });
+		settings.writeValue(cfgToolsApproval, { write: "prompt" }, "global");
 		const { controller, chatContainer } = createFixture();
 		await controller.handleEvent(start("tc-a", "write", { path: "a.md" }));
 		await controller.handleEvent(end("tc-a", "write"));

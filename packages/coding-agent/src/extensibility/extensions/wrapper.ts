@@ -1,22 +1,25 @@
 /**
  * Tool wrappers for extensions.
  */
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolLoadMode,
+import {
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type AgentToolUpdateCallback,
+	isNonBlankContext,
+	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
-import { type SettingPath, Settings, type SettingValue } from "../../config/settings";
+import { Settings } from "../../config/settings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import { type ApprovalMode, formatApprovalPrompt, truncateForPrompt } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { type AuditRecord, appendAudit, auditFilePath } from "../../tools/permissions/audit";
+import { cfgToolsApprovalMode } from "../../tools/settings";
 import { type EngineContext, type EngineDecision, evaluatePermission } from "../../tools/permissions/engine";
+import { engineSettingsFrom, type EngineSettings } from "../../tools/permissions/settings";
 import { type PromptResolution, promptForDecision, renderAllowSuggestion } from "../../tools/permissions/prompt";
 import { abortPendingForSession, type PendingApproval, parkApproval } from "../../tools/permissions/subagent";
 import { createSuggestionProvider } from "../../tools/permissions/suggest";
@@ -150,10 +153,9 @@ function safetyCheckLines(checks: readonly ComputerSafetyCheck[]): string[] {
  * the approval mode. Everything else delegates to the base settings, so
  * per-tool policies, bash patterns, and rules resolve exactly as configured.
  */
-function autoApproveSettings(base: Settings): Pick<Settings, "get" | "isConfigured"> {
+function autoApproveSettings(base: EngineSettings): EngineSettings {
 	return {
-		get: <P extends SettingPath>(path: P) =>
-			(path === "tools.approvalMode" ? "yolo" : base.get(path)) as SettingValue<P>,
+		get: key => (key === "tools.approvalMode" ? "yolo" : base.get(key)),
 		isConfigured: key => key === "tools.approvalMode" || base.isConfigured(key),
 	};
 }
@@ -287,7 +289,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// unconfigured "prompt" posture and gate headless dispatches the old
 		// wrapper auto-approved. Sessions (settings present) keep the new
 		// default posture.
-		const base = settings ?? Settings.isolated({});
+		const base = engineSettingsFrom(settings ?? Settings.isolated({}));
 		return {
 			settings: context?.autoApprove === true || settings === undefined ? autoApproveSettings(base) : base,
 			cwd: context?.sessionManager?.getCwd() ?? process.cwd(),
@@ -333,10 +335,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		if (decision.reason !== undefined) record.reason = decision.reason;
 		if (decision.pieces !== undefined) record.pieces = decision.pieces;
 		try {
+			const maxEntries = engineCtx.settings.get("permissions.audit.maxEntries");
 			await appendAudit(
 				auditFilePath(engineCtx.cwd),
 				record,
-				engineCtx.settings.get("permissions.audit.maxEntries"),
+				typeof maxEntries === "number" ? maxEntries : undefined,
 			);
 		} catch (err) {
 			if (!auditWarned) {
@@ -375,7 +378,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// newly prompt-gated command and have it run unapproved.
 		const cliAutoApprove = context?.autoApprove === true;
 		const settings: Settings | undefined = context?.settings;
-		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
+		const configuredMode = ((settings ? cfgToolsApprovalMode.get(settings) : undefined) ?? "yolo") as ApprovalMode;
 		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
 		const engineCtx = this.#engineContext(context, settings);
 		const shortCircuitArgs = approvalArgs(params, context);
@@ -389,6 +392,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runs with. Doing this BEFORE the approval gate means approval (below) resolves against the
 		// input that actually executes, closing the "approve one thing, run another" gap: the prompt
 		// text, policy resolution, and provider safety checks all see `effectiveParams`.
+		// Passive context collected here is forwarded only once the call has run
+		// and produced a non-error result: a block, deny, user reject, fail-closed
+		// safety refusal, or failed execution never injects instructions. This
+		// matches the loop's rule for context prepared at arg-prep time.
+		let pendingAdditionalContext: string | undefined;
 		let effectiveParams = params;
 		if (!loopEmittedToolCall && this.runner.hasHandlers("tool_call")) {
 			try {
@@ -408,6 +416,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				if (callResult?.block) {
 					const reason = callResult.reason || "Tool execution was blocked by an extension";
 					throw new Error(reason);
+				}
+				if (isNonBlankContext(callResult?.additionalContext)) {
+					pendingAdditionalContext = callResult.additionalContext;
 				}
 				// A non-blocking handler may replace the execution input. The returned object is the raw
 				// input passed to `execute` (handler-owned; not re-normalized). Skipped for `computer`
@@ -660,6 +671,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				// call's model-visible content/details while keeping it an error, flip a
 				// failure to success, or flag a success as an error.
 				const effectiveError = resultResult.isError ?? !!executionError;
+				if (!effectiveError && pendingAdditionalContext !== undefined) {
+					context?.addAdditionalContext?.(pendingAdditionalContext);
+				}
 
 				// Return the (possibly modified) result carrying the error flag rather than
 				// rethrowing the original exception. The agent loop honors
@@ -679,6 +693,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// No extension modification
 		if (executionError) {
 			throw executionError;
+		}
+		if (result.isError !== true && pendingAdditionalContext !== undefined) {
+			context?.addAdditionalContext?.(pendingAdditionalContext);
 		}
 		return result;
 	}

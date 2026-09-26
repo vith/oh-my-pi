@@ -47,7 +47,7 @@ describe("AgentSession persisted custom prompt", () => {
 	it("flushes a persisted custom prompt before the provider observes it without duplicating its entry", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
@@ -100,7 +100,7 @@ describe("AgentSession persisted custom prompt", () => {
 	it("reserves the durable turn before its flush so a competing direct prompt cannot interleave", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
@@ -153,7 +153,7 @@ describe("AgentSession persisted custom prompt", () => {
 	it("reconciles a flushed durable prompt into live context when cancellation suppresses provider start", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
@@ -220,7 +220,7 @@ describe("AgentSession persisted custom prompt", () => {
 	it("keeps direct prompts fenced after abort until durable reconciliation completes", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
@@ -291,7 +291,7 @@ describe("AgentSession persisted custom prompt", () => {
 	it("defers a queued nextTurn trigger until cancelled durable reconciliation restores its context", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
@@ -388,7 +388,7 @@ describe("AgentSession persisted custom prompt", () => {
 	it("keeps the durable message singular through forced pre-prompt compaction", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");

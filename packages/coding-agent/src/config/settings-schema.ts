@@ -30,7 +30,7 @@ import {
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "../tiny/dtype";
 import { DEFAULT_TTS_VOICE, TTS_LOCAL_VOICE_OPTIONS, TTS_LOCAL_VOICE_VALUES } from "../tts/models";
-import { EDIT_MODES } from "../utils/edit-mode";
+import { EDIT_MODES } from "../edit/settings";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
