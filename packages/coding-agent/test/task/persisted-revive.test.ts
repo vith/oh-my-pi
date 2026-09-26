@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -7,6 +8,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
@@ -28,10 +30,12 @@ import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
+import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { createSessionDefaults } from "../helpers/session-defaults";
+
+import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
 
 const tempDirs: TempDir[] = [];
 
@@ -139,7 +143,13 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
-	contract?: { tools?: string[]; readOnly?: boolean; agent?: string; isolated?: boolean },
+	contract?: {
+		tools?: string[];
+		readOnly?: boolean;
+		agent?: string;
+		isolated?: boolean;
+		compactionThreshold?: { thresholdPercent: number; thresholdTokens: number };
+	},
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -155,6 +165,9 @@ async function createPersistedSession(
 		readOnly: contract?.readOnly,
 		agent: contract?.agent,
 		isolated: contract?.isolated,
+		...(contract?.compactionThreshold !== undefined
+			? { compactionThreshold: contract.compactionThreshold }
+			: undefined),
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -224,7 +237,7 @@ function createRealColdRevivedSession(cwd: string): {
 	close: () => void;
 } {
 	const authStorage = createInMemoryAuthStorage();
-	authStorage.setRuntimeApiKey("mock", "test-key");
+	authStorage.keys.setRuntime("mock", "test-key");
 	const modelRegistry = new ModelRegistry(authStorage);
 	const model = createMockModel({ responses: [{ content: ["cold wake"], stopReason: "stop" }] });
 	let providerStarts = 0;
@@ -283,7 +296,7 @@ describe("persisted subagent revival", () => {
 				recreated = createRealColdRevivedSession(cwd);
 				return recreated.session;
 			},
-			0,
+			() => 0,
 		);
 
 		try {
@@ -356,7 +369,7 @@ describe("persisted subagent revival", () => {
 			configuredLevel: "project",
 		};
 		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
 		MCPManager.setInstance(new MCPManager(cwd));
 		const ref = AgentRegistry.global().register(createRef(sessionFile));
@@ -420,7 +433,7 @@ describe("persisted subagent revival", () => {
 			},
 		];
 		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
 		const ref = AgentRegistry.global().register(createRef(sessionFile));
 		const reviver = await createFactory(cwd, undefined, {
@@ -708,11 +721,11 @@ describe("persisted subagent revival", () => {
 		}
 
 		const [advised, roleAdvised, unadvised] = captured;
-		expect(advised.get("advisor.enabled")).toBe(true);
+		expect(cfgAdvisorEnabled.get(advised)).toBe(true);
 		expect(advised.getModelRole("advisor")).toBe("moonshot/k3");
-		expect(roleAdvised.get("advisor.enabled")).toBe(true);
+		expect(cfgAdvisorEnabled.get(roleAdvised)).toBe(true);
 		expect(roleAdvised.getModelRole("advisor")).toBeUndefined();
-		expect(unadvised.get("advisor.enabled")).toBe(false);
+		expect(cfgAdvisorEnabled.get(unadvised)).toBe(false);
 	});
 
 	it("restores the persisted custom model role before reopening the session", async () => {
@@ -731,6 +744,36 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.modelPattern).toEqual(["@review-fast", "anthropic/claude-sonnet-4-5"]);
 		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+	});
+
+	it("restores compaction threshold behavior after parent settings change", async () => {
+		const cwd = makeTempDir("@pi-compaction-threshold-revive-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			compactionThreshold: { thresholdPercent: 72, thresholdTokens: -1 },
+		});
+		const parentSettings = Settings.isolated({
+			"compaction.thresholdPercent": 45,
+			"compaction.thresholdTokens": 120_000,
+		});
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, { settings: parentSettings })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const revivedSettings = capturedOptions?.settings;
+		if (!revivedSettings) throw new Error("Expected revived child settings");
+		const parentCompaction = cfgCompaction.get(parentSettings);
+		const revivedCompaction = cfgCompaction.get(revivedSettings);
+		expect(shouldCompact(130_000, 200_000, parentCompaction)).toBe(true);
+		expect(resolveThresholdTokens(200_000, revivedCompaction)).toBe(144_000);
+		expect(shouldCompact(130_000, 200_000, revivedCompaction)).toBe(false);
+		expect(shouldCompact(144_001, 200_000, revivedCompaction)).toBe(true);
 	});
 
 	it("pins the persisted concrete model when the default role is revived", async () => {

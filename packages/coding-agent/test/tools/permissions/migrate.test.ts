@@ -12,6 +12,9 @@ import {
 	planMigration,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/migrate";
 import { loadRuleLayers } from "@oh-my-pi/pi-coding-agent/tools/permissions/rules";
+import { cfgPermissionsDefault } from "@oh-my-pi/pi-coding-agent/tools/permissions/settings";
+import { cfgToolsApproval, cfgToolsApprovalMode } from "@oh-my-pi/pi-coding-agent/tools/settings";
+import { cfgBashPatterns } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../../helpers/settings-test-state";
@@ -86,7 +89,7 @@ describe("planMigration", () => {
 		// approvalMode "write" maps to posture "prompt" and seeds the new key
 		// (permissions.default is not configured), so the hidden legacy key
 		// stops governing posture after removal.
-		expect(plan.postureSetting).toEqual({ key: "permissions.default", value: "prompt" });
+		expect(plan.postureSetting).toEqual({ value: "prompt" });
 
 		expect(plannedRules(plan)).toContainEqual({
 			id: "legacy-bash-0",
@@ -181,8 +184,9 @@ describe("planMigration", () => {
 		await applyMigration(plan, cwd, home);
 		const config = YAML.parse(fs.readFileSync(path.join(agentDir, "config.yml"), "utf8")) as Record<string, unknown>;
 		expect(config.permissions).toEqual({ default: "prompt" });
-		expect((config.tools as Record<string, unknown>).approvalMode).toBeUndefined();
-		expect(settings.get("permissions.default")).toBe("prompt");
+		// removal prunes the emptied `tools` parent entirely
+		expect(config.tools).toBeUndefined();
+		expect(cfgPermissionsDefault.get(settings)).toBe("prompt");
 	});
 
 	it("notices a legacy dynamic file that applyMigration will fold", async () => {
@@ -208,7 +212,7 @@ describe("planMigration", () => {
 		);
 
 		const settings = await Settings.init({ agentDir, cwd });
-		expect(settings.isConfigured("tools.approval")).toBe(true);
+		expect(settings.isConfigured(cfgToolsApproval)).toBe(true);
 
 		const plan = planMigration(settings, cwd, home);
 		// The rule is still planned from the merged value, but the key is not
@@ -287,13 +291,13 @@ describe("applyMigration", () => {
 		expect(bash?.patterns).toBeUndefined();
 
 		// and from the live settings instance
-		expect(settings.isConfigured("tools.approval")).toBe(false);
-		expect(settings.isConfigured("tools.approvalMode")).toBe(false);
-		expect(settings.isConfigured("bash.patterns")).toBe(false);
+		expect(settings.isConfigured(cfgToolsApproval)).toBe(false);
+		expect(settings.isConfigured(cfgToolsApprovalMode)).toBe(false);
+		expect(settings.isConfigured(cfgBashPatterns)).toBe(false);
 
 		// the mapped posture was seeded into the new, UI-visible setting
-		expect(settings.isConfigured("permissions.default")).toBe(true);
-		expect(settings.get("permissions.default")).toBe("prompt");
+		expect(settings.isConfigured(cfgPermissionsDefault)).toBe(true);
+		expect(cfgPermissionsDefault.get(settings)).toBe("prompt");
 		expect(config.permissions).toEqual({ default: "prompt" });
 	});
 
@@ -406,11 +410,11 @@ describe("applyMigration", () => {
 
 		resetSettingsForTest();
 		const reloaded = await Settings.init({ agentDir, cwd });
-		expect(reloaded.isConfigured("tools.approval")).toBe(false);
-		expect(reloaded.isConfigured("tools.approvalMode")).toBe(false);
-		expect(reloaded.isConfigured("bash.patterns")).toBe(false);
-		expect(reloaded.isConfigured("permissions.default")).toBe(true);
-		expect(reloaded.get("permissions.default")).toBe("prompt");
+		expect(reloaded.isConfigured(cfgToolsApproval)).toBe(false);
+		expect(reloaded.isConfigured(cfgToolsApprovalMode)).toBe(false);
+		expect(reloaded.isConfigured(cfgBashPatterns)).toBe(false);
+		expect(reloaded.isConfigured(cfgPermissionsDefault)).toBe(true);
+		expect(cfgPermissionsDefault.get(reloaded)).toBe("prompt");
 		expect(firstRunNotice(reloaded)).toBeNull();
 	});
 });

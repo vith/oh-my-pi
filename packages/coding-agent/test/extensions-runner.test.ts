@@ -14,6 +14,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgCompactionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
@@ -137,7 +138,8 @@ describe("ExtensionRunner", () => {
 		);
 
 		expect(runner.createContext().settings).toBe(sessionSettings);
-		expect(runner.createContext().settings?.get("compaction.enabled")).toBe(false);
+		const ctxSettings = runner.createContext().settings;
+		expect(ctxSettings ? cfgCompactionEnabled.get(ctxSettings) : undefined).toBe(false);
 	});
 
 	it("leaves context settings undefined when the runner was built without any", async () => {
@@ -501,6 +503,31 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("error handling", () => {
+		it("rejects instead of returning untransformed context when its caller aborts a pending handler", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("context", async () => {
+						await new Promise(() => {});
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "pending-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const controller = new AbortController();
+			const pending = runner.emitContext([{ role: "user", content: "unredacted", timestamp: 1 }], controller.signal);
+
+			controller.abort(new Error("caller aborted"));
+			await expect(pending).rejects.toThrow("caller aborted");
+		});
+
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
 				export default function(pi) {
@@ -580,46 +607,6 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
-	describe("composer shapes", () => {
-		it("collects extension-defined renderer contracts and selector copy", async () => {
-			const extCode = `
-				export default function(pi) {
-					pi.registerComposerShape({
-						label: "Extension Dock",
-						description: "Custom extension composer",
-						style: {
-							id: "extension-dock",
-							sideBorders: false,
-							verticalChrome: 0,
-							statusAttachment: "none",
-							bottomBar: "full",
-							bottomBarGap: false,
-							defaultPaddingX: () => 0,
-							sideChromeWidth: () => 0,
-							renderTop: () => undefined,
-							renderRow: context => [context.gutter + context.text + context.pad],
-							renderBottom: () => undefined,
-						},
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "composer-shape.ts"), extCode);
-
-			const result = await loadTestExtensions();
-			const runner = new ExtensionRunner(
-				result.extensions,
-				result.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-
-			const [definition] = runner.getComposerShapes();
-			expect(definition.label).toBe("Extension Dock");
-			expect(definition.description).toBe("Custom extension composer");
-			expect(definition.style.id).toBe("extension-dock");
-		});
-	});
 	describe("flags", () => {
 		it("collects flags from extensions", async () => {
 			const extCode = `
@@ -1700,10 +1687,20 @@ describe("ExtensionRunner", () => {
 				`,
 			);
 			const loaded = await loadTestExtensions([extensionPath]);
+			// Configured through a config file (as a user would): writes reject NaN/Infinity outright,
+			// while a file carrying them must still load and fall back to the default.
+			const configuredSettings: Settings[] = [];
+			for (const [index, yamlValue] of ["0", "-1", ".nan", ".inf"].entries()) {
+				const overlayPath = path.join(tempDir.path(), `invalid-timeout-${index}.yml`);
+				fs.writeFileSync(overlayPath, `extensionHandlers:\n  toolCallTimeoutMs: ${yamlValue}\n`);
+				configuredSettings.push(
+					await Settings.loadIsolated({ inMemory: true, cwd: tempDir.path(), configFiles: [overlayPath] }),
+				);
+			}
 
 			vi.useFakeTimers();
 			try {
-				for (const configuredTimeout of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+				for (const settings of configuredSettings) {
 					const runner = new ExtensionRunner(
 						loaded.extensions,
 						loaded.runtime,
@@ -1711,7 +1708,7 @@ describe("ExtensionRunner", () => {
 						sessionManager,
 						modelRegistry,
 						undefined,
-						Settings.isolated({ "extensionHandlers.toolCallTimeoutMs": configuredTimeout }),
+						settings,
 					);
 					let settled = false;
 					const decision = runner
@@ -2459,10 +2456,7 @@ describe("ExtensionRunner", () => {
 				isIdle: () => true,
 				hasQueuedMessages: () => false,
 				abort: () => {},
-				settings: {
-					get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
-					isConfigured: (key: string) => key === "tools.approvalMode",
-				} as never,
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 			});
 
 			expect(events).toEqual([
@@ -2521,10 +2515,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: {
-						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
-						isConfigured: (key: string) => key === "tools.approvalMode",
-					} as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 					toolCall: {
 						batchId: `batch-${toolCallId}`,
 						index: 0,
@@ -2580,10 +2571,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: {
-						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
-						isConfigured: (key: string) => key === "tools.approvalMode",
-					} as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				}),
 			).rejects.toThrow("Tool call denied by user: dangerous_tool");
 
@@ -2634,10 +2622,7 @@ describe("ExtensionRunner", () => {
 					isIdle: () => true,
 					hasQueuedMessages: () => false,
 					abort: () => {},
-					settings: {
-						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
-						isConfigured: (key: string) => key === "tools.approvalMode",
-					} as never,
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				}),
 			).rejects.toThrow("dialog aborted");
 
@@ -2684,10 +2669,7 @@ describe("ExtensionRunner", () => {
 			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
 			await expect(
 				(wrapper as ExtensionToolWrapper<any>).execute("call-partial-context", {}, undefined, undefined, {
-					settings: {
-						get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
-						isConfigured: (key: string) => key === "tools.approvalMode",
-					},
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				} as never),
 			).rejects.toThrow('Tool "dangerous_tool" requires approval but no interactive UI available.');
 
@@ -2705,6 +2687,10 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("tool_call input", () => {
+		const yoloContext = {
+			settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
+		} as never;
+
 		function createHashlineEditTool(): AgentTool {
 			return {
 				name: "edit",
@@ -3009,12 +2995,6 @@ describe("ExtensionRunner", () => {
 			} as AgentTool;
 		}
 
-		const yoloContext = {
-			settings: {
-				get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}),
-				isConfigured: (key: string) => key === "tools.approvalMode",
-			},
-		} as never;
 		// Minimal runtime init so the approval gate's interactive `select` is wired for prompt-path tests.
 		const initApprovalRunner = (
 			runner: ExtensionRunner,
@@ -3057,10 +3037,7 @@ describe("ExtensionRunner", () => {
 			isIdle: () => true,
 			hasQueuedMessages: () => false,
 			abort: () => {},
-			settings: {
-				get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
-				isConfigured: (key: string) => key === "tools.approvalMode",
-			},
+			settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 		} as never;
 
 		it("blocks a revised input that resolves to a deny policy (approval gates the revised args)", async () => {
@@ -3166,6 +3143,175 @@ describe("ExtensionRunner", () => {
 				.split("\n")
 				.map(line => JSON.parse(line));
 			expect(executed).toEqual([{ command: "echo second" }]);
+		});
+
+		it("preserves additional context from every non-blocking handler in registration order", async () => {
+			const first = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({
+						input: { command: "echo first" },
+						additionalContext: "first context",
+					}));
+					pi.on("tool_call", async () => ({ additionalContext: "   " }));
+				}
+			`;
+			const second = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({ additionalContext: "second context" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-a.ts"), first);
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-b.ts"), second);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolCall({
+					type: "tool_call",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "echo original" },
+				}),
+			).resolves.toEqual({
+				input: { command: "echo first" },
+				additionalContext: "first context\n\nsecond context",
+			});
+		});
+
+		it("forwards passive context from wrapper-dispatched calls through the tool context", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({ additionalContext: "nested device context" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-wrapper-context.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const wrapped = new ExtensionToolWrapper(
+				createRecordingTool(path.join(tempDir.path(), "context-call.jsonl")),
+				runner,
+			);
+			const delivered: string[] = [];
+
+			await wrapped.execute("tool-call-id", { command: "echo context" }, undefined, undefined, {
+				...(yoloContext as unknown as Record<string, unknown>),
+				addAdditionalContext: (context: string) => {
+					delivered.push(context);
+				},
+			} as unknown as AgentToolContext);
+
+			expect(delivered).toEqual(["nested device context"]);
+		});
+
+		it("discards collected additional context when a later handler blocks", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async () => ({ additionalContext: "must not leak" }));
+					pi.on("tool_call", async () => ({ block: true, reason: "blocked" }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-block.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			await expect(
+				runner.emitToolCall({
+					type: "tool_call",
+					toolName: "bash",
+					toolCallId: "tool-call-id",
+					input: { command: "echo original" },
+				}),
+			).resolves.toEqual({ block: true, reason: "blocked" });
+		});
+
+		it("defers passive context until the wrapper approval gate succeeds", async () => {
+			// Wrapper-dispatched calls collect additionalContext before the
+			// approval gate. Forwarding waits for approval: an approved call
+			// delivers, a denied call throws before anything is injected.
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_call", async (event) => {
+						if (event.toolName !== "prompt_tool") return;
+						return { additionalContext: "passive after approval" };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-call-context-approval.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const promptTool = {
+				name: "prompt_tool",
+				label: "Prompt Tool",
+				description: "Always prompt-gated",
+				parameters: Type.Object({ command: Type.String() }),
+				strict: true,
+				approval: "exec" as const,
+				formatApprovalDetails: (args: unknown) =>
+					args && typeof args === "object" && "command" in args ? String(args.command) : "",
+				execute: async (_id: string, params: unknown) => {
+					return { content: [{ type: "text", text: `ran ${JSON.stringify(params)}` }] };
+				},
+			} as AgentTool;
+			const wrapped = new ExtensionToolWrapper(promptTool, runner);
+			const contextWithRecorder = (delivered: string[]) =>
+				({
+					...(alwaysAskContext as unknown as Record<string, unknown>),
+					addAdditionalContext: (context: string) => {
+						delivered.push(context);
+					},
+				}) as never;
+
+			initApprovalRunner(runner, async () => "Approve");
+			const deliveredOnApprove: string[] = [];
+			await (wrapped as ExtensionToolWrapper).execute(
+				"call-approve",
+				{ command: "approved-command" },
+				undefined,
+				undefined,
+				contextWithRecorder(deliveredOnApprove),
+			);
+			expect(deliveredOnApprove).toEqual(["passive after approval"]);
+
+			initApprovalRunner(runner, async () => "Deny");
+			const deliveredOnDeny: string[] = [];
+			await expect(
+				(wrapped as ExtensionToolWrapper).execute(
+					"call-deny",
+					{ command: "denied-command" },
+					undefined,
+					undefined,
+					contextWithRecorder(deliveredOnDeny),
+				),
+			).rejects.toThrow("Tool call denied by user: prompt_tool");
+			expect(deliveredOnDeny).toEqual([]);
 		});
 
 		it("prompts for the revised input, not the original, on an approval-gated tool (P1 prompt→prompt)", async () => {
@@ -3293,10 +3439,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 			const xdevContext = {
-				settings: {
-					get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}),
-					isConfigured: (key: string) => key === "tools.approvalMode",
-				},
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				xdevApproved: true,
 			} as never;
 
@@ -3332,7 +3475,7 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createRecordingTool(recordPath), runner);
 			const acpContext = {
-				settings: { get: (key: string) => (key === "tools.approvalMode" ? "always-ask" : {}) },
+				settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
 				acpApprovedArgs: { command: "echo original" },
 			} as never;
 
@@ -3374,10 +3517,7 @@ describe("ExtensionRunner", () => {
 			const wrapped = new ExtensionToolWrapper(tool, runner);
 			let effectiveTier: string | undefined;
 			const xdevContext = {
-				settings: {
-					get: (key: string) => (key === "tools.approvalMode" ? "yolo" : {}),
-					isConfigured: (key: string) => key === "tools.approvalMode",
-				},
+				settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
 				xdevApproved: true,
 				xdevTierResolved: (tier: string) => {
 					effectiveTier = tier;

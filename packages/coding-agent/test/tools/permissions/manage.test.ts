@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgPermissionsDefault } from "@oh-my-pi/pi-coding-agent/tools/permissions/settings";
 import { appendAudit, auditFilePath } from "@oh-my-pi/pi-coding-agent/tools/permissions/audit";
 import {
 	cyclePosture,
@@ -431,7 +432,7 @@ describe("runModeCommand", () => {
 			const c = await ctx();
 			const output = await runModeCommand(mode, c);
 			expect(output).toBe(`Mode set to ${mode} (permissions.default)`);
-			expect(c.settings.get("permissions.default")).toBe(mode);
+			expect(cfgPermissionsDefault.get(c.settings)).toBe(mode);
 		}
 	});
 
@@ -441,7 +442,7 @@ describe("runModeCommand", () => {
 		const output = await runModeCommand("yolo", c);
 		expect(output).toContain('Unknown mode "yolo"');
 		expect(output).toContain("allow, prompt, or deny");
-		expect(c.settings.get("permissions.default")).toBe("allow"); // untouched by the failed call
+		expect(cfgPermissionsDefault.get(c.settings)).toBe("allow"); // untouched by the failed call
 	});
 });
 

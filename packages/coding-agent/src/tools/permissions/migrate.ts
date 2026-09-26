@@ -2,15 +2,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { isEnoent, MAIN_CONFIG_FILENAMES } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import {
-	settings as globalSettings,
-	isSettingsInitialized,
-	type SettingPath,
-	type Settings,
-} from "../../config/settings";
+import { settings as globalSettings, isSettingsInitialized, type Settings } from "../../config/settings";
+import type { AnySetting } from "../../config/registry";
 import { type ApprovalPolicy, normalizePolicy } from "../approval";
 import { normalizeBashApprovalPattern } from "../bash";
-import { legacyBashPattern, POSTURE_KEY, type Posture, postureFromApprovalMode } from "./engine";
+import { cfgBashPatterns } from "../../exec/settings";
+import { cfgToolsApproval, cfgToolsApprovalMode } from "../settings";
+import { legacyBashPattern, type Posture, postureFromApprovalMode } from "./engine";
+import { cfgPermissionsDefault } from "./settings";
 import { foldLegacyDynamicRules, type RuleAction, ruleFiles, writeUserRule } from "./rules";
 
 /**
@@ -28,7 +27,7 @@ import { foldLegacyDynamicRules, type RuleAction, ruleFiles, writeUserRule } fro
  *
  * Key removal is scoped to the global config layer: keys that only exist in a
  * project or runtime settings layer cannot be removed through
- * `Settings.set` (which writes `#global`), so they are excluded from
+ * `unsetGlobalValue` (which edits the global layer), so they are excluded from
  * `removeSettings` and flagged with a notice instead.
  */
 
@@ -46,7 +45,7 @@ export interface MigrationPlan {
 	 * is removed and makes the posture visible/editable in the settings UI
 	 * (the legacy key is config-file-only and hidden).
 	 */
-	postureSetting?: { key: typeof POSTURE_KEY; value: Posture };
+	postureSetting?: { value: Posture };
 }
 
 const LEGACY_APPROVAL_MODE = "tools.approvalMode";
@@ -72,8 +71,8 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 	// flagged with a notice instead.
 	const removalOwned = (key: string): boolean => globalConfigHasKey(settings, key);
 
-	if (settings.isConfigured(LEGACY_APPROVAL_MODE)) {
-		const mode = settings.get(LEGACY_APPROVAL_MODE);
+	if (settings.isConfigured(cfgToolsApprovalMode)) {
+		const mode = cfgToolsApprovalMode.get(settings);
 		if (removalOwned(LEGACY_APPROVAL_MODE)) {
 			removeSettings.push(LEGACY_APPROVAL_MODE);
 		} else {
@@ -87,12 +86,12 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 		// legacy key at decision time and must not be overwritten.
 		const posture = postureFromApprovalMode(mode);
 		if (posture !== undefined) {
-			if (settings.isConfigured(POSTURE_KEY)) {
+			if (settings.isConfigured(cfgPermissionsDefault)) {
 				notices.push(
 					`tools.approvalMode: ${mode} maps to permissions.default: ${posture}; permissions.default is already configured and takes precedence, so it is left unchanged.`,
 				);
 			} else {
-				postureSetting = { key: POSTURE_KEY, value: posture };
+				postureSetting = { value: posture };
 				notices.push(
 					`tools.approvalMode: ${mode} maps to permissions.default: ${posture}. Migration sets permissions.default to ${posture} so the posture survives the legacy key's removal — change it in settings at any time.`,
 				);
@@ -100,8 +99,8 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 		}
 	}
 
-	if (settings.isConfigured(LEGACY_APPROVAL)) {
-		const approval = settings.get(LEGACY_APPROVAL);
+	if (settings.isConfigured(cfgToolsApproval)) {
+		const approval = cfgToolsApproval.get(settings);
 		if (removalOwned(LEGACY_APPROVAL)) {
 			removeSettings.push(LEGACY_APPROVAL);
 		} else {
@@ -119,8 +118,8 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 		}
 	}
 
-	if (settings.isConfigured(LEGACY_BASH_PATTERNS)) {
-		const patterns = settings.get(LEGACY_BASH_PATTERNS);
+	if (settings.isConfigured(cfgBashPatterns)) {
+		const patterns = cfgBashPatterns.get(settings);
 		if (removalOwned(LEGACY_BASH_PATTERNS)) {
 			removeSettings.push(LEGACY_BASH_PATTERNS);
 		} else {
@@ -189,9 +188,9 @@ export function planMigration(settings: Settings, cwd: string, home?: string): M
 /**
  * Apply a plan: write the rules into the user layer (merging with existing
  * rules by id) and remove the legacy settings keys. Key removal goes through
- * `Settings.set(key, undefined)`: the undefined value is omitted by
- * YAML.stringify on the next save, so the key disappears from the config file
- * (and the live instance stops reporting it as configured).
+ * `unsetGlobalValue`, which deletes the key from the global layer (persisted
+ * in the background) so the key disappears from the config file (and the live
+ * instance stops reporting it as configured).
  */
 export async function applyMigration(plan: MigrationPlan, cwd: string, home?: string): Promise<void> {
 	if (!isSettingsInitialized()) {
@@ -220,7 +219,7 @@ export async function applyMigration(plan: MigrationPlan, cwd: string, home?: st
 		removeSettingKey(key);
 	}
 	if (plan.postureSetting !== undefined) {
-		globalSettings.set(plan.postureSetting.key, plan.postureSetting.value);
+		globalSettings.writeValue(cfgPermissionsDefault, plan.postureSetting.value, "global");
 	}
 	await globalSettings.flush();
 	// Finish the pre-merge dynamic-file transition: fold any leftover
@@ -230,12 +229,25 @@ export async function applyMigration(plan: MigrationPlan, cwd: string, home?: st
 	await foldLegacyDynamicRules(cwd, home);
 }
 
-/**
- * `Settings.set(path, undefined)` removes the key on save: the schema types do
- * not model "undefined means delete", hence the cast.
- */
+/** Remove a legacy key from the global layer; unknown keys are ignored. */
 function removeSettingKey(key: string): void {
-	globalSettings.set(key as SettingPath, undefined as never);
+	const setting = legacySettingByKey(key);
+	if (setting === undefined) return;
+	globalSettings.unsetGlobalValue(setting);
+}
+
+/** Registry handle for a legacy settings key removed by migration. */
+function legacySettingByKey(key: string): AnySetting | undefined {
+	switch (key) {
+		case LEGACY_APPROVAL_MODE:
+			return cfgToolsApprovalMode;
+		case LEGACY_APPROVAL:
+			return cfgToolsApproval;
+		case LEGACY_BASH_PATTERNS:
+			return cfgBashPatterns;
+		default:
+			return undefined;
+	}
 }
 
 /**

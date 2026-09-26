@@ -21,11 +21,16 @@ import {
 	sessionRuleKey,
 } from "@oh-my-pi/pi-coding-agent/tools/permissions/session-rules";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { engineSettingsFrom } from "@oh-my-pi/pi-coding-agent/tools/permissions/settings";
 
 const tool = (name: string, approval?: unknown) => ({ name, approval, formatApprovalDetails: undefined });
 
 function ctx(extra: Record<string, unknown> = {}, cwd = "/tmp/perm-test") {
-	return { settings: Settings.isolated({ "permissions.default": "prompt", ...extra }), cwd, home: "/tmp/perm-home" };
+	return {
+		settings: engineSettingsFrom(Settings.isolated({ "permissions.default": "prompt", ...extra })),
+		cwd,
+		home: "/tmp/perm-home",
+	};
 }
 
 function write(file: string, content: string) {
@@ -35,10 +40,10 @@ function write(file: string, content: string) {
 
 describe("resolvePosture", () => {
 	it("maps legacy modes and defaults to prompt", () => {
-		expect(resolvePosture(Settings.isolated({}))).toBe("prompt");
-		expect(resolvePosture(Settings.isolated({ "tools.approvalMode": "yolo" }))).toBe("allow");
-		expect(resolvePosture(Settings.isolated({ "tools.approvalMode": "write" }))).toBe("prompt");
-		expect(resolvePosture(Settings.isolated({ "permissions.default": "deny" }))).toBe("deny");
+		expect(resolvePosture(engineSettingsFrom(Settings.isolated({})))).toBe("prompt");
+		expect(resolvePosture(engineSettingsFrom(Settings.isolated({ "tools.approvalMode": "yolo" })))).toBe("allow");
+		expect(resolvePosture(engineSettingsFrom(Settings.isolated({ "tools.approvalMode": "write" })))).toBe("prompt");
+		expect(resolvePosture(engineSettingsFrom(Settings.isolated({ "permissions.default": "deny" })))).toBe("deny");
 	});
 });
 
@@ -266,7 +271,7 @@ describe("sub-command evaluation", () => {
 	// EngineContext with a temp home so the user layer file
 	// (<home>/.omp/agent/permissions.yml) stays hermetic per test.
 	const homeCtx = (dir: string) => ({
-		settings: Settings.isolated({ "permissions.default": "prompt" }),
+		settings: engineSettingsFrom(Settings.isolated({ "permissions.default": "prompt" })),
 		cwd: "/tmp/perm-test",
 		home: dir,
 	});
@@ -464,7 +469,7 @@ describe("sub-command evaluation", () => {
 describe("piece evaluation data (v3 dialog)", () => {
 	// EngineContext with a temp home (user layer file stays hermetic).
 	const homeCtx = (dir: string) => ({
-		settings: Settings.isolated({ "permissions.default": "prompt" }),
+		settings: engineSettingsFrom(Settings.isolated({ "permissions.default": "prompt" })),
 		cwd: "/tmp/perm-test",
 		home: dir,
 	});
@@ -600,7 +605,7 @@ describe("match classes and specificity (spec §3.1)", () => {
 				"rules:\n  - id: deny-git-pipe\n    tool: bash\n    match: { command: 'git log * | head *' }\n    action: deny\n",
 			);
 			const d = evaluateBashCommand("git log -n 5 | head -1", {
-				settings: Settings.isolated({}),
+				settings: engineSettingsFrom(Settings.isolated({})),
 				cwd: "/tmp/perm-test",
 				home: dir,
 			});
@@ -665,7 +670,7 @@ describe("path-pattern matching expands ~ (bug 9)", () => {
 describe("denyOverrideSuggestion (spec §5.2)", () => {
 	// EngineContext with a temp home so the user layer file stays hermetic.
 	const denyCtx = (dir: string) => ({
-		settings: Settings.isolated({ "permissions.default": "prompt" }),
+		settings: engineSettingsFrom(Settings.isolated({ "permissions.default": "prompt" })),
 		cwd: "/tmp/perm-test",
 		home: dir,
 	});
@@ -745,10 +750,12 @@ describe("denyOverrideSuggestion (spec §5.2)", () => {
 				"rules:\n  - id: allow-git-pipe\n    tool: bash\n    match: { command: 'git branch * | head *' }\n    action: allow\n",
 			);
 			const c = {
-				settings: Settings.isolated({
-					"permissions.default": "prompt",
-					"bash.patterns": [{ match: "* | head *", approval: "deny" }],
-				}),
+				settings: engineSettingsFrom(
+					Settings.isolated({
+						"permissions.default": "prompt",
+						"bash.patterns": [{ match: "* | head *", approval: "deny" }],
+					}),
+				),
 				cwd: "/tmp/perm-test",
 				home: dir,
 			};
@@ -864,7 +871,7 @@ describe("whole-command allow rules vs compounds", () => {
 	// authority for compounds — the walk's allow gate mirrors the legacy
 	// single-piece gate).
 	const walkCtx = (dir: string, posture: string) => ({
-		settings: Settings.isolated({ "permissions.default": posture }),
+		settings: engineSettingsFrom(Settings.isolated({ "permissions.default": posture })),
 		cwd: "/tmp/perm-test",
 		home: dir,
 	});
@@ -939,10 +946,12 @@ describe("whole-command allow rules vs compounds", () => {
 		try {
 			writeUserRule(dir, "cd *", "allow");
 			const c = {
-				settings: Settings.isolated({
-					"permissions.default": "prompt",
-					"permissions.projectWrites": "allow",
-				}),
+				settings: engineSettingsFrom(
+					Settings.isolated({
+						"permissions.default": "prompt",
+						"permissions.projectWrites": "allow",
+					}),
+				),
 				cwd: "/tmp/perm-test",
 				home: dir,
 			};
@@ -959,10 +968,12 @@ describe("whole-command allow rules vs compounds", () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), `perm-walk-${Snowflake.next()}-`));
 		try {
 			const c = {
-				settings: Settings.isolated({
-					"permissions.default": "allow",
-					"permissions.projectWrites": "deny",
-				}),
+				settings: engineSettingsFrom(
+					Settings.isolated({
+						"permissions.default": "allow",
+						"permissions.projectWrites": "deny",
+					}),
+				),
 				cwd: "/tmp/perm-test",
 				home: dir,
 			};

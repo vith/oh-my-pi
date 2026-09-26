@@ -320,6 +320,8 @@ export interface AgentProgress {
 	resolvedModelIdentity?: string;
 	/** Explicit thinking metadata; never inferred from the model identity. */
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
+	/** Extension routing note (e.g. model-pools) explaining why {@link resolvedModel} was chosen. */
+	resolvedModelRoute?: string;
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
 	advisor?: boolean;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
@@ -403,6 +405,8 @@ export interface SingleResult {
 	resolvedModelIdentity?: string;
 	/** Retains {@link AgentProgress.resolvedThinkingLevel} after settlement. */
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
+	/** Mirrors {@link AgentProgress.resolvedModelRoute} onto the settled result. */
+	resolvedModelRoute?: string;
 	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
 	advisor?: boolean;
 	error?: string;

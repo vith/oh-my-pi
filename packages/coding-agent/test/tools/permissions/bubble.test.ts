@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { YAML } from "bun";
+import { engineSettingsFrom } from "../../../src/tools/permissions/settings";
 import type { ExtensionUIContext, PermissionDialogRequest } from "../../../src/extensibility/extensions/types";
 import {
 	PermissionPendingComponent,
@@ -182,7 +183,11 @@ function makeController(
 		rootSessionId: ROOT_SESSION_ID,
 		ui: () => ui,
 		agentRefByManagerId: id => (id === SUB_SESSION_ID ? subRef : undefined),
-		engineContext: () => ({ settings: Settings.isolated({}), cwd: process.cwd(), home: tempHome }),
+		engineContext: () => ({
+			settings: engineSettingsFrom(Settings.isolated({})),
+			cwd: process.cwd(),
+			home: tempHome,
+		}),
 		...(options.suggestionsProvider !== undefined ? { suggestionsProvider: options.suggestionsProvider } : {}),
 		attachedManagerId: () => attached,
 	});
