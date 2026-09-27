@@ -1453,7 +1453,13 @@ describe("ExtensionRunner", () => {
 				}
 			`);
 			const wrapper = new ExtensionToolWrapper(flaggedTool, runner);
-			const res = await wrapper.execute("call-reported-failure", {} as never, undefined, undefined, undefined);
+			const res = await wrapper.execute(
+				"call-reported-failure",
+				{} as never,
+				undefined,
+				undefined,
+				GATE_YOLO_CONTEXT,
+			);
 			expect(firstText(res)).toBe("observed failure");
 			expect(res.isError).toBe(true);
 		});
@@ -2733,23 +2739,41 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
 
-			const resultMessage = await wrapped.execute("tool-call-id", {
-				input: [
-					"*** Begin Patch",
-					'["plans/switch case-array.md"#ABC1]',
-					"PUT 27.=27:",
-					"+new content",
-					"*** End Patch",
-				].join("\n"),
-			});
+			const resultMessage = await wrapped.execute(
+				"tool-call-id",
+				{
+					input: [
+						"*** Begin Patch",
+						'["plans/switch case-array.md"#ABC1]',
+						"PUT 27.=27:",
+						"+new content",
+						"*** End Patch",
+					].join("\n"),
+				},
+				undefined,
+				undefined,
+				yoloContext,
+			);
 			await expect(
-				wrapped.execute("non-markdown-tool-call-id", {
-					input: "[packages/coding-agent/src/main.ts#BCD2]\nPUT 1.=1:\n+changed",
-				}),
+				wrapped.execute(
+					"non-markdown-tool-call-id",
+					{
+						input: "[packages/coding-agent/src/main.ts#BCD2]\nPUT 1.=1:\n+changed",
+					},
+					undefined,
+					undefined,
+					yoloContext,
+				),
 			).rejects.toThrow("Blocked: packages/coding-agent/src/main.ts");
-			const legacyResult = await wrapped.execute("legacy-tool-call-id", {
-				input: "¶plans/legacy.md#CDE3\n27 27\n+new content",
-			});
+			const legacyResult = await wrapped.execute(
+				"legacy-tool-call-id",
+				{
+					input: "¶plans/legacy.md#CDE3\n27 27\n+new content",
+				},
+				undefined,
+				undefined,
+				yoloContext,
+			);
 
 			expect(resultMessage.content).toEqual([{ type: "text", text: "ok" }]);
 			expect(legacyResult.content).toEqual([{ type: "text", text: "ok" }]);
@@ -2794,9 +2818,15 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
 
-			await wrapped.execute("tool-call-id", {
-				input: "[plans/foo.md#notatag]\nPUT 27.=27:\n+new content",
-			});
+			await wrapped.execute(
+				"tool-call-id",
+				{
+					input: "[plans/foo.md#notatag]\nPUT 27.=27:\n+new content",
+				},
+				undefined,
+				undefined,
+				yoloContext,
+			);
 
 			const events = fs
 				.readFileSync(eventsPath, "utf8")
@@ -2833,10 +2863,16 @@ describe("ExtensionRunner", () => {
 			);
 			const wrapped = new ExtensionToolWrapper(createHashlineEditTool(), runner);
 
-			await wrapped.execute("tool-call-id", {
-				_path: "plans/allowed.md",
-				input: "[src/secret.ts#ABC1]\nPUT 27.=27:\n+evil content",
-			});
+			await wrapped.execute(
+				"tool-call-id",
+				{
+					_path: "plans/allowed.md",
+					input: "[src/secret.ts#ABC1]\nPUT 27.=27:\n+evil content",
+				},
+				undefined,
+				undefined,
+				yoloContext,
+			);
 
 			const events = fs
 				.readFileSync(eventsPath, "utf8")
