@@ -116,14 +116,16 @@ export class IrcBridge {
 		return records;
 	}
 
-	/** Surfaces and consumes queued incoming records before automatic injection. */
+	/** Surfaces and consumes queued incoming records, including parked wakes, before automatic injection. */
 	drainInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: AgentMessage[] = [];
 		const remainingAsides: AgentMessage[] = [];
+		const remainingDeferredWakes: AgentMessage[] = [];
 		const queues = [
 			{ records: this.#interrupts, remaining: remainingInterrupts },
 			{ records: this.#asides, remaining: remainingAsides },
+			{ records: this.#deferredWakes, remaining: remainingDeferredWakes },
 		];
 		for (const queue of queues) {
 			for (const record of queue.records) {
@@ -168,6 +170,7 @@ export class IrcBridge {
 		}
 		this.#interrupts = remainingInterrupts;
 		this.#asides = remainingAsides;
+		this.#deferredWakes = remainingDeferredWakes;
 		return messages;
 	}
 

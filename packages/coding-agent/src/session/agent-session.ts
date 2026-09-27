@@ -1281,8 +1281,9 @@ export class AgentSession implements SettingsScope {
 				this.#irc.queueDeferredWake(settled.records);
 				continue;
 			}
-			const earlierRecords = this.#irc.drainPending();
-			void this.#wakeAfterIrcAdmission([...earlierRecords, ...settled.records]);
+			const deferred = this.#irc.drainDeferredWakes();
+			const pending = this.#irc.drainPending();
+			void this.#wakeAfterIrcAdmission([...deferred, ...pending, ...settled.records]);
 		}
 	}
 

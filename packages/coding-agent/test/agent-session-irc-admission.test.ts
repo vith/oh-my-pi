@@ -203,7 +203,7 @@ describe("AgentSession IRC wake admission", () => {
 			firstProviderRelease.resolve();
 			await Bun.sleep(50);
 			expect(providerStarts()).toBe(2);
-			expect(observedBodies).toEqual(["first"]);
+			expect(observedBodies).toEqual(["first", "second"]);
 			expect(
 				session.agent.state.messages.flatMap(message =>
 					message.role === "custom" && message.customType === "irc:incoming" ? [ircRecordBody(message)] : [],
