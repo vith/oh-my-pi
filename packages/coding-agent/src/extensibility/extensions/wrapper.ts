@@ -13,7 +13,12 @@ import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } 
 import { logger, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../config/settings";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import { type ApprovalMode, formatApprovalPrompt, truncateForPrompt } from "../../tools/approval";
+import {
+	type ApprovalMode,
+	formatApprovalPrompt,
+	resolveApprovalFromContext,
+	truncateForPrompt,
+} from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { type AuditRecord, appendAudit, auditFilePath } from "../../tools/permissions/audit";
@@ -275,23 +280,22 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 	}
 
 	/**
-	 * Build the engine context for the approval gate. The settings view is the
-	 * execute-time settings, with an isolated fallback when the context carries
-	 * none; `--auto-approve` surfaces legacy yolo through `autoApproveSettings`.
+	 * Build the engine context for the approval gate. Execute calls without a
+	 * context inherit the runner's settings; when that session has not
+	 * configured the legacy mode, its schema-default yolo behavior is retained.
+	 * Explicit contexts without settings use the isolated fail-closed posture.
+	 * `--auto-approve` surfaces legacy yolo through `autoApproveSettings`.
 	 * The cwd comes from the session manager when available so file-backed rule
 	 * layers resolve against the session's project.
 	 */
-	#engineContext(context: AgentToolContext | undefined, settings: Settings | undefined): EngineContext {
-		// A context-less execute carries no settings at all. The gate's own mode
-		// default for that path is legacy yolo (`settings?.get(...) ?? "yolo"`),
-		// so surface the mode as explicitly configured exactly like the
-		// auto-approve view — an empty isolated fallback would resolve the new
-		// unconfigured "prompt" posture and gate headless dispatches the old
-		// wrapper auto-approved. Sessions (settings present) keep the new
-		// default posture.
+	#engineContext(
+		context: AgentToolContext | undefined,
+		settings: Settings | undefined,
+		useSessionDefaultYolo = false,
+	): EngineContext {
 		const base = engineSettingsFrom(settings ?? Settings.isolated({}));
 		return {
-			settings: context?.autoApprove === true || settings === undefined ? autoApproveSettings(base) : base,
+			settings: context?.autoApprove === true || useSessionDefaultYolo ? autoApproveSettings(base) : base,
 			cwd: context?.sessionManager?.getCwd() ?? process.cwd(),
 			home: context?.home,
 			// Resolves the in-memory session rule layer ("Allow for this session").
@@ -376,11 +380,15 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
-		const cliAutoApprove = context?.autoApprove === true;
-		const settings: Settings | undefined = context?.settings;
-		const configuredMode = ((settings ? cfgToolsApprovalMode.get(settings) : undefined) ?? "yolo") as ApprovalMode;
-		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
-		const engineCtx = this.#engineContext(context, settings);
+		const inheritsSessionSettings = context === undefined;
+		const settings: Settings | undefined = inheritsSessionSettings ? this.runner.sessionSettings : context.settings;
+		const approvalMode: ApprovalMode = resolveApprovalFromContext({
+			autoApprove: context?.autoApprove,
+			settings,
+		}).approvalMode;
+		const useSessionDefaultYolo =
+			inheritsSessionSettings && settings !== undefined && !settings.isConfigured(cfgToolsApprovalMode);
+		const engineCtx = this.#engineContext(context, settings, useSessionDefaultYolo);
 		const shortCircuitArgs = approvalArgs(params, context);
 		const shortCircuit = evaluatePermission(this.tool, shortCircuitArgs, engineCtx);
 		if (shortCircuit.policy === "deny") {

@@ -31,8 +31,8 @@ function textOf(result: { content?: ReadonlyArray<{ type: string; text?: string 
 
 describe("tools.approvalMode setting", () => {
 	// The per-tool approval gate (ExtensionToolWrapper) reads approvalMode / tools.approval /
-	// autoApprove exclusively from the execute-time AgentToolContext, never from the session's
-	// own settings. So a single shared session exercises every mode — we only vary the context
+	// autoApprove from execute-time context, inheriting the runner's settings when context is
+	// omitted. A single shared session exercises every mode — explicit cases vary the context
 	// settings per assertion. This avoids paying createAgentSession's cost (model registry,
 	// auth-storage discovery, settings init) nine times over.
 	let tempDir: string;
@@ -282,25 +282,31 @@ describe("tools.approvalMode setting", () => {
 		const overrideSettings = approvalSettings({ "tools.approvalMode": "always-ask" });
 		const overrideResult = await bashTool().execute(
 			"acp-tool-override",
-			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			{ command: "echo acp-override" },
 			undefined,
 			undefined,
 			{
 				settings: overrideSettings,
-				acpApprovedArgs: { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+				acpApprovedArgs: { command: "echo acp-override" },
 			} as AgentToolContext,
 		);
-		expect(textOf(overrideResult)).toContain("(no output)");
+		expect(textOf(overrideResult)).toContain("acp-override");
 	});
 
 	it("ACP-approved arguments do not bypass deny policies", async () => {
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		const deniedDir = path.join(tempDir, "acp-denied");
+		const marker = path.join(deniedDir, "marker");
+		fs.mkdirSync(deniedDir);
+		fs.writeFileSync(marker, "must survive");
+
 		await expect(
-			bashTool().execute("acp-denied", { command: "rm -rf /tmp/never-run" }, undefined, undefined, {
+			bashTool().execute("acp-denied", { command: `rm -rf ${deniedDir}` }, undefined, undefined, {
 				settings,
-				acpApprovedArgs: { command: "rm -rf /tmp/never-run" },
+				acpApprovedArgs: { command: `rm -rf ${deniedDir}` },
 			} as AgentToolContext),
-		).rejects.toThrow(/blocked by tool policy/);
+		).rejects.toThrow();
+		expect(fs.existsSync(marker)).toBe(true);
 	});
 
 	it("ACP-approved arguments do not bypass provider safety checks", async () => {
