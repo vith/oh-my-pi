@@ -245,14 +245,16 @@ describe("PermissionDialogComponent", () => {
 
 	it("requests a TUI repaint when suggestions settle so appended options get painted", async () => {
 		const deferred = Promise.withResolvers<PermissionDialogOption[]>();
-		let component!: PermissionDialogComponent;
+		const componentRef: { current?: PermissionDialogComponent } = {};
 		const paintedFrames: string[] = [];
 		const ui = {
-			requestRender: () => paintedFrames.push(render(component)),
+			requestRender: () => {
+				if (componentRef.current) paintedFrames.push(render(componentRef.current));
+			},
 			requestComponentRender: () => {},
 			requestDirectWrite: () => {},
 		} as unknown as TUI;
-		component = new PermissionDialogComponent(
+		const component = new PermissionDialogComponent(
 			"Allow tool: bash",
 			[],
 			[{ label: "Allow once" }],
@@ -260,6 +262,7 @@ describe("PermissionDialogComponent", () => {
 			() => {},
 			{ suggestions: deferred.promise, ui },
 		);
+		componentRef.current = component;
 		deferred.resolve([{ label: "Allow bash: git push" }]);
 		await deferred.promise;
 		await Bun.sleep(0);
