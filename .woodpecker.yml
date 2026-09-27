@@ -1,25 +1,42 @@
-# Woodpecker CI for the self-hosted Forgejo mirror
-# (https://git.n3t.work/vith/oh-my-pi, runs on the n3t.work ARM box).
-#
-# Checks only: lint + typecheck on pushes to integration and on pull
-# requests. No release builds, no native addon builds, no test buckets —
-# those need platform-specific native addons and stay local / on GitHub CI.
-steps:
-  lint:
-    image: oven/bun:1.4.2
-    commands:
-      - bun install --frozen-lockfile
-      - bun run check:tools
-    when:
-      - event: [push, pull_request]
-        branch: integration
+# Native Linux ARM64 CI for the self-hosted Forgejo mirror.
+# The infra-owned image is built on the ARM agent; no emulation or repo volumes.
+labels:
+  platform: linux/arm64
 
-  types:
-    image: oven/bun:1.4.2
-    depends_on: [lint]
+steps:
+  native-ci:
+    image: localhost/omp-ci:arm64
+    environment:
+      BUN_INSTALL_CACHE_DIR: /ci-cache/bun
+      CARGO_HOME: /ci-cache/cargo
+      CARGO_TARGET_DIR: /ci-cache/target
+      CARGO_BUILD_JOBS: "2"
+      OMP_TEST_CONCURRENCY: "1"
+      RUSTUP_HOME: /opt/rustup
     commands:
-      - bun install --frozen-lockfile
-      - bun run ci:check:full
+      - |
+        set -eu
+        export PATH="/opt/cargo/bin:$PATH"
+
+        test "$(uname -m)" = aarch64
+        test "$(bun -e 'console.log(process.arch)')" = arm64
+        test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu
+        case "$(cc -dumpmachine)" in
+          aarch64*-linux-gnu) ;;
+          *) echo "cc must target aarch64 Linux" >&2; exit 1 ;;
+        esac
+        test -z "${CARGO_BUILD_TARGET:-}"
+        test -z "${CROSS_TARGET:-}"
+
+        bun install --frozen-lockfile
+        bun run check:ts
+        bun run check:rs
+        OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci bun run build:native
+        bun run ci:test:full
+        bun run collab:web:build
+        bun --cwd=packages/coding-agent run build
+        packages/coding-agent/dist/omp --version
+        packages/coding-agent/dist/omp --smoke-test
     when:
       - event: [push, pull_request]
         branch: integration
