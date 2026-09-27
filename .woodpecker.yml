@@ -1,7 +1,8 @@
 # Native Linux ARM64 CI for the self-hosted Forgejo mirror.
-# The infra-owned image is built on the ARM agent; no emulation or repo volumes.
+# A repo-restricted agent owns the private build cache; no emulation or PR volumes.
 labels:
   platform: linux/arm64
+  ci: omp
 
 steps:
   native-ci:
