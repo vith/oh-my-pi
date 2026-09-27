@@ -205,8 +205,7 @@ describe("task spawn routing", () => {
 		} as TaskParams);
 
 		expect(result.details?.results[0]?.paused).toEqual({ toolName: "extension", toolCallId: "pause-call" });
-		expect(getFirstText(result)).toContain("paused");
-		expect(getFirstText(result)).not.toContain("completed");
+		expect(getFirstText(result)).toContain('status="paused"');
 	});
 
 	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {
