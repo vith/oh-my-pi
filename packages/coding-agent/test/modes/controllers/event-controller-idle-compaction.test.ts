@@ -346,7 +346,7 @@ describe("EventController on-demand recap (/recap)", () => {
 			assistantMessage: createAssistantMessage(),
 		}));
 		const context = createContext({
-			editorText: "half-typed draft", // a draft does not block the on-demand trigger
+			editorText: "half-typed draft", // Manual recap output is shown even while a draft is open.
 			sessionName: "Fix login flow",
 			showStatus,
 			runEphemeralTurn,

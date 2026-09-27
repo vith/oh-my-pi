@@ -2561,11 +2561,11 @@ export class EventController {
 	 * line, and journal it to history.db (`session_recaps`) for the session that
 	 * produced it. Live goal/title and the active todo task are passed as anchoring
 	 * hints because the snapshot only carries conversation history, not the
-	 * controller's todo/goal state. The request is abortable: any activity
-	 * cancels it via #cancelIdleRecap, and idle conditions are re-checked after
-	 * the reply lands so a stale recap never paints over fresh work. The
-	 * manual mode (`/recap`) relaxes both gates: it runs while streaming and
-	 * paints unless superseded, and re-arms the idle timer on completion.
+	 * controller's todo/goal state. The request is abortable: a new turn, session
+	 * reset, maintenance, or replacement recap cancels it through
+	 * `#cancelIdleRecap`. Idle runs re-check quiet-state conditions after the
+	 * reply lands; manual mode (`/recap`) skips those gates and paints unless
+	 * canceled or superseded, then re-arms the idle timer on completion.
 	 */
 	async #runIdleRecap(manual = false): Promise<void> {
 		if (manual) {
@@ -2598,7 +2598,8 @@ export class EventController {
 		try {
 			const session = this.ctx.viewSession;
 			const { replyText } = await session.runEphemeralTurn({ promptText, signal: abort.signal });
-			if (this.#idleRecapAbort !== abort || abort.signal.aborted || !this.#idleConditionsHold()) return;
+			if (this.#idleRecapAbort !== abort || abort.signal.aborted) return;
+			if (!manual && !this.#idleConditionsHold()) return;
 			const recap = previewLine(replyText, TRUNCATE_LENGTHS.RECAP);
 			if (!recap) return;
 			session.sessionManager.recordRecap(replyText);
