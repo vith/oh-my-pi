@@ -245,9 +245,14 @@ describe("PermissionDialogComponent", () => {
 
 	it("requests a TUI repaint when suggestions settle so appended options get painted", async () => {
 		const deferred = Promise.withResolvers<PermissionDialogOption[]>();
-		const requestRender = vi.fn();
-		const ui = { requestRender, requestDirectWrite: vi.fn() } as unknown as TUI;
-		const component = new PermissionDialogComponent(
+		let component!: PermissionDialogComponent;
+		const paintedFrames: string[] = [];
+		const ui = {
+			requestRender: () => paintedFrames.push(render(component)),
+			requestComponentRender: () => {},
+			requestDirectWrite: () => {},
+		} as unknown as TUI;
+		component = new PermissionDialogComponent(
 			"Allow tool: bash",
 			[],
 			[{ label: "Allow once" }],
@@ -258,10 +263,8 @@ describe("PermissionDialogComponent", () => {
 		deferred.resolve([{ label: "Allow bash: git push" }]);
 		await deferred.promise;
 		await Bun.sleep(0);
-		const out = render(component);
-		expect(out).toContain("2. Allow bash: git push");
-		expect(out).not.toContain("Suggesting rules…");
-		expect(requestRender).toHaveBeenCalled();
+		expect(paintedFrames.some(frame => frame.includes("2. Allow bash: git push"))).toBe(true);
+		expect(paintedFrames.some(frame => frame.includes("Suggesting rules…"))).toBe(false);
 		component.dispose();
 	});
 
