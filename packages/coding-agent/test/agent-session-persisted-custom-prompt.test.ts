@@ -421,7 +421,7 @@ describe("AgentSession persisted custom prompt", () => {
 		await sessionManager.ensureOnDisk();
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");
-		const compact = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "pre-prompt compacted",
 			shortSummary: undefined,
 			firstKeptEntryId: preparation.firstKeptEntryId,
@@ -429,9 +429,11 @@ describe("AgentSession persisted custom prompt", () => {
 			details: {},
 		}));
 		let durableMessagesAtProvider = 0;
+		let compactedBeforeProvider = false;
 		const marker = "DURABLE-PORT-8080";
 		const mock = createMockModel({
 			handler: context => {
+				compactedBeforeProvider = sessionManager.getEntries().some(entry => entry.type === "compaction");
 				durableMessagesAtProvider = context.messages.reduce(
 					(count, message) =>
 						count + (textFromProviderContent(message.content).match(new RegExp(marker, "g"))?.length ?? 0),
@@ -467,7 +469,7 @@ describe("AgentSession persisted custom prompt", () => {
 			attribution: "user",
 		});
 
-		expect(compact).toHaveBeenCalledTimes(1);
+		expect(compactedBeforeProvider).toBe(true);
 		expect(durableMessagesAtProvider).toBe(1);
 		await sessionManager.flush();
 		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);

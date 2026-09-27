@@ -2205,6 +2205,7 @@ describe("AgentSession message pipeline", () => {
 				"compaction.enabled": false,
 				"bash.autoBackground.enabled": false,
 				"bashInterceptor.enabled": false,
+				"tools.approvalMode": "yolo",
 				"tools.xdev": false,
 			}),
 			model,
