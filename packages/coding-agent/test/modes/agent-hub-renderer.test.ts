@@ -8,8 +8,13 @@
  * The pending registry is seeded through the real parkApproval flow (the
  * same module-level registry the renderer reads), not a mock.
  */
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { pendingApprovalCount, statusGlyph, statusText } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import {
+	pendingApprovalCount,
+	setPendingApprovalLookup,
+	statusGlyph,
+	statusText,
+} from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -67,9 +72,14 @@ function parkOne(): void {
 	parked.catch(() => {}); // afterEach aborts it; swallow the rejection
 }
 
+beforeEach(() => {
+	setPendingApprovalLookup(sessionId => pendingApprovalsForSession(sessionId).length);
+});
+
 afterEach(() => {
 	unregisterPermissionHandler(SESSION_ID);
 	abortPendingForSession(SESSION_ID);
+	setPendingApprovalLookup(undefined);
 });
 
 beforeAll(async () => {
