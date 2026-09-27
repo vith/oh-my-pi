@@ -33,22 +33,20 @@ describe("/changelog", () => {
 		expect(versionHeadings(recent.chunks.join("\n"))).toEqual(
 			all
 				.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT)
-				.map(entry => `## [${entry.major}.${entry.minor}.${entry.patch}]`)
+				.map(entry => versionHeadings(entry.content)[0]!)
 				.reverse(),
 		);
 
 		const last = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/changelog last", last.runtime);
-		expect(versionHeadings(last.chunks.join("\n"))).toEqual([
-			`## [${all[0]!.major}.${all[0]!.minor}.${all[0]!.patch}]`,
-		]);
+		expect(versionHeadings(last.chunks.join("\n"))).toEqual([versionHeadings(all[0]!.content)[0]!]);
 
 		const lastTwo = acpRuntime();
 		await executeAcpBuiltinSlashCommand("/changelog last 2", lastTwo.runtime);
 		expect(versionHeadings(lastTwo.chunks.join("\n"))).toEqual(
 			all
 				.slice(0, 2)
-				.map(entry => `## [${entry.major}.${entry.minor}.${entry.patch}]`)
+				.map(entry => versionHeadings(entry.content)[0]!)
 				.reverse(),
 		);
 
