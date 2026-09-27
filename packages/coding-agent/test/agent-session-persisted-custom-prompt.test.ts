@@ -416,6 +416,20 @@ describe("AgentSession persisted custom prompt", () => {
 			stopReason: "stop" as const,
 			timestamp: Date.now() - 1,
 		};
+		// Keep a complete earlier turn so pre-prompt compaction has a real cut
+		// point; a single turn cannot be summarized before this durable prompt.
+		const olderUser = {
+			...seedUser,
+			content: [{ type: "text" as const, text: "older user context".repeat(40) }],
+			timestamp: Date.now() - 4,
+		};
+		const olderAssistant = {
+			...seedAssistant,
+			content: [{ type: "text" as const, text: "older assistant context".repeat(40) }],
+			timestamp: Date.now() - 3,
+		};
+		sessionManager.appendMessage(olderUser);
+		sessionManager.appendMessage(olderAssistant);
 		sessionManager.appendMessage(seedUser);
 		sessionManager.appendMessage(seedAssistant);
 		await sessionManager.ensureOnDisk();
@@ -444,7 +458,12 @@ describe("AgentSession persisted custom prompt", () => {
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [seedUser, seedAssistant] },
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [olderUser, olderAssistant, seedUser, seedAssistant],
+			},
 			convertToLlm,
 			streamFn: mock.stream,
 		});
