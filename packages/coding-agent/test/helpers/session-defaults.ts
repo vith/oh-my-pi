@@ -12,6 +12,7 @@ export function createSessionDefaults() {
 		abort: async () => {},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},
+		setIrcWakeTurnAdmission: () => {},
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
 	} satisfies Partial<AgentSession>;

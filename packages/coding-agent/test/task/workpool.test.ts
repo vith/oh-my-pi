@@ -237,6 +237,8 @@ describe("WorkPool dispatch", () => {
 				kind: "sub",
 				status: "idle",
 				session: {
+					setIrcWakeTurnAdmission: () => {},
+					setIrcWakeTurnSettlement: () => {},
 					setWorkPoolYieldItems: async () => {
 						throw new Error("prompt rebuild boom");
 					},
