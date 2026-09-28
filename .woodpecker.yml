@@ -4,9 +4,17 @@
 # Checks only: lint + typecheck on pushes to integration and on pull
 # requests. No release builds, no native addon builds, no test buckets —
 # those need platform-specific native addons and stay local / on GitHub CI.
+# Use the repo-restricted runner's data-disk cache so Bun downloads do not
+# exhaust the OS disk shared with Forgejo and PostgreSQL.
+labels:
+  platform: linux/arm64
+  ci: omp
+
 steps:
   lint:
     image: oven/bun:1.4.2
+    environment:
+      BUN_INSTALL_CACHE_DIR: /ci-cache/bun
     commands:
       - bun install --frozen-lockfile
       - bun run check:tools
@@ -16,6 +24,8 @@ steps:
 
   types:
     image: oven/bun:1.4.2
+    environment:
+      BUN_INSTALL_CACHE_DIR: /ci-cache/bun
     depends_on: [lint]
     commands:
       - bun install --frozen-lockfile
