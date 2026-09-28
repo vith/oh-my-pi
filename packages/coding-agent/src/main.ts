@@ -18,6 +18,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 import { $env, isBunTestRuntime, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
+import { compareVersions } from "@oh-my-pi/pi-utils/version";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -228,7 +229,8 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 	try {
 		const channel = cfgUpdateChannel.get(settings);
 		const release = await getLatestRelease({ timeoutMs: 5_000, channel });
-		return Bun.semver.order(release.version, currentVersion) > 0 ? release.version : undefined;
+		// Build metadata identifies fork builds without changing release precedence.
+		return compareVersions(release.version, currentVersion) > 0 ? release.version : undefined;
 	} catch {
 		return undefined;
 	}

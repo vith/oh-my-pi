@@ -280,6 +280,32 @@ describe("RPC subagent registry", () => {
 		registry.dispose();
 	});
 
+	test("retains a paused lifecycle snapshot and its transcript selector", () => {
+		const eventBus = new EventBus();
+		const registry = new RpcSubagentRegistry(eventBus, () => {});
+		const sessionFile = "/tmp/paused-subagent.jsonl";
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "PausedSubagent",
+			index: 0,
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			sessionFile,
+		} satisfies SubagentLifecyclePayload);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "PausedSubagent",
+			index: 0,
+			agent: "task",
+			agentSource: "bundled",
+			status: "paused",
+			sessionFile,
+		} satisfies SubagentLifecyclePayload);
+
+		expect(registry.getSubagents()).toMatchObject([{ id: "PausedSubagent", status: "paused", sessionFile }]);
+		expect(registry.resolveSessionFile({ subagentId: "PausedSubagent" })).toBe(sessionFile);
+		registry.dispose();
+	});
+
 	test("gates raw subagent events behind the events subscription level", () => {
 		const frames: RpcSubagentFrame[] = [];
 		const eventBus = new EventBus();

@@ -26,7 +26,7 @@ type HandlerFn = (...args: unknown[]) => Promise<unknown>;
  */
 export type SendMessageHandler = <T = unknown>(
 	message: CustomMessagePayload<T>,
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" },
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp"; evaluateToolCalls?: boolean },
 ) => void;
 
 /**
@@ -98,7 +98,7 @@ async function createHookAPI(
 		},
 		sendMessage<T = unknown>(
 			message: CustomMessagePayload<T>,
-			options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" },
+			options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp"; evaluateToolCalls?: boolean },
 		): void {
 			if (!sendMessageHandler) {
 				throw new Error("sendMessage handler not initialized");

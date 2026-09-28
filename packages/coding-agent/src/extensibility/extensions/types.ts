@@ -71,6 +71,7 @@ import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { Settings } from "../../config/settings";
 import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -470,6 +471,8 @@ export interface ExtensionContext {
 	sessionManager: ReadonlySessionManager;
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;
+	/** Session-scoped settings; absent in contexts created without a live session. */
+	settings?: Settings;
 	/** Calling session's `local://` root mapping for external tool bridges. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Current model (may be undefined) */
@@ -1492,6 +1495,9 @@ export interface ExtensionAPI {
 	/**
 	 * Send a custom message to the session.
 	 *
+	 * `evaluateToolCalls: true` executes tool-call XML in the content and delivers the
+	 * resulting assistant/tool exchange using the selected delivery mode.
+	 *
 	 * With the default delivery (no `deliverAs`), an idle `display: true` message renders in the
 	 * transcript immediately, even with `triggerTurn: false`, without starting a turn. This does
 	 * not apply to `deliverAs: "nextTurn"` or `deliverAs: "aside"`, which keep the semantics
@@ -1507,7 +1513,11 @@ export interface ExtensionAPI {
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
+		options?: {
+			triggerTurn?: boolean;
+			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+			evaluateToolCalls?: boolean;
+		},
 	): void;
 
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
@@ -1734,7 +1744,11 @@ export type SendMessageHandler = <T = unknown>(
 	 * `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight
 	 * tool batch; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
 	 */
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
+	options?: {
+		triggerTurn?: boolean;
+		deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
+		evaluateToolCalls?: boolean;
+	},
 ) => void;
 
 /** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool

@@ -35,6 +35,8 @@ interface PersistedAgentMetadata {
 	history?: AgentHistorySummary;
 	/** True when the file is only a SessionManager header (no session_init, no messages). */
 	incomplete?: boolean;
+	/** True when its prefix cannot describe a usable persisted transcript. */
+	invalid?: boolean;
 }
 
 interface PersistedTranscript {
@@ -311,8 +313,10 @@ async function readPersistedAgentMetadata(
 	let createdAt: number | undefined;
 	let activity: string | undefined;
 	let history: AgentHistorySummary = {};
+	let hasSessionHeader = false;
 	let hasSessionInit = false;
 	let hasConversation = false;
+	let malformed = false;
 	try {
 		await visitEntriesFromFileStream(
 			sessionFile,
@@ -320,6 +324,7 @@ async function readPersistedAgentMetadata(
 				const record = recordOf(entry);
 				if (!record) return;
 				if (record.type === "session") {
+					hasSessionHeader ||= typeof record.id === "string";
 					createdAt ??= timestampOf(record.timestamp);
 					return;
 				}
@@ -353,7 +358,12 @@ async function readPersistedAgentMetadata(
 				};
 				return false;
 			},
-			{ maxRecords: MAX_METADATA_LINES },
+			{
+				maxRecords: MAX_METADATA_LINES,
+				onMalformedRecord: () => {
+					malformed = true;
+				},
+			},
 		);
 	} catch (error) {
 		// Malformed and truncated records are skipped in-band by the stream
@@ -374,6 +384,7 @@ async function readPersistedAgentMetadata(
 		createdAt: createdAt ?? file?.birthtimeMs,
 		lastActivity: file?.mtimeMs,
 		incomplete: !hasSessionInit && !hasConversation,
+		invalid: malformed || !hasSessionHeader,
 		history: {
 			...history,
 			...(hasOutput ? { outputPath } : {}),
@@ -398,6 +409,112 @@ async function readPersistedVibeChildIds(sessionFile: string, shouldContinue: ()
 		if (isFilesystemError(error)) throw error;
 		return new Set();
 	}
+}
+
+/**
+ * Validate the whole persisted transcript before registering it explicitly.
+ * Metadata intentionally stops at `session_init` and history tolerates corrupt
+ * records, but an externally supplied revival contract must reject either a
+ * malformed record or a session header that the normal loader would reject.
+ */
+async function isValidPersistedAgentTranscript(sessionFile: string, shouldContinue: () => boolean): Promise<boolean> {
+	let firstEntry = true;
+	let valid = true;
+	try {
+		await visitEntriesFromFileStream(
+			sessionFile,
+			entry => {
+				if (firstEntry) {
+					firstEntry = false;
+					valid = valid && entry.type === "session" && typeof entry.id === "string";
+				}
+				return shouldContinue();
+			},
+			{
+				shouldContinue,
+				onMalformedRecord: () => {
+					valid = false;
+				},
+			},
+		);
+	} catch {
+		return false;
+	}
+	return valid && !firstEntry && shouldContinue();
+}
+
+export interface PersistedSubagentRegistration {
+	id: string;
+	displayName: string;
+	parentId?: string;
+	sessionFile: string;
+}
+
+export type PersistedSubagentRegistrationResult = "registered" | "existing" | "tombstoned" | "incomplete" | "invalid";
+
+async function isPersistedAgentTombstoned(sessionFile: string): Promise<boolean | undefined> {
+	try {
+		await fs.promises.access(getAgentTombstonePath(sessionFile));
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		return undefined;
+	}
+}
+
+/**
+ * Register one persisted subagent transcript as a parked ref, including
+ * transcripts that live outside the root session's artifact directory.
+ */
+export async function registerPersistedSubagent(
+	registry: AgentRegistry,
+	input: PersistedSubagentRegistration,
+	options: { shouldContinue?: () => boolean } = {},
+): Promise<PersistedSubagentRegistrationResult> {
+	const shouldContinue = options.shouldContinue ?? (() => true);
+	if (!shouldContinue() || !input.id || !input.sessionFile.endsWith(".jsonl")) return "invalid";
+	if (registry.get(input.id)) return "existing";
+	if (!(await isValidPersistedAgentTranscript(input.sessionFile, shouldContinue))) return "invalid";
+
+	const tombstonedBeforeRead = await isPersistedAgentTombstoned(input.sessionFile);
+	if (!shouldContinue() || tombstonedBeforeRead === undefined) return "invalid";
+	const metadata = await readPersistedAgentMetadata(input.sessionFile);
+	if (!shouldContinue() || metadata.invalid) return "invalid";
+	if (metadata.incomplete && !tombstonedBeforeRead) return "incomplete";
+
+	const history = await readPersistedAgentHistory(
+		{
+			id: input.id,
+			sessionFile: input.sessionFile,
+			createdAt: metadata.createdAt,
+			lastActivity: metadata.lastActivity,
+		},
+		shouldContinue,
+	);
+	if (!shouldContinue()) return "invalid";
+	// Metadata and history reads yield. A spawn can claim the id in the meantime;
+	// the final registry CAS must preserve that live generation untouched.
+	if (registry.get(input.id)) return "existing";
+	const tombstoned = await isPersistedAgentTombstoned(input.sessionFile);
+	if (!shouldContinue() || tombstoned === undefined) return "invalid";
+	const registered = registry.registerIfAvailable(
+		{
+			id: input.id,
+			displayName: input.displayName,
+			kind: "sub",
+			parentId: input.parentId ?? MAIN_AGENT_ID,
+			session: null,
+			sessionFile: input.sessionFile,
+			activity: metadata.activity,
+			createdAt: metadata.createdAt,
+			lastActivity: metadata.lastActivity,
+			history: { ...metadata.history, ...history },
+			status: tombstoned ? "aborted" : "parked",
+		},
+		null,
+	);
+	if (!registered) return "existing";
+	return tombstoned ? "tombstoned" : "registered";
 }
 
 /**

@@ -136,6 +136,13 @@ describe("eval renderer: agent() progress below the cell box", () => {
 		expect(below).not.toContain(theme.icon.advisor);
 	});
 
+	it("keeps a paused agent distinct from a completed agent below the cell", () => {
+		const lines = render([{ op: "agent", id: "PausedScout", status: "paused", durationMs: 1500 }], "complete");
+		const row = lines.slice(boxBottomIndex(lines) + 1).find(line => line.includes("PausedScout"))!;
+		expect(row).toContain("paused");
+		expect(row).not.toContain("completed");
+	});
+
 	it("preserves legacy model fields without inferring thinking levels from their suffixes", () => {
 		setFeedModelBadgeEnabled(true);
 		const lines = render([

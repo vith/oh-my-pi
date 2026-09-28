@@ -1065,11 +1065,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const spawn = syncSpawns[position];
 			const result = merged.results.find(r => r.id === spawn.agentId);
 			if (result) {
-				spawn.progress.status = result.aborted
-					? "aborted"
-					: result.exitCode === 0 && !result.error
-						? "completed"
-						: "failed";
+				spawn.progress.status =
+					result.paused && result.exitCode === 0 && !result.error
+						? "paused"
+						: result.aborted
+							? "aborted"
+							: result.exitCode === 0 && !result.error
+								? "completed"
+								: "failed";
 				spawn.progress.durationMs = result.durationMs;
 			} else {
 				spawn.progress.status = payloads[position] ? "failed" : "aborted";
@@ -1105,7 +1108,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}): string {
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
-		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
+		const buildFollowUpHint = async (outcome: "aborted" | "paused" | "completed"): Promise<string> => {
+			if (outcome === "paused") {
+				const followUp = ircEnabled ? "message it to resume; " : "";
+				const lifetime = spawnParams.isolated
+					? "its isolated session can be resumed only while still live"
+					: "it is resumable";
+				return `\n\n${agentId} is paused — ${lifetime}; ${followUp}transcript at history://${agentId}`;
+			}
+			const aborted = outcome === "aborted";
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
 			// caller at a follow-up path that no longer exists. The template says
@@ -1234,7 +1245,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						(singleResult.aborted ?? false) ||
 						singleResult.exitCode !== 0 ||
 						singleResult.error !== undefined;
-					progress.status = singleResult?.aborted ? "aborted" : resultFailed ? "failed" : "completed";
+					progress.status =
+						singleResult?.paused && !resultFailed
+							? "paused"
+							: singleResult?.aborted
+								? "aborted"
+								: resultFailed
+									? "failed"
+									: "completed";
 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
 					progress.tokens = singleResult?.tokens ?? 0;
 					progress.requests = singleResult?.requests ?? 0;
@@ -1261,9 +1279,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					onSettled?.(resultFailed);
 					const statusText = resultFailed
 						? `Background task ${agentId} failed.`
-						: `Background task ${agentId} complete.`;
+						: singleResult?.paused
+							? `Background task ${agentId} paused.`
+							: `Background task ${agentId} complete.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
-					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
+					const deliveryText = `${finalText}${await buildFollowUpHint(
+						!resultFailed && singleResult?.paused ? "paused" : singleResult?.aborted ? "aborted" : "completed",
+					)}`;
 					const structured = singleResult?.structuredOutput;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
@@ -1280,7 +1302,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint("completed") : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();
@@ -1543,7 +1565,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							projectAgentsDir: null,
 							results: [],
 							totalDurationMs: Date.now() - startTime,
-							progress: [latestProgress],
+							...(latestProgress ? { progress: [latestProgress] } : {}),
 						},
 					});
 				},

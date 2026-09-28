@@ -38,8 +38,10 @@ export function clampHubLine(line: string, width: number): string {
 }
 
 /** Status glyph, colored per theme status conventions. The title-line counts spell out the words. */
-export function statusGlyph(status: AgentRecordLike["status"]): string {
+export function statusGlyph(status: AgentRecordLike["status"] | "paused"): string {
 	switch (status) {
+		case "paused":
+			return theme.fg("warning", theme.status.pending);
 		case "running":
 			return theme.fg("accent", theme.status.running);
 		case "idle":
@@ -51,8 +53,10 @@ export function statusGlyph(status: AgentRecordLike["status"]): string {
 	}
 }
 
-export function statusText(status: AgentRecordLike["status"], text: string): string {
+export function statusText(status: AgentRecordLike["status"] | "paused", text: string): string {
 	switch (status) {
+		case "paused":
+			return theme.fg("warning", text);
 		case "running":
 			return theme.fg("accent", text);
 		case "idle":

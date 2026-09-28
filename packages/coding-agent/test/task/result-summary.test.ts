@@ -75,6 +75,16 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).toContain("<output>\nI'll systematically investigate the codebase\n</output>");
 	});
 
+	it("identifies an accepted recoverable pause rather than claiming the task completed", () => {
+		const result = settledResult("External action recorded.");
+		result.paused = { toolName: "await_permission", toolCallId: "call-1" };
+		const summary = formatTaskResultSummary(result, { totalDurationMs: 5 });
+
+		expect(summary).toContain('status="paused"');
+		expect(summary).not.toContain('status="completed"');
+		expect(summary).not.toContain("Subagent exited without calling yield");
+	});
+
 	it("does not repeat an error that is already the preview", () => {
 		const summary = formatTaskResultSummary(
 			{ ...settledResult(""), exitCode: 1, stderr: "agent failed", error: "agent failed" },

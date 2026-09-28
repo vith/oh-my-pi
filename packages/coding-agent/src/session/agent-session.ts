@@ -80,6 +80,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { type Effort, serviceTierFamily, streamSimple } from "@oh-my-pi/pi-ai";
+import { createInbandScanner } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
@@ -574,6 +575,24 @@ type AgentContinueSkipReason =
 	| "should-continue-false"
 	| "post-restore-unavailable";
 
+type DurablePromptReservation = {
+	released: Promise<void>;
+	release(): void;
+};
+
+/** Admission policy for an autonomous IRC/Agent Hub follow-up turn. */
+export type FollowUpAdmission = (records: readonly AgentMessage[]) => void | Promise<void>;
+/** Durable lifecycle notification after an admitted wake fully settles. */
+export type FollowUpSettlement = (records: readonly AgentMessage[], error?: unknown) => void | Promise<void>;
+
+type ProviderTurnAdmissionOptions = {
+	durableReservation?: DurablePromptReservation;
+	defer?: boolean;
+	signal?: AbortSignal;
+};
+
+type SettledIrcWakeAdmission = { records: AgentMessage[]; refused: boolean };
+
 type ScheduledAgentContinueOptions = {
 	source: string;
 	delayMs?: number;
@@ -740,6 +759,8 @@ export class AgentSession implements SettingsScope {
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
+	/** Explicitly flushed custom prompts must not be appended twice at message_end. */
+	readonly #persistedCustomPromptMessages = new WeakSet<CustomMessage>();
 	#activeToolExecutionUpdates = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
@@ -747,7 +768,7 @@ export class AgentSession implements SettingsScope {
 	#observedSessionId: string | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
-	#pendingNextTurnMessages: CustomMessage[] = [];
+	#pendingNextTurnMessages: Array<CustomMessage | Message> = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
 	/** A single model-only notebook reminder queued for the current prompt generation. */
@@ -840,6 +861,13 @@ export class AgentSession implements SettingsScope {
 	#ircWakeTurnObserver:
 		| ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined)
 		| undefined;
+	#ircWakeTurnAdmission: FollowUpAdmission | undefined;
+	#ircWakeTurnSettlement: FollowUpSettlement | undefined;
+	#ircWakeTurnSettlementGeneration = 0;
+	#nextIrcWakeAdmission = 0;
+	#nextIrcWakeAdmissionToCommit = 0;
+	readonly #pendingIrcWakeAdmissions = new Map<number, AgentMessage[]>();
+	readonly #settledIrcWakeAdmissions = new Map<number, SettledIrcWakeAdmission>();
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
@@ -937,6 +965,7 @@ export class AgentSession implements SettingsScope {
 	readonly #streamingEditGuard: StreamingEditGuard;
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
+	#durablePromptReservation: DurablePromptReservation | undefined;
 	#abortInProgress = false;
 	/** Submissions accepted by prompt()/promptCustomMessage()/sendCustomMessage() that have not
 	 *  yet dispatched a turn, queued, or bailed. Preprocessing (manual-compaction wait, slash
@@ -1042,6 +1071,55 @@ export class AgentSession implements SettingsScope {
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
 		}
+	}
+
+	#reserveDurablePrompt(): DurablePromptReservation {
+		if (this.isStreaming) throw new AgentBusyError();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		const reservation = { released: promise, release: resolve };
+		this.#durablePromptReservation = reservation;
+		return reservation;
+	}
+
+	#releaseDurablePrompt(reservation: DurablePromptReservation): void {
+		if (this.#durablePromptReservation === reservation) this.#durablePromptReservation = undefined;
+		reservation.release();
+	}
+
+	#admitProviderTurn(options?: ProviderTurnAdmissionOptions): Promise<boolean> | undefined {
+		const reservation = this.#durablePromptReservation;
+		if (!reservation || options?.durableReservation === reservation) return undefined;
+		if (!options?.defer) throw new AgentBusyError();
+		return this.#waitForDurablePromptRelease(options.signal);
+	}
+
+	async #waitForDurablePromptRelease(signal?: AbortSignal): Promise<boolean> {
+		while (this.#durablePromptReservation) {
+			if (signal?.aborted || this.#isDisposed) return false;
+			const reservation = this.#durablePromptReservation;
+			if (!signal) {
+				await reservation.released;
+				continue;
+			}
+			const aborted = Promise.withResolvers<void>();
+			const onAbort = () => aborted.resolve();
+			signal.addEventListener("abort", onAbort, { once: true });
+			try {
+				await Promise.race([reservation.released, aborted.promise]);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
+			}
+		}
+		return !signal?.aborted && !this.#isDisposed;
+	}
+
+	async #continueAgentWithAdmission(signal?: AbortSignal): Promise<void> {
+		const admission = this.#admitProviderTurn({ defer: true, signal });
+		if (admission && !(await admission)) {
+			signal?.throwIfAborted();
+			throw new Error("Session unavailable while waiting for provider-turn admission.");
+		}
+		await this.agent.continue(signal);
 	}
 
 	#endInFlight(onSettled?: () => void | Promise<void>): void {
@@ -1192,8 +1270,64 @@ export class AgentSession implements SettingsScope {
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
 	#wakeForIrc(records: AgentMessage[]): void {
-		if (this.#modeExitDrainSuppressionDepth > 0) {
+		const sequence = this.#nextIrcWakeAdmission++;
+		this.#pendingIrcWakeAdmissions.set(sequence, records);
+		void this.#awaitIrcWakeAdmission(sequence, records);
+	}
+
+	async #awaitIrcWakeAdmission(sequence: number, records: AgentMessage[]): Promise<void> {
+		let refused = this.#modeExitDrainSuppressionDepth > 0;
+		if (!refused) {
+			try {
+				await this.#ircWakeTurnAdmission?.(records);
+			} catch (error) {
+				refused = true;
+				logger.warn("IRC wake turn admission refused", { error: String(error) });
+			}
+		}
+		if (this.#isDisposed) return; // beginDispose already returned every outstanding batch to the inbox.
+		this.#settledIrcWakeAdmissions.set(sequence, { records, refused });
+		this.#commitSettledIrcWakeAdmissions();
+	}
+
+	#commitSettledIrcWakeAdmissions(): void {
+		while (true) {
+			const settled = this.#settledIrcWakeAdmissions.get(this.#nextIrcWakeAdmissionToCommit);
+			if (!settled) return;
+			this.#pendingIrcWakeAdmissions.delete(this.#nextIrcWakeAdmissionToCommit);
+			this.#settledIrcWakeAdmissions.delete(this.#nextIrcWakeAdmissionToCommit++);
+			if (settled.refused) {
+				this.#irc.queueDeferredWake(settled.records);
+				continue;
+			}
+			const earlierRecords = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending()];
+			void this.#wakeAfterIrcAdmission([...earlierRecords, ...settled.records]);
+		}
+	}
+
+	async #wakeAfterIrcAdmission(records: AgentMessage[]): Promise<void> {
+		if (this.#isDisposed) {
 			this.#irc.queueAside(records);
+			return;
+		}
+		if (this.#modeExitDrainSuppressionDepth > 0) {
+			this.#irc.queueDeferredWake(records);
+			return;
+		}
+		const admission = this.#admitProviderTurn({ defer: true });
+		if (admission) {
+			const admitted = await admission;
+			if (this.#isDisposed) {
+				this.#irc.queueAside(records);
+				return;
+			}
+			if (!admitted || this.#modeExitDrainSuppressionDepth > 0) {
+				this.#irc.queueDeferredWake(records);
+				return;
+			}
+		}
+		if (this.isStreaming) {
+			this.#deferIrcWakeUntilSettled(records);
 			return;
 		}
 		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
@@ -1209,9 +1343,10 @@ export class AgentSession implements SettingsScope {
 			this.agent.replaceQueues([...this.agent.peekSteeringQueue()], []);
 			if (parkedQueueDrainBlocked) this.#queuedMessageDrainBlocked = false;
 		}
-		// The wake observer is attached only once prompt ownership is won below: a
-		// deferred wake runs no turn, so observing it would capture the next
-		// turn's yield/output and relay it as this wake's reply.
+		// Bind this accepted wake to its settlement generation: replacement lifecycle
+		// ownership must never receive an old turn's result.
+		const settlement = this.#ircWakeTurnSettlement;
+		const settlementGeneration = this.#ircWakeTurnSettlementGeneration;
 		let finishObservation: ((error?: unknown) => void | Promise<void>) | undefined;
 		this.#resetPromptMaintenanceState();
 		// Capture the generation before the wake so its post-prompt recovery wait
@@ -1229,6 +1364,10 @@ export class AgentSession implements SettingsScope {
 		// the transition before building the turn from a consistent contract.
 		void this.whenWorkPoolYieldSettled()
 			.then(() => {
+				if (this.#isDisposed) {
+					this.#irc.queueAside(records);
+					return;
+				}
 				// Synchronous ownership check, atomic with the dispatch below:
 				// agent.prompt() claims streaming with no await in between, and the
 				// yield contract above mutates synchronously, so no install can
@@ -1292,8 +1431,21 @@ export class AgentSession implements SettingsScope {
 					} catch (error) {
 						logger.warn("IRC wake turn observer failed to finish", { error: String(error) });
 					}
+					if (!this.#isDisposed && settlementGeneration === this.#ircWakeTurnSettlementGeneration) {
+						try {
+							await settlement?.(records, turnError);
+						} catch (error) {
+							logger.warn("IRC wake turn settlement failed", { error: String(error) });
+						}
+					}
 				});
 			});
+	}
+
+	/** Defer a batch that lost the race to an in-flight wake and re-drive after settlement. */
+	#deferIrcWakeUntilSettled(records: AgentMessage[]): void {
+		this.#irc.queueDeferredWake(records);
+		this.#inFlightSettledCallbacks.push(() => this.#resumeStrandedIrcAsides());
 	}
 
 	/** Remove advisor concern/blocker cards from the agent-core steer/follow-up
@@ -1731,6 +1883,10 @@ export class AgentSession implements SettingsScope {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
+				const admission = this.#admitProviderTurn({ defer: true });
+				if (admission && !(await admission)) {
+					throw new Error("Session unavailable while waiting for provider-turn admission.");
+				}
 				this.#beginInFlight();
 				try {
 					await this.agent.prompt(messages.length === 1 ? first : messages);
@@ -1860,6 +2016,7 @@ export class AgentSession implements SettingsScope {
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			schedulePostPromptTask: (task, options) => this.#schedulePostPromptTask(task, options),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
+			continueAgent: signal => this.#continueAgentWithAdmission(signal),
 			promptGeneration: () => this.#promptGeneration,
 			ruleJudge: () => this.ruleJudge(),
 			deliverRuleWarning: (content, ruleNames) => this.#deliverRuleWarning(content, ruleNames),
@@ -1898,6 +2055,7 @@ export class AgentSession implements SettingsScope {
 			promptGeneration: () => this.#promptGeneration,
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
+			continueAgent: signal => this.#continueAgentWithAdmission(signal),
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
@@ -3274,9 +3432,15 @@ export class AgentSession implements SettingsScope {
 			return;
 		}
 		if (message.role === "hookMessage" || message.role === "custom") {
-			// One-run instructions must not return from persisted history: prewalk
-			// nudges are consumed once, and Vibe context is rebuilt only while active.
-			if (!isPrewalkPlanNudge(message) && message.customType !== VIBE_MODE_CONTEXT_MESSAGE_TYPE) {
+			// One-run instructions, explicitly flushed custom prompts, and Vibe
+			// context must not be appended again at message_end.
+			const wasPersistedBeforePrompt =
+				message.role === "custom" && this.#persistedCustomPromptMessages.delete(message);
+			if (
+				!isPrewalkPlanNudge(message) &&
+				!wasPersistedBeforePrompt &&
+				message.customType !== VIBE_MODE_CONTEXT_MESSAGE_TYPE
+			) {
 				this.sessionManager.appendCustomMessageEntry(
 					message.customType,
 					message.content,
@@ -4301,6 +4465,15 @@ export class AgentSession implements SettingsScope {
 		});
 		this.#schedulePostPromptTask(
 			async signal => {
+				const admission = this.#admitProviderTurn({ defer: true, signal });
+				if (admission && !(await admission)) {
+					this.#skipAgentContinue(signal.aborted ? "aborted" : "session-unavailable", request);
+					return;
+				}
+				if (options.generation !== undefined && this.#promptGeneration !== options.generation) {
+					this.#skipAgentContinue("stale-generation", request);
+					return;
+				}
 				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
 				// alongside us (e.g. via a scheduler we don't own), refuse to start a fresh
 				// streaming turn — agent.continue() here would race the handoff's session
@@ -4383,7 +4556,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#scheduleAutoContinuePrompt(generation: number): boolean {
-		const continuePrompt = async () => {
+		const continuePrompt = async (signal: AbortSignal) => {
 			// Compaction summarizes away the first-message eager preludes, so re-assert the
 			// delegate-via-tasks / phased-todo reminders on this auto-resumed turn. This runs
 			// at invocation (past the abort check below), so an aborted continuation queues
@@ -4404,6 +4577,7 @@ export class AgentSession implements SettingsScope {
 				{
 					skipPostPromptRecoveryWait: true,
 					prependMessages: eagerNudges.length > 0 ? eagerNudges : undefined,
+					deferProviderAdmission: { signal },
 				},
 			);
 		};
@@ -4419,7 +4593,7 @@ export class AgentSession implements SettingsScope {
 					});
 					return;
 				}
-				await continuePrompt();
+				await continuePrompt(signal);
 			},
 			{ generation },
 		);
@@ -4581,11 +4755,15 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#clearPendingSessionStopContinuations(): void {
-		if (!this.#pendingNextTurnMessages.some(message => message.customType === "session-stop-continuation")) {
+		if (
+			!this.#pendingNextTurnMessages.some(
+				message => message.role === "custom" && message.customType === "session-stop-continuation",
+			)
+		) {
 			return;
 		}
 		this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(
-			message => message.customType !== "session-stop-continuation",
+			message => message.role !== "custom" || message.customType !== "session-stop-continuation",
 		);
 	}
 
@@ -5130,7 +5308,10 @@ export class AgentSession implements SettingsScope {
 	 * gap slips past the disposal guards.
 	 */
 	beginDispose(): void {
+		if (this.#isDisposed) return;
 		this.#isDisposed = true;
+		this.#ircWakeTurnAdmission = undefined;
+		this.setIrcWakeTurnSettlement(undefined);
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -5146,6 +5327,13 @@ export class AgentSession implements SettingsScope {
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		this.#irc.flushPending();
+		// Already-admitted deferred wakes precede the still-uncommitted batches.
+		// Restore both before any late admission continuation can run, so disposal
+		// leaves a drainable inbox in arrival order even if an admission never resolves.
+		this.#irc.queueAside(this.#irc.drainDeferredWakes());
+		for (const records of this.#pendingIrcWakeAdmissions.values()) this.#irc.queueAside(records);
+		this.#pendingIrcWakeAdmissions.clear();
+		this.#settledIrcWakeAdmissions.clear();
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
@@ -5755,7 +5943,9 @@ export class AgentSession implements SettingsScope {
 
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
-		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
+		return (
+			this.agent.state.isStreaming || this.#promptInFlightCount > 0 || this.#durablePromptReservation !== undefined
+		);
 	}
 
 	get isAborting(): boolean {
@@ -7340,6 +7530,45 @@ export class AgentSession implements SettingsScope {
 		throw new AgentStartPolicyChangedError();
 	}
 
+	/** Flush an idempotent follow-up before dispatch, so a killed provider turn cannot lose it. */
+	async promptCustomMessagePersisted<T = unknown>(
+		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
+	): Promise<boolean> {
+		const reservation = this.#reserveDurablePrompt();
+		this.#beginInFlight();
+		try {
+			const customMessage: CustomMessage<T> = {
+				role: "custom",
+				customType: message.customType,
+				content: message.content,
+				display: message.display,
+				details: message.details,
+				attribution: message.attribution ?? "agent",
+				timestamp: Date.now(),
+			};
+			return await this.#promptWithMessage(customMessage, this.#getCustomMessageTextContent(customMessage), {
+				reservedInFlight: true,
+				durableReservation: reservation,
+				beforeProvider: async () => {
+					await this.sessionManager.ensureOnDisk();
+					this.sessionManager.appendCustomMessageEntry(
+						customMessage.customType,
+						customMessage.content,
+						customMessage.display,
+						customMessage.details,
+						customMessage.attribution,
+					);
+					await this.sessionManager.flush();
+					this.#persistedCustomPromptMessages.add(customMessage);
+				},
+				reconcileAfterProviderCancellation: () => this.agent.appendMessage(customMessage),
+			});
+		} finally {
+			this.#releaseDurablePrompt(reservation);
+			this.#endInFlight();
+		}
+	}
+
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
@@ -7347,13 +7576,28 @@ export class AgentSession implements SettingsScope {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
+			reservedInFlight?: boolean;
+			durableReservation?: DurablePromptReservation;
+			deferProviderAdmission?: { signal?: AbortSignal };
+			beforeProvider?: () => Promise<void>;
+			reconcileAfterProviderCancellation?: () => void;
 		},
 	): Promise<boolean> {
 		// Returns false when the prompt was dropped before reaching the agent —
 		// every pre-dispatch bail (generation bump from abort, disposal, usage
 		// preflight denial) exits silently, and prompt() uses the outcome to hand
 		// the typed text back to the host instead of losing it.
-		this.#beginInFlight();
+		const admission = this.#admitProviderTurn({
+			durableReservation: options?.durableReservation,
+			defer: options?.deferProviderAdmission !== undefined,
+			signal: options?.deferProviderAdmission?.signal,
+		});
+		if (admission && !(await admission)) {
+			options?.deferProviderAdmission?.signal?.throwIfAborted();
+			throw new Error("Session unavailable while waiting for provider-turn admission.");
+		}
+		const ownsInFlight = options?.reservedInFlight !== true;
+		if (ownsInFlight) this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
 		const setupAbort = new AbortController();
@@ -7546,6 +7790,13 @@ export class AgentSession implements SettingsScope {
 				nonMessageTokens,
 				cutoffCount: this.messages.length + messages.length,
 			});
+			if (options?.beforeProvider) {
+				await options.beforeProvider();
+				if (this.#isDisposed || this.#promptGeneration !== generation) {
+					if (!this.#isDisposed) options.reconcileAfterProviderCancellation?.();
+					return false;
+				}
+			}
 			// Commit the plan-reference delivery flag only now that the message is
 			// actually handed to agent.prompt. Every pre-send setup step above can
 			// return (generation-bail) or throw (@-mention reads, before_agent_start
@@ -7557,11 +7808,15 @@ export class AgentSession implements SettingsScope {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			if (this.#promptGeneration !== generation) return false;
+			const finalAdmission = this.#admitProviderTurn({ durableReservation: options?.durableReservation });
+			if (finalAdmission) await finalAdmission;
 			try {
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);
 			}
+			if (options?.durableReservation) this.#releaseDurablePrompt(options.durableReservation);
 			if (!options?.skipPostPromptRecoveryWait) {
 				await this.#waitForPostPromptRecovery(generation);
 			}
@@ -7570,7 +7825,7 @@ export class AgentSession implements SettingsScope {
 			// The per-turn before_agent_start override lives only for this turn.
 			this.#tools.clearTurnSystemPromptOverride();
 			this.#usagePreflightReadyForNextModelCall = false;
-			this.#endInFlight();
+			if (ownsInFlight) this.#endInFlight();
 			if (this.#promptSetupAbortController === setupAbort) this.#promptSetupAbortController = undefined;
 		}
 	}
@@ -7985,7 +8240,7 @@ export class AgentSession implements SettingsScope {
 		return delivered;
 	}
 
-	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
+	#queueHiddenNextTurnMessage(message: CustomMessage | Message, triggerTurn: boolean): void {
 		this.#pendingNextTurnMessages.push(message);
 		if (!triggerTurn) return;
 		const generation = this.#promptGeneration;
@@ -7994,7 +8249,7 @@ export class AgentSession implements SettingsScope {
 		}
 		this.#scheduledHiddenNextTurnGeneration = generation;
 		this.#schedulePostPromptTask(
-			async () => {
+			async signal => {
 				if (this.#scheduledHiddenNextTurnGeneration === generation) {
 					this.#scheduledHiddenNextTurnGeneration = undefined;
 				}
@@ -8002,7 +8257,7 @@ export class AgentSession implements SettingsScope {
 					return;
 				}
 				try {
-					await this.#promptQueuedHiddenNextTurnMessages();
+					await this.#promptQueuedHiddenNextTurnMessages(signal);
 				} catch {
 					// Leave the hidden next-turn messages queued for the next explicit prompt.
 				}
@@ -8018,7 +8273,7 @@ export class AgentSession implements SettingsScope {
 		);
 	}
 
-	async #promptQueuedHiddenNextTurnMessages(): Promise<void> {
+	async #promptQueuedHiddenNextTurnMessages(signal: AbortSignal): Promise<void> {
 		if (this.#pendingNextTurnMessages.length === 0) {
 			return;
 		}
@@ -8036,6 +8291,7 @@ export class AgentSession implements SettingsScope {
 			await this.#promptWithMessage(message, textContent, {
 				prependMessages,
 				skipPostPromptRecoveryWait: true,
+				deferProviderAdmission: { signal },
 			});
 		} catch (error) {
 			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
@@ -8043,7 +8299,7 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	#getCustomMessageTextContent(message: Pick<CustomMessage, "content">): string {
+	#getCustomMessageTextContent(message: { content: string | readonly { type: string; text?: string }[] }): string {
 		if (typeof message.content === "string") {
 			return message.content;
 		}
@@ -8078,7 +8334,10 @@ export class AgentSession implements SettingsScope {
 		message: CustomMessage,
 		options?: { acceptTerminalEmptyStop?: boolean },
 	): Promise<boolean> {
+		const admission = this.#admitProviderTurn();
+		if (admission) await admission;
 		this.#beginInFlight();
+		const generation = this.#promptGeneration;
 		try {
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			const acceptTerminalEmptyStop = options?.acceptTerminalEmptyStop === true;
@@ -8086,6 +8345,9 @@ export class AgentSession implements SettingsScope {
 				this.#resetPromptMaintenanceState();
 			}
 			this.#recovery.setAcceptTerminalEmptyStop(acceptTerminalEmptyStop);
+			if (this.#promptGeneration !== generation) return false;
+			const finalAdmission = this.#admitProviderTurn();
+			if (finalAdmission) await finalAdmission;
 			await this.agent.prompt(message);
 			await this.#waitForPostPromptRecovery();
 			return true;
@@ -8158,6 +8420,76 @@ export class AgentSession implements SettingsScope {
 		this.#scheduleIdleQueueDrain();
 	}
 
+	/** Evaluate extension-supplied calls through the same wrapped tools used by normal turns. */
+	async #evaluateCustomToolCalls(content: CustomMessage["content"]): Promise<Message[]> {
+		if (typeof content !== "string") return [];
+		const scanner = createInbandScanner("xml", { tools: [...this.#tools.registry.values()] });
+		const events = [...scanner.feed(content), ...scanner.flush()];
+		const calls: ToolCall[] = [];
+		const results: ToolResultMessage[] = [];
+		const signal = this.#postPromptTasksAbortController.signal;
+		const context = this.#buildStandaloneToolContext(
+			this.#extensionRunner?.hasUI() ? this.#extensionRunner.getUIContext() : undefined,
+		);
+		for (const event of events) {
+			if (event.type !== "toolEnd") continue;
+			signal.throwIfAborted();
+			const tool = this.#tools.registry.get(event.name);
+			if (!tool) {
+				logger.warn("Extension tool evaluation skipped an unknown tool", { tool: event.name });
+				continue;
+			}
+			calls.push({ type: "toolCall", id: event.id, name: event.name, arguments: event.arguments });
+			try {
+				const result = await tool.execute(event.id, event.arguments, signal, undefined, context);
+				results.push({
+					role: "toolResult",
+					toolCallId: event.id,
+					toolName: event.name,
+					content: result.content,
+					details: result.details,
+					isError: false,
+					timestamp: Date.now(),
+				});
+			} catch (error) {
+				signal.throwIfAborted();
+				results.push({
+					role: "toolResult",
+					toolCallId: event.id,
+					toolName: event.name,
+					content: [
+						{
+							type: "text",
+							text: `Tool execution failed: ${error instanceof Error ? error.message : String(error)}`,
+						},
+					],
+					isError: true,
+					timestamp: Date.now(),
+				});
+			}
+		}
+		if (calls.length === 0) return [];
+		const model = this.agent.state.model;
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: calls,
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		return [assistant, ...results];
+	}
+
 	/**
 	 * Send a custom message to the session. Creates a CustomMessageEntry.
 	 *
@@ -8181,6 +8513,7 @@ export class AgentSession implements SettingsScope {
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			evaluateToolCalls?: boolean;
 		},
 	): Promise<boolean> {
 		return this.#admitSubmission(() => this.#sendCustomMessage(message, options));
@@ -8193,6 +8526,7 @@ export class AgentSession implements SettingsScope {
 			deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			evaluateToolCalls?: boolean;
 		},
 	): Promise<boolean> {
 		// An extension command parked on a manual compaction may fire this
@@ -8219,6 +8553,7 @@ export class AgentSession implements SettingsScope {
 					deliverAs?: "steer" | "followUp" | "nextTurn" | "aside";
 					queueChipText?: string;
 					acceptTerminalEmptyStop?: boolean;
+					evaluateToolCalls?: boolean;
 			  }
 			| undefined,
 		outcome: PromptDispatchOutcome,
@@ -8226,6 +8561,43 @@ export class AgentSession implements SettingsScope {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
 		const normalizedPayload = normalizeCustomMessagePayload<T>(message);
+		if (options?.evaluateToolCalls) {
+			const messages = await this.#evaluateCustomToolCalls(normalizedPayload.content);
+			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+			if (messages.length === 0) return false;
+			if (this.isStreaming) {
+				outcome.sessionClaimed = this.agent.state.isStreaming;
+				if (options.deliverAs === "nextTurn") {
+					for (const message of messages) this.#queueHiddenNextTurnMessage(message, options.triggerTurn ?? false);
+				} else if (options.deliverAs === "aside") {
+					this.#irc.queueAside(messages);
+				} else {
+					this.#allowQueuedMessageDrainRetry();
+					for (const message of messages) {
+						if (options.deliverAs === "followUp") this.agent.followUp(message);
+						else this.agent.steer(message);
+					}
+					this.#scheduleIdleQueueDrain();
+				}
+				return false;
+			}
+			const startTurn =
+				(options.triggerTurn || options.deliverAs === "aside") &&
+				!(this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) &&
+				!(options.deliverAs === "aside" && (this.#planModeState?.enabled || this.#advisors.autoResumeSuppressed));
+			if (startTurn) {
+				const last = messages[messages.length - 1]!;
+				outcome.sessionClaimed = await this.#promptWithMessage(last, this.#getCustomMessageTextContent(last), {
+					prependMessages: messages.slice(0, -1),
+				});
+				return outcome.sessionClaimed;
+			}
+			for (const message of messages) {
+				this.agent.appendMessage(message);
+				this.sessionManager.appendMessage(message);
+			}
+			return false;
+		}
 		const suppressQueueChip = options?.deliverAs === "nextTurn" || options?.deliverAs === "aside";
 		const details =
 			options?.queueChipText && !suppressQueueChip
@@ -10073,6 +10445,16 @@ export class AgentSession implements SettingsScope {
 		this.#ircWakeTurnObserver = observer;
 	}
 
+	setIrcWakeTurnAdmission(admission: FollowUpAdmission | undefined): void {
+		this.#ircWakeTurnAdmission = admission;
+	}
+
+	setIrcWakeTurnSettlement(settlement: FollowUpSettlement | undefined): void {
+		if (this.#ircWakeTurnSettlement === settlement) return;
+		this.#ircWakeTurnSettlement = settlement;
+		this.#ircWakeTurnSettlementGeneration++;
+	}
+
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
 	emitIrcRelayObservation(record: CustomMessage): void {
 		this.#irc.emitRelayObservation(record);
@@ -11369,6 +11751,10 @@ export class AgentSession implements SettingsScope {
 	 * compile here instead of surfacing as `undefined` at runtime.
 	 */
 	buildAskReanswerContext(uiContext: ExtensionUIContext): AgentToolContext {
+		return this.#buildStandaloneToolContext(uiContext);
+	}
+
+	#buildStandaloneToolContext(uiContext?: ExtensionUIContext): AgentToolContext {
 		return {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
@@ -11380,7 +11766,7 @@ export class AgentSession implements SettingsScope {
 			},
 			settings: this.settings,
 			ui: uiContext,
-			hasUI: true,
+			hasUI: uiContext !== undefined,
 		};
 	}
 

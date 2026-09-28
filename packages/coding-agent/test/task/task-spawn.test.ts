@@ -198,6 +198,57 @@ describe("task spawn routing", () => {
 		}
 	});
 
+	it("reports paused subprocesses as paused in detached task progress", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
+			makeResult(options.id ?? "?", { paused: { toolName: "extension", toolCallId: "pause-call" } }),
+		);
+
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+		const updates: Array<{ text: string; status?: string }> = [];
+		const result = await tool.execute(
+			"tc-paused",
+			{ agent: "task", name: "PausedSpawn", task: "Wait for extension." } as TaskParams,
+			undefined,
+			update => {
+				updates.push({
+					text: getFirstText(update),
+					status: update.details?.progress?.find(progress => progress.id === "PausedSpawn")?.status,
+				});
+			},
+		);
+		const job = manager.getJob(result.details!.async!.jobId)!;
+		await job.promise;
+
+		expect(updates.at(-1)).toMatchObject({ text: "Background task PausedSpawn paused.", status: "paused" });
+		expect(job.resultText).toContain("PausedSpawn is paused");
+	});
+
+	it("labels synchronous paused subprocess results without collapsing them to completed", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
+			makeResult(options.id ?? "?", { paused: { toolName: "extension", toolCallId: "pause-call" } }),
+		);
+
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false } }));
+		const result = await tool.execute("tc-sync-paused", {
+			agent: "task",
+			name: "PausedInline",
+			task: "Wait for extension.",
+		} as TaskParams);
+
+		expect(result.details?.results[0]?.paused).toEqual({ toolName: "extension", toolCallId: "pause-call" });
+		expect(getFirstText(result)).toContain("paused");
+		expect(getFirstText(result)).not.toContain("completed");
+	});
+
 	it("fires before_subagent_spawn once per child even though the task preflight resolves policy first", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [{ ...taskAgent, model: ["anthropic/claude-sonnet-4"] }],

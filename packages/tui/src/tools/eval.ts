@@ -21,6 +21,7 @@ import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta"
 import {
 	DEFAULT_TERMINAL_PREVIEW_LINES,
 	cappedHeadLines,
+	formatBadge,
 	formatTitle,
 	previewWindowRows,
 	replaceTabs,
@@ -132,7 +133,7 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 	return out;
 }
 
-type AgentEventStatus = "pending" | "running" | "completed" | "failed" | "aborted";
+type AgentEventStatus = "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
 
 /**
  * Coalescing key of a progress-snapshot event: `agent` and `judge_batch`
@@ -177,6 +178,7 @@ function agentEventStatus(value: unknown): AgentEventStatus {
 	switch (value) {
 		case "pending":
 		case "running":
+		case "paused":
 		case "completed":
 		case "failed":
 		case "aborted":
@@ -213,7 +215,7 @@ function renderAgentProgressEvents(
 			renderAgentTreeRow(
 				{
 					presentation: "eval",
-					status,
+					status: status === "paused" ? "pending" : status,
 					prefix,
 					id: sanitizeText(eventString(event.id) ?? "agent").replace(/\s+/g, " "),
 					width,
@@ -221,6 +223,7 @@ function renderAgentProgressEvents(
 					thinkingLevel: event.resolvedThinkingLevel,
 					advisor: event.advisor === true,
 					spinnerFrame,
+					statusBadge: status === "paused" ? ` ${formatBadge("paused", "warning", theme)}` : undefined,
 					preview: preview ? ` ${theme.fg("muted", truncateToWidth(replaceTabs(preview), 48))}` : undefined,
 					stats: {
 						toolCount: toolCount > 0 ? toolCount : 0,
@@ -229,7 +232,7 @@ function renderAgentProgressEvents(
 						cost: eventNumber(event.cost),
 					},
 					durationMs:
-						status === "completed" || status === "failed" || status === "aborted"
+						status === "paused" || status === "completed" || status === "failed" || status === "aborted"
 							? eventNumber(event.durationMs)
 							: undefined,
 				},

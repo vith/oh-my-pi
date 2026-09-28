@@ -1261,6 +1261,7 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		sessionManager: ctx.sessionManager,
 		modelRegistry: ctx.modelRegistry,
 		model: ctx.model,
+		settings: ctx.settings,
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,

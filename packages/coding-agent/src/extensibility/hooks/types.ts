@@ -518,7 +518,7 @@ export interface HookAPI {
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp"; evaluateToolCalls?: boolean },
 	): void;
 
 	/**

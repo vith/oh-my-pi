@@ -675,13 +675,16 @@ function renderAgentProgress(
 	let statusBadge: string | undefined;
 	if (progress.retryState && progress.status === "running") {
 		statusBadge = ` ${formatBadge("retrying", "warning", theme)}`;
+	} else if (progress.status === "paused") {
+		statusBadge = ` ${formatBadge("paused", "warning", theme)}`;
 	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
 		statusBadge = ` ${formatBadge("rate-limited", "error", theme)}`;
 	}
 	const row = renderAgentTreeRow(
 		{
 			presentation: "task",
-			status: progress.status,
+			// A paused agent remains resumable, unlike a completed row.
+			status: progress.status === "paused" ? "pending" : progress.status,
 			prefix,
 			id: formatTaskId(progress.id),
 			width: maxWidth,
@@ -971,26 +974,31 @@ function renderAgentResult(
 
 	const { warning: missingCompleteWarning, rest: outputWithoutWarning } = extractMissingYieldWarning(result.output);
 	const aborted = result.aborted ?? false;
-	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
-	const success = !aborted && result.exitCode === 0 && !result.error;
+	const paused = result.paused !== undefined;
+	const mergeFailed = !aborted && !paused && result.exitCode === 0 && !!result.error;
+	const success = !aborted && !paused && result.exitCode === 0 && !result.error;
 	const needsWarning = Boolean(missingCompleteWarning) && success;
 	const icon = aborted
 		? theme.status.aborted
-		: needsWarning
-			? theme.status.warning
-			: success
-				? theme.styledSymbol("status.done", "text")
-				: theme.status.error;
-	const iconColor = needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
+		: paused
+			? theme.status.pending
+			: needsWarning
+				? theme.status.warning
+				: success
+					? theme.styledSymbol("status.done", "text")
+					: theme.status.error;
+	const iconColor = paused || needsWarning ? "warning" : success ? "success" : mergeFailed ? "warning" : "error";
 	const statusText = aborted
 		? "aborted"
-		: needsWarning
-			? "warning"
-			: success
-				? "done"
-				: mergeFailed
-					? "merge failed"
-					: "failed";
+		: paused
+			? "paused"
+			: needsWarning
+				? "warning"
+				: success
+					? "done"
+					: mergeFailed
+						? "merge failed"
+						: "failed";
 
 	// Reserve the name and required badges before optional model metadata and details.
 	const fullDescription = result.description ? replaceTabs(sanitizeText(result.description)).trim() : undefined;
@@ -1228,6 +1236,7 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 	const counts: Record<AgentProgress["status"], number> = {
 		pending: 0,
 		running: 0,
+		paused: 0,
 		completed: 0,
 		failed: 0,
 		aborted: 0,
@@ -1237,6 +1246,7 @@ function formatHiddenProgressLine(hidden: readonly AgentProgress[], theme: Theme
 	if (counts.completed > 0) parts.push(theme.fg("dim", `${counts.completed} done`));
 	if (counts.running > 0) parts.push(theme.fg("dim", `${counts.running} running`));
 	if (counts.pending > 0) parts.push(theme.fg("dim", `${counts.pending} pending`));
+	if (counts.paused > 0) parts.push(theme.fg("warning", `${counts.paused} paused`));
 	if (counts.failed > 0) parts.push(theme.fg("error", `${counts.failed} failed`));
 	if (counts.aborted > 0) parts.push(theme.fg("error", `${counts.aborted} aborted`));
 	const breakdown =
@@ -1315,12 +1325,14 @@ export function renderResult(
 	let abortedCount = 0;
 	let failCount = 0;
 	let mergeFailedCount = 0;
+	let pausedCount = 0;
 	let successCount = 0;
 	let requestTotal = 0;
 	if (hasResults) {
 		for (const r of details.results) {
 			requestTotal += r.requests ?? 0;
-			if (r.aborted) abortedCount++;
+			if (r.paused) pausedCount++;
+			else if (r.aborted) abortedCount++;
 			else if (r.exitCode !== 0) failCount++;
 			else if (r.error) mergeFailedCount++;
 			else successCount++;
@@ -1329,9 +1341,16 @@ export function renderResult(
 	const aborted = abortedCount > 0;
 	const failed = failCount > 0;
 	const mergeFailed = mergeFailedCount > 0;
+	const paused = pausedCount > 0;
 	const isError = aborted || failed;
 	const agentCount = hasResults ? details.results.length : (details.progress?.length ?? 0);
-	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
+	const icon: ToolUIStatus = options.isPartial
+		? "running"
+		: isError
+			? "error"
+			: mergeFailed || paused
+				? "warning"
+				: "success";
 	// Header meta is the spawn count only; each row carries its own ⟨agent⟩
 	// badge, so a joined type list here would repeat them. Before anything
 	// spawns, fall back to the flat form's agent type from the call args.
@@ -1434,6 +1453,7 @@ export function renderResult(
 
 			const summaryParts: string[] = [];
 			if (abortedCount > 0) summaryParts.push(theme.fg("error", `${abortedCount} aborted`));
+			if (pausedCount > 0) summaryParts.push(theme.fg("warning", `${pausedCount} paused`));
 			if (successCount > 0) summaryParts.push(theme.fg("success", `${successCount} succeeded`));
 			if (mergeFailedCount > 0) summaryParts.push(theme.fg("warning", `${mergeFailedCount} merge failed`));
 			if (failCount > 0) summaryParts.push(theme.fg("error", `${failCount} failed`));
@@ -1449,7 +1469,7 @@ export function renderResult(
 			);
 		}
 
-		const phase = isPartial ? "partial" : isError ? "error" : mergeFailed ? "warning" : "success";
+		const phase = isPartial ? "partial" : isError ? "error" : mergeFailed || paused ? "warning" : "success";
 		const borderColor = isError ? "error" : "borderMuted";
 
 		if (lines.length === 0) {
@@ -1843,7 +1863,7 @@ export interface AgentProgress {
 	id: string;
 	agent: string;
 	agentSource: AgentSource;
-	status: "pending" | "running" | "completed" | "failed" | "aborted";
+	status: "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
 	task: string;
 	assignment?: string;
 	description?: string;
@@ -1967,6 +1987,8 @@ export interface SingleResult {
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;
+	/** Tool call where this run paused, leaving its session resumable. */
+	paused?: { toolName: string; toolCallId: string };
 	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
 	usage?: Usage;
 	/** Output path for the task result */

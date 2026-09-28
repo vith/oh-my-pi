@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
+import { executeCancel } from "@oh-my-pi/pi-coding-agent/async/job-control";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -26,6 +27,37 @@ describe("wait", () => {
 		vi.useRealTimers();
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
+	});
+
+	test("reports a failed registration kill behind a settled job instead of claiming completion", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const id = manager.register("task", "Peer", async () => "done", {
+			id: "Peer",
+			agentId: "Peer",
+			ownerId: "Main",
+		});
+		await manager.getJob(id)!.promise;
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Peer",
+			displayName: "Peer",
+			kind: "sub",
+			parentId: "Main",
+			status: "idle",
+			session: null,
+		});
+		const owner = session(manager);
+		owner.agentLifecycle = () =>
+			({
+				release: async () => {
+					throw new Error("release failed");
+				},
+			}) as never;
+
+		const result = await executeCancel(owner, manager, "Main", [id]);
+		expect(result.details?.cancelled).toEqual([{ id, status: "failed" }]);
+		expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("release failed") });
+		expect(registry.get(id)).toBeDefined();
 	});
 
 	test("a settling job is recovered once, suppressing its async duplicate", async () => {

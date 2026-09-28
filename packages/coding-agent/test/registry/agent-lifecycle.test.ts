@@ -5,6 +5,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface SessionStub {
@@ -12,7 +13,12 @@ interface SessionStub {
 	disposeCalls: () => number;
 }
 
-/** Minimal session: the lifecycle manager only ever calls dispose() on it. */
+interface FollowUpPolicySessionStub extends SessionStub {
+	admission: () => unknown;
+	settlement: () => unknown;
+}
+
+/** Minimal lifecycle session: policy clear hooks are harmless no-ops here. */
 function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 	let calls = 0;
 	const stub = {
@@ -20,8 +26,34 @@ function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 			calls++;
 			await dispose?.();
 		},
+		setIrcWakeTurnAdmission: (_next: unknown) => {},
+		setIrcWakeTurnSettlement: (_next: unknown) => {},
 	};
 	return { session: stub as unknown as AgentSession, disposeCalls: () => calls };
+}
+
+/** A lifecycle-owned session exposes both independent Agent Hub policy hooks. */
+function makeFollowUpPolicySessionStub(): FollowUpPolicySessionStub {
+	let admission: unknown;
+	let settlement: unknown;
+	let calls = 0;
+	const stub = {
+		dispose: async () => {
+			calls++;
+		},
+		setIrcWakeTurnAdmission: (next: unknown) => {
+			admission = next;
+		},
+		setIrcWakeTurnSettlement: (next: unknown) => {
+			settlement = next;
+		},
+	};
+	return {
+		session: stub as unknown as AgentSession,
+		disposeCalls: () => calls,
+		admission: () => admission,
+		settlement: () => settlement,
+	};
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -35,6 +67,32 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 /** Settle the async park chain (timer callback → park() → dispose → setStatus). */
 async function flushAsync(): Promise<void> {
 	for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
+/**
+ * Minimal transcript the persisted-subagent scan accepts: a `session` header
+ * first (the scan rejects anything else as an unreadable transcript) followed
+ * by the `session_init` a spawned subagent records.
+ */
+function persistedTranscript(id: string): string {
+	return `${[
+		JSON.stringify({
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id,
+			timestamp: "2026-08-01T09:25:44.000Z",
+			cwd: "/tmp",
+		}),
+		JSON.stringify({
+			type: "session_init",
+			id: "init",
+			parentId: null,
+			timestamp: "2026-08-01T09:25:45.000Z",
+			systemPrompt: "worker",
+			task: "# Target\nDo the work.",
+			tools: ["read"],
+		}),
+	].join("\n")}\n`;
 }
 
 const TTL = 20;
@@ -135,6 +193,87 @@ describe("AgentLifecycleManager", () => {
 		expect(ref?.session).toBeNull();
 		expect(ref?.sessionFile).toBe("/tmp/1-Sub.jsonl");
 		expect(lifecycle.has("1-Sub")).toBe(true);
+	});
+
+	it("retains distinct follow-up admission and settlement policies through warm and cold revival", async () => {
+		const warm = makeFollowUpPolicySessionStub();
+		const cold = makeFollowUpPolicySessionStub();
+		const ref = registry.register({
+			id: "policy-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: warm.session,
+			sessionFile: "/tmp/policy-Sub.jsonl",
+			status: "idle",
+		});
+		const admission = async () => {};
+		const settlement = async () => {};
+		lifecycle.adopt("policy-Sub", { idleTtlMs: 0, revive: async () => cold.session }, ref);
+		lifecycle.setFollowUpAdmission("policy-Sub", admission);
+		lifecycle.setFollowUpSettlement("policy-Sub", settlement);
+
+		// A live/warm session receives both policies immediately and again on access.
+		expect(warm.admission()).toBe(admission);
+		expect(warm.settlement()).toBe(settlement);
+		expect(await lifecycle.ensureLive("policy-Sub")).toBe(warm.session);
+		expect(warm.settlement()).toBe(settlement);
+
+		await lifecycle.park("policy-Sub");
+		expect(registry.get("policy-Sub")?.status).toBe("parked");
+		expect(await lifecycle.ensureLive("policy-Sub")).toBe(cold.session);
+		expect(cold.admission()).toBe(admission);
+		expect(cold.settlement()).toBe(settlement);
+
+		await lifecycle.release("policy-Sub");
+		const replacement = makeFollowUpPolicySessionStub();
+		registry.register({
+			id: "policy-Sub",
+			displayName: "replacement",
+			kind: "sub",
+			session: replacement.session,
+			status: "idle",
+		});
+		lifecycle.adopt("policy-Sub", { idleTtlMs: 0 });
+		expect(replacement.admission()).toBeUndefined();
+		expect(replacement.settlement()).toBeUndefined();
+	});
+
+	it("clears live follow-up policies synchronously for tombstone release, manager dispose, and global reset", async () => {
+		const released = makeFollowUpPolicySessionStub();
+		const releasedRef = registerIdleSub("release-policy-Sub", released.session);
+		lifecycle.adopt("release-policy-Sub", { idleTtlMs: 0 }, releasedRef);
+		lifecycle.setFollowUpAdmission("release-policy-Sub", async () => {});
+		lifecycle.setFollowUpSettlement("release-policy-Sub", async () => {});
+		const tombstone = lifecycle.release("release-policy-Sub", releasedRef, { tombstone: true });
+		expect(released.admission()).toBeUndefined();
+		expect(released.settlement()).toBeUndefined();
+		await tombstone;
+
+		const disposed = makeFollowUpPolicySessionStub();
+		registerIdleSub("dispose-policy-Sub", disposed.session);
+		lifecycle.adopt("dispose-policy-Sub", { idleTtlMs: 0 });
+		lifecycle.setFollowUpAdmission("dispose-policy-Sub", async () => {});
+		lifecycle.setFollowUpSettlement("dispose-policy-Sub", async () => {});
+		const managerDispose = lifecycle.dispose();
+		expect(disposed.admission()).toBeUndefined();
+		expect(disposed.settlement()).toBeUndefined();
+		await managerDispose;
+
+		const resetLifecycle = AgentLifecycleManager.global();
+		const reset = makeFollowUpPolicySessionStub();
+		const resetRef = registry.register({
+			id: "reset-policy-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: reset.session,
+			status: "idle",
+		});
+		resetLifecycle.adopt("reset-policy-Sub", { idleTtlMs: 0 }, resetRef);
+		resetLifecycle.setFollowUpAdmission("reset-policy-Sub", async () => {});
+		resetLifecycle.setFollowUpSettlement("reset-policy-Sub", async () => {});
+		AgentLifecycleManager.resetGlobalForTests();
+		expect(reset.admission()).toBeUndefined();
+		expect(reset.settlement()).toBeUndefined();
 	});
 
 	it("running disarms the timer; returning to idle re-arms a fresh TTL", async () => {
@@ -722,8 +861,11 @@ describe("AgentLifecycleManager", () => {
 		const rootSessionFile = path.join(tempDir.path(), "main.jsonl");
 		const workerId = "Killed-Sub";
 		const workerSessionFile = path.join(tempDir.path(), "main", `${workerId}.jsonl`);
-		await Bun.write(rootSessionFile, "");
-		await Bun.write(workerSessionFile, "");
+		const survivorId = "Parked-Sub";
+		const survivorSessionFile = path.join(tempDir.path(), "main", `${survivorId}.jsonl`);
+		await Bun.write(rootSessionFile, persistedTranscript("main"));
+		await Bun.write(workerSessionFile, persistedTranscript(workerId));
+		await Bun.write(survivorSessionFile, persistedTranscript(survivorId));
 
 		// Mirror the real wrapped session dispose (createAgentSession's
 		// `unregisterUnlessParked`): disposing a live session unregisters the ref
@@ -738,6 +880,8 @@ describe("AgentLifecycleManager", () => {
 					registry.unregister(workerId, live);
 				}
 			},
+			setIrcWakeTurnAdmission: (_next: unknown) => {},
+			setIrcWakeTurnSettlement: (_next: unknown) => {},
 		} as unknown as AgentSession;
 		const ref = registry.register({
 			id: workerId,
@@ -763,6 +907,7 @@ describe("AgentLifecycleManager", () => {
 		expect(await Bun.file(`${workerSessionFile}.tombstone`).exists()).toBe(true);
 		const restoredRegistry = new AgentRegistry();
 		await registerPersistedSubagents(restoredRegistry, rootSessionFile);
+		expect(restoredRegistry.get(survivorId)?.status).toBe("parked");
 		expect(restoredRegistry.get(workerId)?.status).toBe("aborted");
 	});
 
@@ -800,6 +945,8 @@ describe("AgentLifecycleManager", () => {
 			dispose: async () => {
 				disposeCalls++;
 			},
+			setIrcWakeTurnAdmission: (_next: unknown) => {},
+			setIrcWakeTurnSettlement: (_next: unknown) => {},
 		} as unknown as AgentSession;
 		const ref = registry.register({
 			id: workerId,

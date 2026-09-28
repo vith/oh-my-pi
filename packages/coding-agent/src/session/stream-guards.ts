@@ -47,6 +47,7 @@ export interface StreamGuardsHost {
 	promptGeneration(): number;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>): void;
+	continueAgent(signal?: AbortSignal): Promise<void>;
 	discardAssistantTurn(message: AssistantMessage): void;
 }
 
@@ -249,7 +250,7 @@ export class LoopGuards {
 				"agent",
 			);
 			try {
-				await this.#host.agent.continue();
+				await this.#host.continueAgent(signal);
 			} catch (error) {
 				logger.warn("gemini tool-call reminder continue failed", { error: String(error) });
 			}

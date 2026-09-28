@@ -20,6 +20,9 @@ export interface SubprocessToolEvent {
 	isError?: boolean;
 }
 
+/** Terminal action requested by a successful subprocess tool result. */
+export type SubprocessTerminalDisposition = "terminate" | "pause";
+
 /** Handler for subprocess tool events */
 export interface SubprocessToolHandler<TData = unknown> extends SubprocessToolRenderer<TData> {
 	/**
@@ -28,10 +31,10 @@ export interface SubprocessToolHandler<TData = unknown> extends SubprocessToolRe
 	 */
 	extractData?: (event: SubprocessToolEvent) => TData | undefined;
 
-	/**
-	 * Whether this tool's completion should terminate the subprocess.
-	 * Return true to send SIGTERM after the tool completes.
-	 */
+	/** Explicit terminal action; a pause ends this turn but preserves the session for revival. */
+	terminalDisposition?: (event: SubprocessToolEvent) => SubprocessTerminalDisposition | undefined;
+
+	/** Existing hard-termination hook; the explicit disposition takes precedence. */
 	shouldTerminate?: (event: SubprocessToolEvent) => boolean;
 }
 

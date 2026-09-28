@@ -498,6 +498,47 @@ describe("task progress rendering", () => {
 		expect(row).not.toContain(theme.fg("accent", titlePart));
 	});
 
+	it("labels paused rows and finalized results as paused rather than completed", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const progressRow = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: detailsFor(runningProgress({ id: "PausedProgress", status: "paused" })),
+					},
+					options,
+					theme,
+				),
+				"PausedProgress",
+			),
+		);
+		const resultRow = Bun.stripANSI(
+			findRow(
+				taskToolRenderer.renderResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: {
+							projectAgentsDir: null,
+							results: [
+								finishedResult({ id: "PausedResult", paused: { toolName: "extension", toolCallId: "call-1" } }),
+							],
+							totalDurationMs: 0,
+						},
+					},
+					options,
+					theme,
+				),
+				"PausedResult",
+			),
+		);
+
+		expect(progressRow).toContain("paused");
+		expect(resultRow).toContain("paused");
+		expect(resultRow).not.toContain("done");
+	});
+
 	it("shows the dispatch glyph in the header while agents run, not a spinner", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
@@ -679,6 +720,36 @@ describe("task progress rendering", () => {
 		expect(collapsed).toContain("5 succeeded");
 		expect(collapsed).toContain("1 failed");
 	});
+
+	it("counts paused results separately from succeeded results in the run footer", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [
+				finishedResult({ id: "Completed" }),
+				finishedResult({ id: "Paused", paused: { toolName: "extension", toolCallId: "pause-call" } }),
+			],
+			totalDurationMs: 1000,
+		};
+
+		const rendered = Bun.stripANSI(
+			taskToolRenderer
+				.renderResult(
+					{ content: [{ type: "text", text: "" }], details },
+					{ expanded: false, isPartial: false },
+					theme,
+				)
+				.render(120)
+				.join("\n"),
+		);
+
+		expect(rendered).toContain("1 succeeded");
+		expect(rendered).toContain("1 paused");
+		expect(rendered).not.toContain("2 succeeded");
+		const header = rendered.split("\n").find(line => line.includes("Task 2 agents"));
+		expect(header).toContain(theme.status.warning);
+	});
+
 	it("expands tabs in task descriptions before measuring and rendering", async () => {
 		const theme = (await getThemeByName("dark"))!;
 		const description = "Inspect\trendering\tboundaries";

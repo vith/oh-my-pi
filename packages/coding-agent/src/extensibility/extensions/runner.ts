@@ -1356,6 +1356,7 @@ export class ExtensionRunner {
 			get model() {
 				return getModel();
 			},
+			settings: this.settings,
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),

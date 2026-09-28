@@ -415,6 +415,22 @@ describe("subagent HUD lines", () => {
 		registry.dispose();
 	});
 
+	it("keeps a paused subagent observable without counting it as running", () => {
+		const eventBus = new EventBus();
+		const registry = new SessionObserverRegistry();
+		registry.subscribeToEventBus(eventBus, eventBus);
+
+		const started = makeLifecycle("PausedWorker", 0, "Needs a human", true);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, started);
+		expect(registry.getActiveSubagentCount()).toBe(1);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...started, status: "paused" });
+		expect(registry.getSession("PausedWorker")).toMatchObject({ status: "paused", detached: true });
+		expect(registry.getActiveSubagentCount()).toBe(0);
+		expect(renderSubagentHudLines(registry.getSessions(), 120)).toEqual([]);
+
+		registry.dispose();
+	});
+
 	it("keeps subagent registry order stable while progress arrives out of order", () => {
 		const eventBus = new EventBus();
 		const registry = new SessionObserverRegistry();

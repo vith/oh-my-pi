@@ -700,238 +700,243 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();
 
-		if (params.questions.length === 0) {
-			return {
-				content: [{ type: "text" as const, text: "Error: questions must not be empty" }],
-				details: {},
-			};
-		}
+		try {
+			if (params.questions.length === 0) {
+				return {
+					content: [{ type: "text" as const, text: "Error: questions must not be empty" }],
+					details: {},
+				};
+			}
 
-		// Speak the question(s) aloud before surfacing them. Ask vocalizes in every
-		// mode — it's the assistant addressing the user — gated only by speech.enabled
-		// (the vocalizer re-checks the setting and no-ops when disabled).
-		if (cfgSpeechEnabled.get(this.session.settings)) {
-			vocalizer.speak(params.questions.map(q => q.question).join("\n"));
-		}
+			// Speak the question(s) aloud before surfacing them. Ask vocalizes in every
+			// mode — it's the assistant addressing the user — gated only by speech.enabled
+			// (the vocalizer re-checks the setting and no-ops when disabled).
+			if (cfgSpeechEnabled.get(this.session.settings)) {
+				vocalizer.speak(params.questions.map(q => q.question).join("\n"));
+			}
 
-		const richAskDialog = extensionUi.askDialog;
-		if (richAskDialog) {
-			try {
-				const showRichDialog = () =>
-					richAskDialog(
-						params.questions.map(q => ({
-							id: q.id,
-							question: q.question,
-							...(q.header?.trim() ? { header: q.header } : {}),
-							options: q.options.map(option => ({
-								label: option.label,
-								...(option.description?.trim() ? { description: option.description.trim() } : {}),
-								...(option.preview?.trim() ? { preview: option.preview } : {}),
+			const richAskDialog = extensionUi.askDialog;
+			if (richAskDialog) {
+				try {
+					const showRichDialog = () =>
+						richAskDialog(
+							params.questions.map(q => ({
+								id: q.id,
+								question: q.question,
+								...(q.header?.trim() ? { header: q.header } : {}),
+								options: q.options.map(option => ({
+									label: option.label,
+									...(option.description?.trim() ? { description: option.description.trim() } : {}),
+									...(option.preview?.trim() ? { preview: option.preview } : {}),
+								})),
+								...(q.multi !== undefined ? { multi: q.multi } : {}),
+								...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 							})),
-							...(q.multi !== undefined ? { multi: q.multi } : {}),
-							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
-						})),
-						{ timeout: timeout ?? undefined, signal },
-					);
-				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
-				if (!richResult) {
-					context.abort();
-					throw new ToolAbortError("Ask tool was cancelled by the user");
-				}
-				if (richResult.kind === "chat") {
-					const questionText = params.questions.map(q => q.question).join("\n");
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `User chose to chat about this instead of answering.\n\nQuestions asked:\n${questionText}`,
-							},
-						],
-						details: { chatRedirect: true, questions: params.questions.map(q => q.question) },
-					};
-				}
-				if (richResult.results.length !== params.questions.length) {
-					throw new Error("Ask dialog returned a result count that does not match the requested questions");
-				}
-				const results: QuestionResult[] = [];
-				for (let index = 0; index < params.questions.length; index++) {
-					const question = params.questions[index];
-					const result = richResult.results[index];
-					if (!question || !result || result.id !== question.id) {
-						throw new Error("Ask dialog returned results that do not match the requested question order");
-					}
-					results.push({
-						id: question.id,
-						question: question.question,
-						options: question.options.map(option => option.label),
-						multi: question.multi ?? false,
-						selectedOptions: result.selectedOptions,
-						customInput: result.customInput,
-						note: result.note,
-						timedOut: result.timedOut,
-					});
-				}
-				if (params.questions.length === 1) {
-					const result = results[0];
-					// An empty multi-select submission is a valid "select none"
-					// answer (#8265 review); only a truly empty single-select
-					// result counts as cancellation.
-					if (
-						!result ||
-						(!result.timedOut &&
-							!result.multi &&
-							result.selectedOptions.length === 0 &&
-							result.customInput === undefined)
-					) {
+							{ timeout: timeout ?? undefined, signal },
+						);
+					const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
+					if (!richResult) {
 						context.abort();
 						throw new ToolAbortError("Ask tool was cancelled by the user");
 					}
-					const details: AskToolDetails = {
-						question: result.question,
-						options: result.options,
-						multi: result.multi,
-						selectedOptions: result.selectedOptions,
-						customInput: result.customInput,
-						note: result.note,
-						timedOut: result.timedOut,
-					};
-					const responseText = formatSingleQuestionResponse(result);
+					if (richResult.kind === "chat") {
+						const questionText = params.questions.map(q => q.question).join("\n");
+						return {
+							content: [
+								{
+									type: "text" as const,
+									text: `User chose to chat about this instead of answering.\n\nQuestions asked:\n${questionText}`,
+								},
+							],
+							details: { chatRedirect: true, questions: params.questions.map(q => q.question) },
+						};
+					}
+					if (richResult.results.length !== params.questions.length) {
+						throw new Error("Ask dialog returned a result count that does not match the requested questions");
+					}
+					const results: QuestionResult[] = [];
+					for (let index = 0; index < params.questions.length; index++) {
+						const question = params.questions[index];
+						const result = richResult.results[index];
+						if (!question || !result || result.id !== question.id) {
+							throw new Error("Ask dialog returned results that do not match the requested question order");
+						}
+						results.push({
+							id: question.id,
+							question: question.question,
+							options: question.options.map(option => option.label),
+							multi: question.multi ?? false,
+							selectedOptions: result.selectedOptions,
+							customInput: result.customInput,
+							note: result.note,
+							timedOut: result.timedOut,
+						});
+					}
+					if (params.questions.length === 1) {
+						const result = results[0];
+						// An empty multi-select submission is a valid "select none"
+						// answer (#8265 review); only a truly empty single-select
+						// result counts as cancellation.
+						if (
+							!result ||
+							(!result.timedOut &&
+								!result.multi &&
+								result.selectedOptions.length === 0 &&
+								result.customInput === undefined)
+						) {
+							context.abort();
+							throw new ToolAbortError("Ask tool was cancelled by the user");
+						}
+						const details: AskToolDetails = {
+							question: result.question,
+							options: result.options,
+							multi: result.multi,
+							selectedOptions: result.selectedOptions,
+							customInput: result.customInput,
+							note: result.note,
+							timedOut: result.timedOut,
+						};
+						const responseText = formatSingleQuestionResponse(result);
+						return { content: [{ type: "text" as const, text: responseText }], details };
+					}
+					const details: AskToolDetails = { results };
+					const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
 					return { content: [{ type: "text" as const, text: responseText }], details };
+				} catch (error) {
+					if (error instanceof Error && error.name === "AbortError") {
+						throw new ToolAbortError("Ask input was cancelled");
+					}
+					throw error;
 				}
-				const details: AskToolDetails = { results };
-				const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
-				return { content: [{ type: "text" as const, text: responseText }], details };
-			} catch (error) {
-				if (error instanceof Error && error.name === "AbortError") {
-					throw new ToolAbortError("Ask input was cancelled");
+			}
+
+			const askQuestion = async (
+				q: AskParams["questions"][number],
+				options?: { previous?: QuestionResult; navigation?: NavigationControls },
+			) => {
+				const questionOptions = q.options.map(option => ({
+					label: option.label,
+					...(option.description?.trim() ? { description: option.description.trim() } : {}),
+				}));
+				const optionLabels = questionOptions.map(getAskOptionLabel);
+				try {
+					const { selectedOptions, customInput, note, navigation, cancelled, timedOut } = await askSingleQuestion(
+						ui,
+						q.question,
+						questionOptions,
+						q.multi ?? false,
+						{
+							recommended: q.recommended,
+							timeout: timeout ?? undefined,
+							signal,
+							initialSelection: options?.previous,
+							navigation: options?.navigation,
+						},
+					);
+					return { optionLabels, selectedOptions, customInput, note, navigation, cancelled, timedOut };
+				} catch (error) {
+					if (error instanceof Error && error.name === "AbortError") {
+						throw new ToolAbortError("Ask input was cancelled");
+					}
+					throw error;
 				}
-				throw error;
-			}
-		}
-
-		const askQuestion = async (
-			q: AskParams["questions"][number],
-			options?: { previous?: QuestionResult; navigation?: NavigationControls },
-		) => {
-			const questionOptions = q.options.map(option => ({
-				label: option.label,
-				...(option.description?.trim() ? { description: option.description.trim() } : {}),
-			}));
-			const optionLabels = questionOptions.map(getAskOptionLabel);
-			try {
-				const { selectedOptions, customInput, note, navigation, cancelled, timedOut } = await askSingleQuestion(
-					ui,
-					q.question,
-					questionOptions,
-					q.multi ?? false,
-					{
-						recommended: q.recommended,
-						timeout: timeout ?? undefined,
-						signal,
-						initialSelection: options?.previous,
-						navigation: options?.navigation,
-					},
-				);
-				return { optionLabels, selectedOptions, customInput, note, navigation, cancelled, timedOut };
-			} catch (error) {
-				if (error instanceof Error && error.name === "AbortError") {
-					throw new ToolAbortError("Ask input was cancelled");
-				}
-				throw error;
-			}
-		};
-
-		if (params.questions.length === 1) {
-			const [q] = params.questions;
-			const { optionLabels, selectedOptions, customInput, note, cancelled, timedOut } = await askQuestion(q);
-
-			if (!timedOut && (cancelled || (selectedOptions.length === 0 && customInput === undefined))) {
-				context.abort();
-				throw new ToolAbortError("Ask tool was cancelled by the user");
-			}
-			const details: AskToolDetails = {
-				question: q.question,
-				options: optionLabels,
-				multi: q.multi ?? false,
-				selectedOptions,
-				customInput,
-				note,
-				timedOut: timedOut || undefined,
 			};
 
-			const responseText = formatSingleQuestionResponse({
-				selectedOptions,
-				customInput,
-				note,
-				timedOut: timedOut || undefined,
-				multi: q.multi ?? false,
+			if (params.questions.length === 1) {
+				const [q] = params.questions;
+				const { optionLabels, selectedOptions, customInput, note, cancelled, timedOut } = await askQuestion(q);
+
+				if (!timedOut && (cancelled || (selectedOptions.length === 0 && customInput === undefined))) {
+					context.abort();
+					throw new ToolAbortError("Ask tool was cancelled by the user");
+				}
+				const details: AskToolDetails = {
+					question: q.question,
+					options: optionLabels,
+					multi: q.multi ?? false,
+					selectedOptions,
+					customInput,
+					note,
+					timedOut: timedOut || undefined,
+				};
+
+				const responseText = formatSingleQuestionResponse({
+					selectedOptions,
+					customInput,
+					note,
+					timedOut: timedOut || undefined,
+					multi: q.multi ?? false,
+				});
+
+				return { content: [{ type: "text" as const, text: responseText }], details };
+			}
+
+			const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
+			let questionIndex = 0;
+			while (questionIndex < params.questions.length) {
+				const q = params.questions[questionIndex];
+				if (!q) throw new Error("Ask question index exceeded the requested question list");
+				const previous = resultsByIndex[questionIndex];
+				const navigation: NavigationControls = {
+					allowBack: questionIndex > 0,
+					allowForward: true,
+					progressText: `${questionIndex + 1}/${params.questions.length}`,
+				};
+				const {
+					optionLabels,
+					selectedOptions,
+					customInput,
+					note,
+					navigation: navAction,
+					cancelled,
+					timedOut,
+				} = await askQuestion(q, { previous, navigation });
+
+				if (cancelled && !timedOut) {
+					context.abort();
+					throw new ToolAbortError("Ask tool was cancelled by the user");
+				}
+
+				resultsByIndex[questionIndex] = {
+					id: q.id,
+					question: q.question,
+					options: optionLabels,
+					multi: q.multi ?? false,
+					selectedOptions,
+					customInput,
+					note,
+					timedOut: timedOut || undefined,
+				};
+
+				if (navAction === "back") {
+					questionIndex = Math.max(0, questionIndex - 1);
+					continue;
+				}
+
+				questionIndex += 1;
+			}
+
+			const results = params.questions.map((q, index) => {
+				const result = resultsByIndex[index];
+				if (result) return result;
+				return {
+					id: q.id,
+					question: q.question,
+					options: q.options.map(o => o.label),
+					multi: q.multi ?? false,
+					selectedOptions: [],
+				};
 			});
 
+			const details: AskToolDetails = { results };
+			const responseLines = results.map(formatQuestionResult);
+			const responseText = `User answers:\n${responseLines.join("\n")}`;
+
 			return { content: [{ type: "text" as const, text: responseText }], details };
+		} finally {
+			// Clear the waiting notification on answer, cancellation, abort or timeout.
+			TERMINAL.closeNotification();
 		}
-
-		const resultsByIndex: Array<QuestionResult | undefined> = Array.from({ length: params.questions.length });
-		let questionIndex = 0;
-		while (questionIndex < params.questions.length) {
-			const q = params.questions[questionIndex];
-			if (!q) throw new Error("Ask question index exceeded the requested question list");
-			const previous = resultsByIndex[questionIndex];
-			const navigation: NavigationControls = {
-				allowBack: questionIndex > 0,
-				allowForward: true,
-				progressText: `${questionIndex + 1}/${params.questions.length}`,
-			};
-			const {
-				optionLabels,
-				selectedOptions,
-				customInput,
-				note,
-				navigation: navAction,
-				cancelled,
-				timedOut,
-			} = await askQuestion(q, { previous, navigation });
-
-			if (cancelled && !timedOut) {
-				context.abort();
-				throw new ToolAbortError("Ask tool was cancelled by the user");
-			}
-
-			resultsByIndex[questionIndex] = {
-				id: q.id,
-				question: q.question,
-				options: optionLabels,
-				multi: q.multi ?? false,
-				selectedOptions,
-				customInput,
-				note,
-				timedOut: timedOut || undefined,
-			};
-
-			if (navAction === "back") {
-				questionIndex = Math.max(0, questionIndex - 1);
-				continue;
-			}
-
-			questionIndex += 1;
-		}
-
-		const results = params.questions.map((q, index) => {
-			const result = resultsByIndex[index];
-			if (result) return result;
-			return {
-				id: q.id,
-				question: q.question,
-				options: q.options.map(o => o.label),
-				multi: q.multi ?? false,
-				selectedOptions: [],
-			};
-		});
-
-		const details: AskToolDetails = { results };
-		const responseLines = results.map(formatQuestionResult);
-		const responseText = `User answers:\n${responseLines.join("\n")}`;
-
-		return { content: [{ type: "text" as const, text: responseText }], details };
 	}
 }
 

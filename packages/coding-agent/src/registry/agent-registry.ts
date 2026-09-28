@@ -90,6 +90,7 @@ export type AgentRefExpectation = AgentRef | AgentSession;
 
 export type RegistryEvent =
 	| { type: "registered"; ref: AgentRef }
+	| { type: "session_attached"; ref: AgentRef }
 	| { type: "status_changed"; ref: AgentRef }
 	| { type: "metadata_changed"; ref: AgentRef }
 	| { type: "removed"; ref: AgentRef };
@@ -301,6 +302,7 @@ export class AgentRegistry {
 		ref.session = session;
 		if (sessionFile !== undefined) ref.sessionFile = sessionFile;
 		ref.lastActivity = Date.now();
+		this.#emit({ type: "session_attached", ref });
 		return true;
 	}
 

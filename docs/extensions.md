@@ -232,6 +232,7 @@ export default function (pi: ExtensionAPI) {
 - `deliverAs: "nextTurn"` — stored and injected on the next user prompt
 - `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch; when idle it starts a turn (`triggerTurn` is ignored; plan mode folds it into context instead)
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
+- `evaluateToolCalls: true` — parses `<invoke name="tool"><parameter name="argument">value</parameter></invoke>` blocks in string content, executes the registered tools through the normal approval wrappers, and delivers the paired assistant/tool-result exchange using `deliverAs`. Schema-declared string arguments remain strings. Unknown tools are skipped; execution failures become error results.
 
 `pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes. Set `deliverAs: "aside"` to inject the prompt at the next step boundary while a run is live (idle sends start a turn as usual). The message is recorded with `attribution: "user"` unless you pass `attribution: "agent"`; pass `"agent"` for text the extension generated or relayed from another agent, so consumers can tell it apart from what the user typed.
 
@@ -246,6 +247,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `cwd`
 - `sessionManager` (read-only)
 - `modelRegistry`, `model`
+- `settings` (optional session-scoped settings, including subagent overrides; prefer this over the process-global singleton)
 - `models` (read-only model query — see below)
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`

@@ -57,6 +57,7 @@ import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage
 import {
 	type AgentSession,
 	type AgentSessionEvent,
+	type FollowUpAdmission,
 	type Prewalk,
 	PromptDroppedError,
 	type PromptOptions,
@@ -64,7 +65,9 @@ import {
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL, type CustomMessage } from "../session/messages";
+import type { SessionEntry } from "../session/session-entries";
+import { visitEntriesFromFileStream } from "../session/session-loader";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
@@ -677,6 +680,8 @@ interface FinalizeSubprocessOutputArgs {
 	doneAborted: boolean;
 	signalAborted: boolean;
 	yieldItems?: YieldItem[];
+	/** A recoverable pause is not an ordinary no-yield completion. */
+	paused?: boolean;
 	outputSchema: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -820,7 +825,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			}
 		}
 	} else {
-		const allowFallback = exitCode === 0 && !doneAborted && !signalAborted;
+		const allowFallback = exitCode === 0 && !doneAborted && !signalAborted && !args.paused;
 		const { normalized: normalizedSchema, error: schemaError } = normalizeSchema(outputSchema);
 		const hasOutputSchema = normalizedSchema !== undefined && !schemaError;
 		const fallback = allowFallback ? resolveFallbackCompletion(rawOutput, outputSchema) : null;
@@ -858,7 +863,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		} else if (!hasOutputSchema && allowFallback && rawOutput.trim().length > 0) {
 			exitCode = 0;
 			stderr = "";
-		} else if (exitCode === 0) {
+		} else if (exitCode === 0 && !args.paused) {
 			const hasRawOutput = rawOutput.trim().length > 0;
 			rawOutput = rawOutput ? `${SUBAGENT_WARNING_MISSING_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_MISSING_YIELD;
 			if (hasOutputSchema || !hasRawOutput) {
@@ -1179,6 +1184,10 @@ interface SubagentRunMonitor {
 	yieldTurnStopRequested(): boolean;
 	/** Resolves when the yield turn-stop session abort has settled (immediately when none fired). */
 	waitForYieldTurnStop(): Promise<void>;
+	/** The first successful terminal tool result that requested a recoverable pause. */
+	pauseRequested(): { toolName: string; toolCallId: string } | undefined;
+	/** Wake the owner-work barrier if an external operation pauses this run. */
+	waitForPause(): Promise<void>;
 	/** The abort kind for this run, when an abort was requested. */
 	abortKind(): AbortReason | undefined;
 	terminalError(): string | undefined;
@@ -1288,6 +1297,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let yieldAcceptedAt: number | undefined;
 	let yieldTurnStopRequested = false;
 	let yieldTurnStopPromise: Promise<void> | null = null;
+	let paused: { toolName: string; toolCallId: string } | undefined;
+	let pauseGate: PromiseWithResolvers<void> | undefined;
 
 	// Accumulate usage incrementally from message_end events (no memory for streaming events)
 	const accumulatedUsage: Usage = {
@@ -1415,6 +1426,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					});
 				})
 			: Promise.resolve();
+	};
+
+	// Stop this provider turn without aborting the run signal or rejecting its
+	// successful tool result. The session is retained for a later follow-up.
+	const requestPause = (toolName: string, toolCallId: string): void => {
+		if (paused || abortSent || resolved) return;
+		paused = { toolName, toolCallId };
+		pauseGate?.resolve();
+		void abortActiveSession();
 	};
 
 	/** Owner async work that can still re-wake the run (quiescence barrier predicate). */
@@ -1747,16 +1767,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				const handler = subprocessToolRegistry.getHandler(event.toolName);
 				const eventRecord: unknown = event;
 				const eventArgs = isRecord(eventRecord) && isRecord(eventRecord.args) ? eventRecord.args : {};
+				const toolEvent = {
+					toolName: event.toolName,
+					toolCallId: event.toolCallId,
+					args: eventArgs,
+					result: event.result,
+					isError: event.isError,
+				};
 				if (handler) {
 					// Extract data using handler
 					if (handler.extractData) {
-						const data = handler.extractData({
-							toolName: event.toolName,
-							toolCallId: event.toolCallId,
-							args: eventArgs,
-							result: event.result,
-							isError: event.isError,
-						});
+						const data = handler.extractData(toolEvent);
 						if (data !== undefined) {
 							recordExtractedToolData(event.toolName, data);
 						}
@@ -1772,27 +1793,24 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						}
 					}
 
-					// Check if the handler wants to terminate the session. A forced
-					// final yield terminates too: it was accepted as terminal above,
-					// and leaving the turn running would let the pinned model answer
-					// with another incremental section instead of finishing.
-					const wantsTerminate =
-						handler.shouldTerminate?.({
-							toolName: event.toolName,
-							toolCallId: event.toolCallId,
-							args: eventArgs,
-							result: event.result,
-							isError: event.isError,
-						}) === true;
-					const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
-					if (wantsTerminate || forcedFinalYield) {
-						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
-							// Terminal yield with owner jobs still pending: park the
-							// run behind the quiescence barrier instead of completing
-							// it (see requestYieldTurnStop).
-							requestYieldTurnStop();
-						} else {
-							requestAbort("terminate");
+					// The explicit disposition wins over the legacy boolean. Failed
+					// tool calls cannot stop a run, nor can a second tool result
+					// supersede the first accepted pause.
+					if (!event.isError && !paused) {
+						const disposition =
+							handler.terminalDisposition?.(toolEvent) ??
+							(handler.shouldTerminate?.(toolEvent) ? "terminate" : undefined);
+						const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
+						if (disposition === "pause") {
+							requestPause(event.toolName, event.toolCallId);
+						} else if (disposition === "terminate" || forcedFinalYield) {
+							if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
+								// Terminal yield with owner jobs still pending: park the
+								// run behind the quiescence barrier instead of completing it.
+								requestYieldTurnStop();
+							} else {
+								requestAbort("terminate");
+							}
 						}
 					}
 				}
@@ -2103,6 +2121,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		budgetStopRequested: () => budgetStopRequested,
 		waitForBudgetStop: () => budgetStopAbortPromise ?? Promise.resolve(),
 		yieldInvalidatedByAsync: () => yieldInvalidatedByAsync,
+		pauseRequested: () => paused,
+		waitForPause: () => (paused ? Promise.resolve() : (pauseGate ??= Promise.withResolvers<void>()).promise),
 		yieldTurnStopRequested: () => yieldTurnStopRequested,
 		waitForYieldTurnStop: async () => {
 			const pending = yieldTurnStopPromise;
@@ -2199,9 +2219,11 @@ async function driveSessionToYield(
 		 * while backing off. Absent, the busy error keeps the old path.
 		 */
 		onPromptBusy?: () => Promise<void>;
+		/** First-turn persisted prompt; reminders still use normal dispatch. */
+		startPrompt?: (session: AgentSession, message: string) => Promise<boolean | void>;
 	} = {},
 ): Promise<DriveOutcome> {
-	const { solutionSpace, onPromptBusy } = options;
+	const { solutionSpace, onPromptBusy, startPrompt } = options;
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
 	let exitCode = 0;
@@ -2283,7 +2305,13 @@ async function driveSessionToYield(
 			let promptAttempts = 0;
 			for (;;) {
 				try {
-					await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
+					if (startPrompt) {
+						const dispatched = await awaitAbortable(startPrompt(session, task));
+						if (dispatched === false)
+							throw new PromptDispatchError("Durable follow-up dropped before provider dispatch");
+					} else {
+						await dispatchPrompt(task, { attribution: "agent", solutionSpace }, "initial prompt");
+					}
 					break;
 				} catch (error) {
 					promptAttempts++;
@@ -2299,9 +2327,16 @@ async function driveSessionToYield(
 			// prompt. Swallow it and drive the barrier/forced final yield
 			// below; real caller/timeout aborts (monitor signal) and genuine
 			// failures keep the old path.
-			const recoverableStop = monitor.budgetStopRequested() || monitor.yieldTurnStopRequested();
-			if (!recoverableStop || abortSignal.aborted || err instanceof PromptDispatchError) throw err;
+			const recoverableStop =
+				monitor.budgetStopRequested() || monitor.yieldTurnStopRequested() || monitor.pauseRequested() !== undefined;
+			if (
+				!recoverableStop ||
+				abortSignal.aborted ||
+				(err instanceof PromptDispatchError && !monitor.pauseRequested())
+			)
+				throw err;
 		}
+		if (monitor.pauseRequested() && !abortSignal.aborted) return { exitCode: 0, aborted: false };
 
 		const reminderToolChoice = buildNamedToolChoice("yield", session.model);
 
@@ -2309,6 +2344,7 @@ async function driveSessionToYield(
 			let retryCount = 0;
 			let retriesForced = false;
 			while (!monitor.yieldCalled() && retryCount < MAX_YIELD_RETRIES && !abortSignal.aborted) {
+				if (monitor.pauseRequested()) return;
 				// A budget stop collapses the reminder ladder to a single forced
 				// final yield: wait for the stop's session abort to settle, then
 				// prompt once with the wrap-up reminder + named tool choice.
@@ -2316,7 +2352,7 @@ async function driveSessionToYield(
 				if (budgetStop) {
 					retryCount = MAX_YIELD_RETRIES - 1;
 					await monitor.waitForBudgetStop();
-					if (monitor.yieldCalled() || abortSignal.aborted) break;
+					if (monitor.pauseRequested() || monitor.yieldCalled() || abortSignal.aborted) break;
 				}
 				// Skip reminders when the model returned a terminal error (e.g.
 				// rate-limit cap hit, auth failure). Re-prompting would just
@@ -2351,8 +2387,11 @@ async function driveSessionToYield(
 						"yield reminder",
 						{ forceFinalYield: isFinalRetry },
 					);
+					if (monitor.pauseRequested()) return;
 					await awaitAbortable(session.waitForIdle());
+					if (monitor.pauseRequested()) return;
 				} catch (err) {
+					if (monitor.pauseRequested()) return;
 					if (err instanceof PromptDispatchError) throw err;
 					if (abortSignal.aborted || err instanceof ToolAbortError) {
 						// Benign control-flow exit — user cancel (^C) or compaction aborting
@@ -2400,8 +2439,10 @@ async function driveSessionToYield(
 		// model error, skip the barrier; teardown reaps their jobs.
 		let asyncPendingNoticeSent = false;
 		while (!abortSignal.aborted) {
+			if (monitor.pauseRequested()) return { exitCode: 0, aborted: false };
 			if (!monitor.yieldCalled()) {
 				await runYieldLadder();
+				if (monitor.pauseRequested()) return { exitCode: 0, aborted: false };
 				if (
 					!monitor.yieldCalled() &&
 					(monitor.budgetStopRequested() ||
@@ -2413,12 +2454,14 @@ async function driveSessionToYield(
 			// Let the parked yield's turn-stop session abort settle before
 			// prompting again (mirrors waitForBudgetStop).
 			await awaitAbortable(monitor.waitForYieldTurnStop());
+			if (monitor.pauseRequested()) return { exitCode: 0, aborted: false };
 			if (!session.hasPendingAsyncWork()) {
 				if (monitor.yieldCalled()) break;
 				continue;
 			}
 			if (!monitor.yieldCalled()) {
-				await awaitAbortable(session.settleAsyncWork());
+				await awaitAbortable(Promise.race([session.settleAsyncWork(), monitor.waitForPause()]));
+				if (monitor.pauseRequested()) return { exitCode: 0, aborted: false };
 				continue;
 			}
 			if (!asyncPendingNoticeSent) {
@@ -2433,8 +2476,11 @@ async function driveSessionToYield(
 					});
 					try {
 						await dispatchPrompt(notice, { attribution: "agent", synthetic: true }, "async-pending notice");
+						if (monitor.pauseRequested()) return { exitCode: 0, aborted: false };
 						await awaitAbortable(session.waitForIdle());
+						if (monitor.pauseRequested()) return { exitCode: 0, aborted: false };
 					} catch (err) {
+						if (monitor.pauseRequested()) return { exitCode: 0, aborted: false };
 						if (abortSignal.aborted || err instanceof ToolAbortError || err instanceof PromptDispatchError)
 							throw err;
 						// Other notice-turn failures leave the pending jobs to settle passively.
@@ -2447,13 +2493,15 @@ async function driveSessionToYield(
 					continue;
 				}
 			}
-			await awaitAbortable(session.settleAsyncWork());
+			await awaitAbortable(Promise.race([session.settleAsyncWork(), monitor.waitForPause()]));
+			if (monitor.pauseRequested()) return { exitCode: 0, aborted: false };
 			// Results delivered during the settle invalidated the recorded
 			// yield: the next iteration's ladder demands a fresh one.
 		}
 
 		if (!monitor.yieldCalled()) {
 			await awaitAbortable(session.waitForIdle());
+			if (monitor.pauseRequested()) return { exitCode: 0, aborted: false };
 		}
 
 		const lastAssistant = session.getLastAssistantMessage();
@@ -2561,6 +2609,10 @@ interface FinalizeRunArgs {
 async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	const { monitor, done, index, id, agent, task, assignment, signal, modelOverride, modelRole } = args;
 	const progress = monitor.progress;
+	const paused = Boolean(
+		monitor.pauseRequested() && !done.aborted && !done.error && !signal?.aborted && !monitor.runtimeLimitExceeded(),
+	);
+	const pause = paused ? monitor.pauseRequested() : undefined;
 	let exitCode = done.exitCode;
 	let stderr = done.error ?? "";
 
@@ -2578,6 +2630,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			stderr,
 			doneAborted: Boolean(done.aborted),
 			signalAborted: Boolean(signal?.aborted),
+			paused,
 			yieldItems,
 			outputSchema: args.outputSchema,
 			outputSchemaMode: args.outputSchemaMode,
@@ -2692,7 +2745,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		exitCode = 1;
 	}
 	const wasAborted =
-		runtimeLimitExceeded || Boolean(done.aborted) || abortedViaYield || (!hasYield && Boolean(signal?.aborted));
+		!paused &&
+		(runtimeLimitExceeded || Boolean(done.aborted) || abortedViaYield || (!hasYield && Boolean(signal?.aborted)));
 	const finalAbortReason = wasAborted
 		? runtimeLimitExceeded
 			? monitor.resolveAbortReasonText()
@@ -2704,7 +2758,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 						? monitor.resolveSignalAbortReason()
 						: monitor.resolveAbortReasonText()
 		: undefined;
-	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
+	progress.status = paused ? "paused" : wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
 	monitor.scheduleProgress(true);
 
 	// Emit lifecycle end event after finalization so yield status is reflected
@@ -2715,7 +2769,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		detached: args.detached,
 		agentSource: agent.source,
 		description: progress.description,
-		status: progress.status as "completed" | "failed" | "aborted",
+		status: progress.status as "paused" | "completed" | "failed" | "aborted",
 		sessionFile: args.sessionFile,
 		index,
 	};
@@ -2748,9 +2802,10 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
 		resolvedModelRoute: progress.resolvedModelRoute,
 		advisor: progress.advisor,
-		error: exitCode !== 0 && stderr ? stderr : undefined,
-		aborted: wasAborted,
-		abortReason: finalAbortReason,
+		error: paused ? undefined : exitCode !== 0 && stderr ? stderr : undefined,
+		aborted: paused ? undefined : wasAborted,
+		abortReason: paused ? undefined : finalAbortReason,
+		...(pause ? { paused: pause } : {}),
 		usage: monitor.hasUsage() ? monitor.accumulatedUsage : undefined,
 		outputPath,
 		extractedToolData: progress.extractedToolData,
@@ -2779,6 +2834,8 @@ export interface IrcWakeTurnMonitorOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	artifactsDir?: string;
+	/** Lifecycle admission gate before autonomous IRC wake dispatch. */
+	beforeWake?: FollowUpAdmission;
 }
 
 /** Sender + message id of one `irc:incoming` record that woke a turn. */
@@ -2833,7 +2890,8 @@ async function relayWakeTurnOutput(args: {
 	const bus = IrcBus.global();
 	const sources = wakeSources(args.records, args.id);
 	if (sources.length === 0) return;
-	const failed = args.error !== undefined || args.aborted || args.finalizeError !== undefined;
+	const failed =
+		args.error !== undefined || args.aborted || args.finalizeError !== undefined || args.result?.paused !== undefined;
 	for (const source of sources) {
 		if (source.from === args.jobOwnerId) continue;
 		const alreadyMessaged = bus.sentSince(args.id, source.from, args.turnStartTime);
@@ -2891,6 +2949,10 @@ export function buildWakeRelayBody(args: {
 			? formatTaskResultSummary(args.result, { totalDurationMs: args.result.durationMs })
 			: undefined;
 
+	if (args.result?.paused && !args.error && !args.aborted && !args.finalizeError) {
+		return `Wake turn paused awaiting follow-up. ${transcript}`;
+	}
+
 	const headline = args.error
 		? `Wake turn failed: ${args.error}.`
 		: args.aborted
@@ -2944,6 +3006,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const { id, agent } = options;
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
+	session.setIrcWakeTurnAdmission(options.beforeWake);
 	session.setIrcWakeTurnObserver(records => {
 		// Autonomous IRC wake turns reuse the session's YieldTool just like
 		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
@@ -3036,7 +3099,12 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			const lastAssistant = session.getLastAssistantMessage();
 			const yielded = turnMonitor.yieldCalled();
 			const runtimeLimitExceeded = turnMonitor.runtimeLimitExceeded();
-			const aborted = runtimeLimitExceeded || (lastAssistant?.stopReason === "aborted" && !yielded);
+			const pauseAccepted =
+				turnMonitor.pauseRequested() !== undefined && AgentRegistry.global().get(id)?.session === session;
+			const aborted =
+				runtimeLimitExceeded ||
+				(!pauseAccepted && turnMonitor.pauseRequested() !== undefined) ||
+				(!pauseAccepted && lastAssistant?.stopReason === "aborted" && !yielded);
 			// Two error lanes. `error` carries full diagnostics (a thrown turn
 			// error's stack) for `done.error`, logs, and lifecycle. `errorForPeer`
 			// carries only the short, attributed message: a stack trace injected
@@ -3045,7 +3113,13 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				lastAssistant?.stopReason === "error"
 					? attributeSubagentError(lastAssistant.errorMessage, lastAssistant)
 					: undefined;
-			const thrown = providerError === undefined && turnError !== undefined && !yielded ? turnError : undefined;
+			const thrown =
+				providerError === undefined &&
+				turnError !== undefined &&
+				!yielded &&
+				!(pauseAccepted && turnError instanceof ToolAbortError)
+					? turnError
+					: undefined;
 			const error =
 				providerError ??
 				(thrown instanceof Error
@@ -3057,10 +3131,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				providerError ??
 				(thrown instanceof Error ? thrown.message : thrown === undefined ? undefined : String(thrown));
 			turnMonitor.finish();
-			if (yielded) {
-				// Acceptance boundary for an autonomous wake turn (#11079): the
-				// turn's terminal yield is settled, so terminalize the ref here
-				// even when the run-state mirror never delivers `idle`.
+			if (yielded || pauseAccepted) {
+				// An accepted yield or recoverable pause ends this wake run.
+				// Terminalize the exact session even if its run-state mirror
+				// never emitted idle; a stale/released session cannot stamp it.
 				AgentRegistry.global().markResultAccepted(id, session, turnMonitor.yieldAcceptedAt());
 			}
 			// Read before finalization: a schema-bearing agent that answered in
@@ -3123,19 +3197,24 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				// wake turn must still tell whoever woke it, or a `send await:true`
 				// waiter mistakes a dead peer for a healthy-but-silent one.
 				try {
-					await relayWakeTurnOutput({
-						id,
-						records,
-						turnStartTime,
-						yielded,
-						result,
-						turnText,
-						error: errorForPeer,
-						aborted,
-						abortReason,
-						finalizeError,
-						jobOwnerId: wakeJob?.ownerId,
-					});
+					// A release/kill may detach this exact session during the
+					// provider turn. Never relay a stale turn after ownership
+					// changed, even if a newer incarnation uses the same id.
+					if (AgentRegistry.global().get(id)?.session === session) {
+						await relayWakeTurnOutput({
+							id,
+							records,
+							turnStartTime,
+							yielded,
+							result,
+							turnText,
+							error: errorForPeer,
+							aborted,
+							abortReason,
+							finalizeError,
+							jobOwnerId: wakeJob?.ownerId,
+						});
+					}
 				} catch (relayError) {
 					logger.warn("IRC wake-turn relay threw", {
 						id,
@@ -3304,6 +3383,339 @@ export interface FollowUpTurnOptions {
 	workPoolYieldItems?: WorkPoolYieldItem[];
 }
 
+/** Caller-owned key for an at-most-once persisted subagent follow-up. */
+export interface DurableFollowUpTurnOptions extends Omit<FollowUpTurnOptions, "message"> {
+	message: string;
+	deliveryKey: string;
+}
+
+export type DurableFollowUpState = "absent" | "appended" | "answered";
+
+export interface DurableFollowUpResult {
+	delivery: "already-appended" | "already-answered" | "appended";
+	result?: SingleResult;
+}
+
+const DURABLE_FOLLOW_UP_CUSTOM_TYPE = "subagent-durable-follow-up";
+const durableFollowUpLockTails = new Map<string, Promise<void>>();
+
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function isTextOrImageContentBlock(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	if (value.type === "text") return typeof value.text === "string";
+	return value.type === "image" && typeof value.data === "string" && typeof value.mimeType === "string";
+}
+
+function isTextOrImageContent(value: unknown): boolean {
+	return Array.isArray(value) && value.every(isTextOrImageContentBlock);
+}
+
+function isMessageContent(value: unknown): boolean {
+	return typeof value === "string" || isTextOrImageContent(value);
+}
+
+function isAssistantContentBlock(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	if (isTextOrImageContentBlock(value)) return true;
+	if (value.type === "thinking") return typeof value.thinking === "string";
+	if (value.type === "redactedThinking") return typeof value.data === "string";
+	if (value.type === "toolCall") {
+		return typeof value.id === "string" && typeof value.name === "string" && isRecord(value.arguments);
+	}
+	if (value.type === "fallback") {
+		return (
+			isRecord(value.from) &&
+			typeof value.from.model === "string" &&
+			isRecord(value.to) &&
+			typeof value.to.model === "string"
+		);
+	}
+	if (value.type === "anthropicServerTool") {
+		if (!isRecord(value.block) || typeof value.block.type !== "string") return false;
+		if (value.block.type === "server_tool_use") {
+			return typeof value.block.id === "string" && typeof value.block.name === "string";
+		}
+		return (
+			(value.block.type === "web_search_tool_result" || value.block.type === "tool_search_tool_result") &&
+			typeof value.block.tool_use_id === "string"
+		);
+	}
+	return false;
+}
+
+function isUsage(value: unknown): boolean {
+	if (!isRecord(value) || !isRecord(value.cost)) return false;
+	return (
+		isFiniteNumber(value.input) &&
+		isFiniteNumber(value.output) &&
+		isFiniteNumber(value.cacheRead) &&
+		isFiniteNumber(value.cacheWrite) &&
+		isFiniteNumber(value.totalTokens) &&
+		isFiniteNumber(value.cost.input) &&
+		isFiniteNumber(value.cost.output) &&
+		isFiniteNumber(value.cost.cacheRead) &&
+		isFiniteNumber(value.cost.cacheWrite) &&
+		isFiniteNumber(value.cost.total)
+	);
+}
+
+function isAttributedMessage(value: Record<string, unknown>): boolean {
+	return value.attribution === undefined || value.attribution === "user" || value.attribution === "agent";
+}
+
+function isStructurallyValidMessage(message: unknown): boolean {
+	if (!isRecord(message) || typeof message.role !== "string" || !isFiniteNumber(message.timestamp)) return false;
+	switch (message.role) {
+		case "user":
+		case "developer":
+			return isMessageContent(message.content) && isAttributedMessage(message);
+		case "assistant":
+			return (
+				Array.isArray(message.content) &&
+				message.content.every(isAssistantContentBlock) &&
+				typeof message.api === "string" &&
+				typeof message.provider === "string" &&
+				typeof message.model === "string" &&
+				isUsage(message.usage) &&
+				["stop", "length", "toolUse", "error", "aborted"].includes(message.stopReason as string) &&
+				(message.stopDetails === undefined || message.stopDetails === null || isRecord(message.stopDetails))
+			);
+		case "toolResult":
+			return (
+				typeof message.toolCallId === "string" &&
+				typeof message.toolName === "string" &&
+				isTextOrImageContent(message.content) &&
+				typeof message.isError === "boolean" &&
+				isAttributedMessage(message)
+			);
+		case "custom":
+		case "hookMessage":
+			return (
+				typeof message.customType === "string" &&
+				isMessageContent(message.content) &&
+				typeof message.display === "boolean" &&
+				isAttributedMessage(message)
+			);
+		case "bashExecution":
+		case "pythonExecution":
+			return (
+				typeof (message.role === "bashExecution" ? message.command : message.code) === "string" &&
+				typeof message.output === "string" &&
+				(message.exitCode === undefined || isFiniteNumber(message.exitCode)) &&
+				typeof message.cancelled === "boolean" &&
+				typeof message.truncated === "boolean"
+			);
+		case "fileMention":
+			return (
+				Array.isArray(message.files) &&
+				message.files.every(
+					file =>
+						isRecord(file) &&
+						typeof file.path === "string" &&
+						typeof file.content === "string" &&
+						(file.lineCount === undefined || isFiniteNumber(file.lineCount)) &&
+						(file.byteSize === undefined || isFiniteNumber(file.byteSize)) &&
+						(file.skippedReason === undefined || ["tooLarge", "binary"].includes(file.skippedReason as string)) &&
+						(file.image === undefined || isTextOrImageContentBlock(file.image)),
+				)
+			);
+		case "branchSummary":
+			return typeof message.summary === "string" && typeof message.fromId === "string";
+		case "compactionSummary":
+			return typeof message.summary === "string" && isFiniteNumber(message.tokensBefore);
+		default:
+			return false;
+	}
+}
+
+/**
+ * Streaming transcript readers return parsed JSON typed as FileEntry. Before
+ * using its ids and payloads as delivery evidence, restore structural checks:
+ * invalid or unknown entries must fail closed, not imply the key was absent.
+ */
+function isStructurallyValidSessionEntry(entry: unknown): entry is SessionEntry {
+	if (
+		!isRecord(entry) ||
+		typeof entry.id !== "string" ||
+		(entry.parentId !== null && typeof entry.parentId !== "string") ||
+		typeof entry.timestamp !== "string"
+	)
+		return false;
+	switch (entry.type) {
+		case "message":
+			return isStructurallyValidMessage(entry.message);
+		case "model_usage":
+			return (
+				typeof entry.purpose === "string" &&
+				typeof entry.api === "string" &&
+				typeof entry.provider === "string" &&
+				typeof entry.model === "string" &&
+				isUsage(entry.usage) &&
+				typeof entry.stopReason === "string"
+			);
+		case "thinking_level_change":
+			return (
+				entry.thinkingLevel === undefined || entry.thinkingLevel === null || typeof entry.thinkingLevel === "string"
+			);
+		case "model_change":
+			return typeof entry.model === "string" && (entry.role === undefined || typeof entry.role === "string");
+		case "service_tier_change":
+			return "serviceTier" in entry && (entry.serviceTier === null || isRecord(entry.serviceTier));
+		case "compaction":
+			return (
+				typeof entry.summary === "string" &&
+				typeof entry.firstKeptEntryId === "string" &&
+				isFiniteNumber(entry.tokensBefore)
+			);
+		case "branch_summary":
+			return typeof entry.fromId === "string" && typeof entry.summary === "string";
+		case "custom":
+			return typeof entry.customType === "string";
+		case "custom_message":
+			return (
+				typeof entry.customType === "string" &&
+				isMessageContent(entry.content) &&
+				typeof entry.display === "boolean" &&
+				isAttributedMessage(entry)
+			);
+		case "label":
+			return typeof entry.targetId === "string" && (entry.label === undefined || typeof entry.label === "string");
+		case "title_change":
+			return (
+				typeof entry.title === "string" &&
+				(entry.previousTitle === undefined || typeof entry.previousTitle === "string") &&
+				(entry.source === "auto" || entry.source === "user")
+			);
+		case "ttsr_injection":
+			return Array.isArray(entry.injectedRules) && entry.injectedRules.every(rule => typeof rule === "string");
+		case "session_init":
+			return (
+				typeof entry.systemPrompt === "string" &&
+				typeof entry.task === "string" &&
+				Array.isArray(entry.tools) &&
+				entry.tools.every(tool => typeof tool === "string")
+			);
+		case "mode_change":
+			return typeof entry.mode === "string" && (entry.data === undefined || isRecord(entry.data));
+		case "credential_pin":
+			return typeof entry.provider === "string" && typeof entry.hash === "string";
+		case "reset_boundary":
+			return true;
+		default:
+			return false;
+	}
+}
+
+async function withDurableFollowUpLock<T>(id: string, deliveryKey: string, operation: () => Promise<T>): Promise<T> {
+	const lockKey = JSON.stringify([id, deliveryKey]);
+	const predecessor = durableFollowUpLockTails.get(lockKey) ?? Promise.resolve();
+	const completion = Promise.withResolvers<void>();
+	durableFollowUpLockTails.set(lockKey, completion.promise);
+	await predecessor;
+	try {
+		return await operation();
+	} finally {
+		completion.resolve();
+		if (durableFollowUpLockTails.get(lockKey) === completion.promise) durableFollowUpLockTails.delete(lockKey);
+	}
+}
+
+/** Inspect only the active branch; malformed records and missing transcripts fail closed. */
+export async function inspectDurableFollowUp(sessionFile: string, deliveryKey: string): Promise<DurableFollowUpState> {
+	const entries = new Map<string, SessionEntry>();
+	let leafId: string | undefined;
+	let malformedRecords = 0;
+	let invalidEntries = 0;
+	let sawSessionHeader = false;
+	await visitEntriesFromFileStream(
+		sessionFile,
+		entry => {
+			if (!sawSessionHeader) {
+				if (
+					!isRecord(entry) ||
+					entry.type !== "session" ||
+					typeof entry.id !== "string" ||
+					typeof entry.timestamp !== "string" ||
+					typeof entry.cwd !== "string"
+				) {
+					invalidEntries++;
+					return;
+				}
+				sawSessionHeader = true;
+				return;
+			}
+			if (
+				!isStructurallyValidSessionEntry(entry) ||
+				entries.has(entry.id) ||
+				(entry.parentId !== null && !entries.has(entry.parentId))
+			) {
+				invalidEntries++;
+				return;
+			}
+			entries.set(entry.id, entry);
+			leafId = entry.id;
+		},
+		{
+			throwIfMissing: true,
+			onMalformedRecord: () => {
+				malformedRecords++;
+			},
+		},
+	);
+	if (malformedRecords)
+		throw new Error(
+			`Cannot inspect durable follow-up in ${sessionFile}: transcript contains malformed JSONL records.`,
+		);
+	if (invalidEntries || !sawSessionHeader) {
+		throw new Error(
+			`Cannot inspect durable follow-up in ${sessionFile}: transcript contains invalid session entries.`,
+		);
+	}
+
+	const activeBranch: SessionEntry[] = [];
+	const seen = new Set<string>();
+	let current = leafId ? entries.get(leafId) : undefined;
+	while (current) {
+		if (seen.has(current.id))
+			throw new Error(`Cannot inspect durable follow-up in ${sessionFile}: invalid parent cycle.`);
+		seen.add(current.id);
+		activeBranch.push(current);
+		if (current.parentId === null) break;
+		current = entries.get(current.parentId);
+		if (!current) throw new Error(`Cannot inspect durable follow-up in ${sessionFile}: invalid parent link.`);
+	}
+	let delivered = false;
+	for (let index = activeBranch.length - 1; index >= 0; index--) {
+		const entry = activeBranch[index]!;
+		if (
+			entry.type === "custom_message" &&
+			entry.customType === DURABLE_FOLLOW_UP_CUSTOM_TYPE &&
+			isRecord(entry.details) &&
+			entry.details.deliveryKey === deliveryKey
+		) {
+			delivered = true;
+		} else if (delivered && entry.type === "message" && entry.message.role === "assistant") {
+			return "answered";
+		}
+	}
+	return delivered ? "appended" : "absent";
+}
+
+function durableFollowUpMessage(message: string, deliveryKey: string): CustomMessage<{ deliveryKey: string }> {
+	return {
+		role: "custom",
+		customType: DURABLE_FOLLOW_UP_CUSTOM_TYPE,
+		content: message,
+		display: true,
+		attribution: "user",
+		details: { deliveryKey },
+		timestamp: Date.now(),
+	};
+}
+
 /**
  * Continue a previously spawned (keep-alive) subagent with one more monitored
  * turn: revive it if parked, send `message` as a real prompt, drive it to
@@ -3315,11 +3727,18 @@ export interface FollowUpTurnOptions {
  * stays adopted by the {@link AgentLifecycleManager} (idle → TTL park →
  * revive), and an aborted turn only aborts the in-flight turn.
  */
-export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
+async function executeSubagentFollowUpTurn(args: {
+	options: FollowUpTurnOptions;
+	session: AgentSession;
+	sessionFile?: string;
+	startTime: number;
+	startPrompt?: (session: AgentSession, message: string) => Promise<boolean | void>;
+}): Promise<SingleResult> {
+	const { options, sessionFile, startTime, startPrompt } = args;
 	const { id, agent, message, signal } = options;
+	signal?.throwIfAborted();
 	const index = options.index ?? 0;
-	const startTime = Date.now();
-	let session = await AgentLifecycleManager.global().ensureLive(id);
+	let session = args.session;
 	// Acquire turn ownership before mutating the shared yield contract: installing
 	// pooled items under a running ordinary wake would reject its in-flight tool
 	// calls. The check-to-install section below has no await, so once idle is
@@ -3365,9 +3784,8 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	// A kept-alive session reuses its YieldTool across turns; clear the prior
 	// run's incremental-section flag and retry counters so this turn's guards
 	// evaluate against its own state, not stale accumulators.
+	signal?.throwIfAborted();
 	resetYieldTurnState(session.getToolByName("yield"));
-	const ref = AgentRegistry.global().get(id);
-	const sessionFile = ref?.sessionFile ?? undefined;
 
 	const monitor = createSubagentRunMonitor({
 		index,
@@ -3415,6 +3833,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	let attemptUnsubscribe = monitor.attach(session);
 	try {
 		outcome = await driveSessionToYield(session, monitor, message, {
+			startPrompt,
 			onPromptBusy: async () => {
 				attemptUnsubscribe();
 				logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
@@ -3429,9 +3848,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 				attemptUnsubscribe = monitor.attach(session);
 			},
 		});
-		if (monitor.yieldCalled()) {
-			// A follow-up turn's accepted yield is the run's final result too:
-			// terminalize the ref here, not just on the initial run (#11079).
+		if (monitor.yieldCalled() || (monitor.pauseRequested() && !monitor.abortSignal.aborted)) {
+			// A follow-up's accepted yield or recoverable pause is the end
+			// of this run. Do not leave a non-streaming ref claimed running.
 			AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
 		}
 	} finally {
@@ -3466,6 +3885,48 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		followUpTurn: true,
 		sessionFile,
 		startTime,
+	});
+}
+
+/** Resume a live or parked subagent with its ordinary agent-attributed prompt. */
+export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Promise<SingleResult> {
+	options.signal?.throwIfAborted();
+	const startTime = Date.now();
+	const session = await AgentLifecycleManager.global().ensureLive(options.id);
+	const sessionFile = AgentRegistry.global().get(options.id)?.sessionFile ?? undefined;
+	return executeSubagentFollowUpTurn({ options, session, sessionFile, startTime });
+}
+
+/**
+ * Deliver a caller-keyed user-attributed follow-up at most once. Inspect before
+ * revival so a retry of an already-delivered message cannot start another turn.
+ */
+export async function runDurableSubagentFollowUpTurn(
+	options: DurableFollowUpTurnOptions,
+): Promise<DurableFollowUpResult> {
+	return withDurableFollowUpLock(options.id, options.deliveryKey, async () => {
+		const sessionFile = AgentRegistry.global().get(options.id)?.sessionFile;
+		if (!sessionFile) {
+			throw new Error(`Cannot deliver durable follow-up to ${options.id}: no persisted session transcript.`);
+		}
+		const state = await inspectDurableFollowUp(sessionFile, options.deliveryKey);
+		if (state === "answered") return { delivery: "already-answered" };
+		if (state === "appended") return { delivery: "already-appended" };
+
+		options.signal?.throwIfAborted();
+		const session = await AgentLifecycleManager.global().ensureLive(options.id);
+		const result = await executeSubagentFollowUpTurn({
+			options,
+			session,
+			sessionFile,
+			startTime: Date.now(),
+			startPrompt: (activeSession, message) =>
+				activeSession.promptCustomMessagePersisted(durableFollowUpMessage(message, options.deliveryKey)),
+		});
+		if ((await inspectDurableFollowUp(sessionFile, options.deliveryKey)) === "absent") {
+			throw new Error(`Durable follow-up ${options.deliveryKey} was not appended to ${sessionFile}.`);
+		}
+		return { delivery: "appended", result };
 	});
 }
 
@@ -4289,10 +4750,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			readyAt = performance.now();
 			const outcome = await driveSessionToYield(session, monitor, task, { solutionSpace: options.solutionSpace });
+			if (monitor.pauseRequested() && options.keepAlive === false) {
+				// One-shot helpers cannot revive a stopped session. Report the
+				// failed contract instead of handing back a false "resumable" result.
+				outcome.exitCode = 1;
+				outcome.error = "Subagent requested a pause, but this invocation does not retain its session.";
+			}
 			// Acceptance boundary (#11079): the run's final result is settled, so
 			// stamp the lifecycle and terminalize a ref the run-state mirror left
 			// `running` before the (possibly slow) cleanup below.
-			if (monitor.yieldCalled()) {
+			if (
+				monitor.yieldCalled() ||
+				(monitor.pauseRequested() && options.keepAlive !== false && !abortSignal.aborted)
+			) {
 				AgentRegistry.global().markResultAccepted(id, session, monitor.yieldAcceptedAt());
 			}
 			exitCode = outcome.exitCode;
@@ -4364,7 +4834,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				unsubscribe = null;
 			}
 			const jobManager = AsyncJobManager.instance();
-			if (jobManager) {
+			const pauseRequested = Boolean(
+				monitor.pauseRequested() && options.keepAlive !== false && !abortSignal.aborted,
+			);
+			// A paused session remains adopted; owner async work may be part
+			// of the external operation that resumes it.
+			if (jobManager && !pauseRequested) {
 				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt);
 				if (!reap.settled) {
 					deferCleanup(reap.completion);
@@ -4397,7 +4872,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					},
 				});
 			}
-			if (jobManager) {
+			if (jobManager && !pauseRequested) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
 						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now());

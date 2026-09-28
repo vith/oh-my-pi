@@ -26,7 +26,7 @@ export interface SubagentLifecyclePayload {
 	agent: string;
 	agentSource: AgentSource;
 	description?: string;
-	status: "started" | "completed" | "failed" | "aborted";
+	status: "started" | "paused" | "completed" | "failed" | "aborted";
 	sessionFile?: string;
 	parentToolCallId?: string;
 	index: number;
@@ -50,7 +50,7 @@ export interface ObservableSession {
 	label: string;
 	agent?: string;
 	description?: string;
-	status: "active" | "completed" | "failed" | "aborted";
+	status: "active" | "paused" | "completed" | "failed" | "aborted";
 	sessionFile?: string;
 	parentToolCallId?: string;
 	/**
@@ -71,6 +71,7 @@ export type SessionObserverChangeKind = "main" | "reset" | "lifecycle" | "progre
 
 const STATUS_MAP: Record<string, ObservableSession["status"]> = {
 	started: "active",
+	paused: "paused",
 	completed: "completed",
 	failed: "failed",
 	aborted: "aborted",

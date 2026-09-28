@@ -5,6 +5,7 @@
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { logger } from "@oh-my-pi/pi-utils";
 
 import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "./job-manager";
 
@@ -386,7 +387,7 @@ export async function executeCancel(
 			// registration kill before reporting the row as already done.
 			const regOutcome = await cancelAgentRegistration(session, ownerId, id);
 			cancelOutcomes.push(
-				regOutcome.status === "cancelled"
+				regOutcome.status === "cancelled" || regOutcome.status === "failed"
 					? regOutcome
 					: {
 							id,
@@ -443,9 +444,10 @@ export async function cancelAgentRegistration(
 			registry?.unregister(id);
 		}
 	} catch (error) {
+		logger.error("Agent registration cancellation failed", { id, error });
 		return {
 			id,
-			status: "already_completed",
+			status: "failed",
 			message: `Agent ${id} could not be fully cancelled: ${error instanceof Error ? error.message : String(error)}.`,
 		};
 	}

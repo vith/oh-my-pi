@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -16,9 +18,10 @@ import type { AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -29,6 +32,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { createSessionDefaults } from "../helpers/session-defaults";
 
 import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
@@ -56,10 +60,12 @@ function createRef(sessionFile: string): AgentRef {
 }
 
 type IrcWakeObserver = (records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined;
+type FollowUpAdmission = (records: readonly AgentMessage[]) => void | Promise<void>;
 
 interface RevivedSessionHandle {
 	session: AgentSession;
 	observer: () => IrcWakeObserver | undefined;
+	admission: () => FollowUpAdmission | undefined;
 	/** Reply obligations the wake monitor registered via `trackIrcReply`. */
 	trackedReplies: Promise<void>[];
 	/** Text the stubbed session reports as its last assistant message (a `stop`ped turn). */
@@ -79,6 +85,7 @@ interface LastAssistantStop {
 
 function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
+	let admission: FollowUpAdmission | undefined;
 	let lastAssistant:
 		| {
 				role: "assistant";
@@ -100,6 +107,10 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
+		setIrcWakeTurnSettlement: (_next: unknown) => {},
+		setIrcWakeTurnAdmission: (next: FollowUpAdmission | undefined) => {
+			admission = next;
+		},
 		trackIrcReply: (pending: Promise<void>) => {
 			trackedReplies.push(pending);
 		},
@@ -110,6 +121,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 	return {
 		session,
 		observer: () => observer,
+		admission: () => admission,
 		trackedReplies,
 		setLastAssistantText: text => {
 			lastAssistant = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
@@ -220,6 +232,35 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 	});
 }
 
+function createRealColdRevivedSession(cwd: string): {
+	session: AgentSession;
+	providerStarts: () => number;
+	close: () => void;
+} {
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("mock", "test-key");
+	const modelRegistry = new ModelRegistry(authStorage);
+	const model = createMockModel({ responses: [{ content: ["cold wake"], stopReason: "stop" }] });
+	let providerStarts = 0;
+	const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false });
+	settings.setModelRole("default", `${model.provider}/${model.id}`);
+	const session = new AgentSession({
+		agent: new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["cold revive"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (...args) => {
+				providerStarts++;
+				return model.stream(...args);
+			},
+		}),
+		sessionManager: SessionManager.inMemory(cwd),
+		settings,
+		modelRegistry,
+	});
+	return { session, providerStarts: () => providerStarts, close: () => authStorage.close() };
+}
+
 afterEach(async () => {
 	vi.restoreAllMocks();
 	MCPManager.resetForTests();
@@ -227,6 +268,60 @@ afterEach(async () => {
 });
 
 describe("persisted subagent revival", () => {
+	it("gates the first Hub follow-up of a real cold-revived session on its stored admission", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const registry = AgentRegistry.global();
+		const manager = new AgentLifecycleManager(registry);
+		const cwd = makeTempDir("@pi-persisted-admission-");
+		const ref = createRef(path.join(cwd, "persisted-admission.jsonl"));
+		registry.register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: ref.kind,
+			parentId: ref.parentId,
+			session: null,
+			sessionFile: ref.sessionFile,
+			status: "parked",
+		});
+		const admissionEntered = Promise.withResolvers<void>();
+		const admissionRelease = Promise.withResolvers<void>();
+		let recreated: ReturnType<typeof createRealColdRevivedSession> | undefined;
+		const admission: FollowUpAdmission = async () => {
+			admissionEntered.resolve();
+			await admissionRelease.promise;
+		};
+		manager.setFollowUpAdmission(ref.id, admission);
+		manager.setPersistedSubagentReviverFactory(
+			async expected => async () => {
+				expect(expected.id).toBe(ref.id);
+				recreated = createRealColdRevivedSession(cwd);
+				return recreated.session;
+			},
+			() => 0,
+		);
+
+		try {
+			const session = await manager.ensureLive(ref.id);
+			await session.deliverIrcMessage({
+				id: "cold-revive-hub-follow-up",
+				from: "Main",
+				to: ref.id,
+				body: "wait for parent admission",
+				ts: Date.now(),
+			});
+			await admissionEntered.promise;
+			expect(recreated?.providerStarts()).toBe(0);
+
+			admissionRelease.resolve();
+			await session.waitForIdle();
+			expect(recreated?.providerStarts()).toBe(1);
+		} finally {
+			await manager.dispose();
+			recreated?.close();
+			AgentRegistry.resetGlobalForTests();
+		}
+	});
+
 	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
 		const cwd = makeTempDir("@pi-revive-ext-init-");
 		const sessionFile = await createPersistedSession(cwd);
@@ -832,13 +927,14 @@ describe("persisted subagent revival", () => {
 				id: ref.id,
 				displayName: ref.displayName,
 				kind: "sub",
+				parentId: ref.parentId,
 				session: null,
 				sessionFile,
 				status: "parked",
 			});
-			const reviver = await createFactory(cwd)(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
-			await reviver(ref);
+			const lifecycle = AgentLifecycleManager.global();
+			lifecycle.setPersistedSubagentReviverFactory(createFactory(cwd), () => 0);
+			await lifecycle.ensureLive(ref.id);
 			if (!handle) throw new Error("Expected a revived session");
 			return { ref, handle };
 		}
@@ -1088,6 +1184,40 @@ describe("persisted subagent revival", () => {
 });
 
 describe("buildWakeRelayBody", () => {
+	it("reports a paused wake as awaiting follow-up, not a completed answer or cancellation", () => {
+		const result = {
+			index: 0,
+			id: "PausedPeer",
+			agent: "task",
+			agentSource: "bundled",
+			task: "ask for external action",
+			exitCode: 0,
+			output: "",
+			stderr: "",
+			truncated: false,
+			durationMs: 10,
+			tokens: 0,
+			requests: 1,
+			paused: { toolName: "external_action", toolCallId: "call-1" },
+		} satisfies SingleResult;
+
+		const body = buildWakeRelayBody({
+			id: "PausedPeer",
+			yielded: false,
+			result,
+			turnText: "",
+			error: undefined,
+			aborted: false,
+			abortReason: undefined,
+			finalizeError: undefined,
+			alreadyMessaged: false,
+		});
+		expect(body).toContain("paused awaiting follow-up");
+		expect(body).toContain("history://PausedPeer");
+		expect(body).not.toContain("cancelled");
+		expect(body).not.toContain("produced no output");
+	});
+
 	// A wake turn can yield an artifact and then fail on a later provider call
 	// (`finalizeRunResult` rewrites `<id>.md` on `hasYield`, and the error lane
 	// does not exclude a prior yield). The observer seam cannot drive a real
