@@ -255,9 +255,19 @@ For the bash tool specifically:
 - `ToolExecutionComponent.#buildRenderContext()` for bash must work even before a result exists — the renderer uses call args plus render context to show the command preview while streaming.
 - Verify both live streaming and rebuilt transcript paths after any bash preview change. A fix in one path does not fix the other.
 
+## Fork Development Workflow
+
+- Work in dedicated `.worktrees/<name>` checkouts on `feat/*` branches; NEVER develop directly on `integration`.
+- Reuse a feature's branch for follow-up work. Preserve feature branches after merging.
+- Upstream catch-ups MUST use a branch → PR → green CI → merge workflow. NEVER compile locally; CI owns native builds, Rust checks, compiled binaries, and release builds. Local no-emit TypeScript checks and source-level tests are allowed.
+- For a clean-base reconstruction, start from the upstream release tag and port only retained feature-specific changes. NEVER merge old feature branches wholesale: their ancestry may include intentionally dropped features.
+- Preserve retained behavior, not obsolete implementation. Prefer current upstream APIs over resurrected duplicates; redesign poor fork integrations when necessary.
+- The fork permissions rework is retired. Use upstream approval behavior; do not restore its engine, dialogs, commands, or rule migration.
+- Fork versions use `<upstream tag, verbatim>+vith-fork.<commits since tag>.<HEAD short hash>`. Keep upstream versions during catch-up; run `release:fork` only in CI when cutting a release.
+
 ## Commands
 
-- NEVER commit unless asked.
+- Commit coherent changes frequently with conventional subjects; never commit directly on `integration`.
 - Never use `tsc`/`npx tsc` — always `bun check`.
 - Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass currently executes nothing (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs) and exists so the first runnable doctest added to a lib crate is actually run.
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.

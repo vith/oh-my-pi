@@ -7,14 +7,38 @@ use ashpd::desktop::{
 use image::RgbaImage;
 use pipewire as pw;
 use pw::{properties::properties, spa};
+use xxhash_rust::xxh64::xxh64;
 
 use super::portal::{read_token, store_token};
 use crate::desktop::error::{CoreResult, DesktopError};
 
 const SCREENCAST_TOKEN: &str = "screencast-token";
 
-async fn open_screencast() -> Result<(u32, OwnedFd, Option<(i32, i32)>, Option<(i32, i32)>), String>
-{
+pub(super) enum CaptureSource {
+	Monitor,
+	Window { token_name: String },
+}
+
+pub(super) fn window_token_name(app: &str) -> String {
+	format!("screencast-window-{:016x}", xxh64(app.as_bytes(), 0))
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct StreamGeometry {
+	pub x:      i32,
+	pub y:      i32,
+	pub width:  u32,
+	pub height: u32,
+}
+
+pub(super) struct CapturedFrame {
+	pub image:    RgbaImage,
+	pub geometry: StreamGeometry,
+}
+
+async fn open_screencast(
+	source: &CaptureSource,
+) -> Result<(u32, OwnedFd, Option<StreamGeometry>), String> {
 	let portal = Screencast::new()
 		.await
 		.map_err(|err| format!("ScreenCast portal: {err}"))?;
@@ -22,13 +46,31 @@ async fn open_screencast() -> Result<(u32, OwnedFd, Option<(i32, i32)>, Option<(
 		.create_session()
 		.await
 		.map_err(|err| format!("ScreenCast CreateSession: {err}"))?;
-	let restore_token = read_token(SCREENCAST_TOKEN);
+	let source_types = match source {
+		CaptureSource::Monitor => SourceType::Monitor.into(),
+		CaptureSource::Window { .. } => SourceType::Window.into(),
+	};
+	if matches!(source, CaptureSource::Window { .. }) {
+		let available = portal
+			.available_source_types()
+			.await
+			.map_err(|err| format!("ScreenCast AvailableSourceTypes: {err}"))?;
+		if !available.contains(SourceType::Window) {
+			return Err("ScreenCast portal does not support window sources".to_string());
+		}
+	}
+	let multiple = matches!(source, CaptureSource::Monitor);
+	let token_name = match source {
+		CaptureSource::Monitor => SCREENCAST_TOKEN,
+		CaptureSource::Window { token_name } => token_name.as_str(),
+	};
+	let restore_token = read_token(token_name);
 	portal
 		.select_sources(
 			&session,
 			CursorMode::Embedded,
-			SourceType::Monitor.into(),
-			true,
+			source_types,
+			multiple,
 			restore_token.as_deref(),
 			PersistMode::ExplicitlyRevoked,
 		)
@@ -40,19 +82,32 @@ async fn open_screencast() -> Result<(u32, OwnedFd, Option<(i32, i32)>, Option<(
 		.map_err(|err| format!("ScreenCast Start: {err}"))?
 		.response()
 		.map_err(|err| format!("ScreenCast permission: {err}"))?;
-	store_token(SCREENCAST_TOKEN, response.restore_token());
+	store_token(token_name, response.restore_token());
 	let stream = response
 		.streams()
 		.first()
-		.ok_or_else(|| "ScreenCast returned no monitor stream".to_string())?;
+		.ok_or_else(|| "ScreenCast returned no source stream".to_string())?;
+	if matches!(source, CaptureSource::Window { .. })
+		&& stream.source_type() == Some(SourceType::Monitor)
+	{
+		return Err("ScreenCast returned a monitor stream for a window request".to_string());
+	}
+	let geometry = stream.size().and_then(|(width, height)| {
+		let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
+			return None;
+		};
+		if width == 0 || height == 0 {
+			return None;
+		}
+		let (x, y) = stream.position().unwrap_or((0, 0));
+		Some(StreamGeometry { x, y, width, height })
+	});
 	let node = stream.pipe_wire_node_id();
-	let position = stream.position();
-	let size = stream.size();
 	let fd = portal
 		.open_pipe_wire_remote(&session)
 		.await
 		.map_err(|err| format!("ScreenCast OpenPipeWireRemote: {err}"))?;
-	Ok((node, fd, position, size))
+	Ok((node, fd, geometry))
 }
 
 struct UserData {
@@ -145,6 +200,28 @@ fn rgba_from_buffer(
 	}
 	RgbaImage::from_raw(width, height, rgba)
 		.ok_or_else(|| "failed to construct PipeWire RGBA frame".to_string())
+}
+
+fn crop_transparent_padding(image: RgbaImage) -> RgbaImage {
+	let mut min_x = image.width();
+	let mut min_y = image.height();
+	let mut max_x = 0;
+	let mut max_y = 0;
+	let mut has_visible_pixel = false;
+	for (x, y, pixel) in image.enumerate_pixels() {
+		if pixel.0[3] == 0 {
+			continue;
+		}
+		has_visible_pixel = true;
+		min_x = min_x.min(x);
+		min_y = min_y.min(y);
+		max_x = max_x.max(x);
+		max_y = max_y.max(y);
+	}
+	if !has_visible_pixel {
+		return image;
+	}
+	image::imageops::crop_imm(&image, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1).to_image()
 }
 
 fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, String> {
@@ -247,13 +324,54 @@ fn grab_pipewire_frame(node: u32, fd: OwnedFd) -> Result<RgbaImage, String> {
 		.unwrap_or_else(|| Err("PipeWire stream ended before producing a frame".to_string()))
 }
 
-pub(super) fn capture() -> CoreResult<(RgbaImage, super::PortalGeometry)> {
+pub(super) fn capture(source: CaptureSource) -> CoreResult<CapturedFrame> {
 	let runtime = super::portal::portal_runtime()?;
-	let (node, fd, position, size) = runtime.block_on(open_screencast()).map_err(|err| {
+	let (node, fd, stream_geometry) = runtime.block_on(open_screencast(&source)).map_err(|err| {
 		DesktopError::capture_failed(format!("wayland screencast unavailable: {err}"))
 	})?;
-	let image = grab_pipewire_frame(node, fd)
+	let mut image = grab_pipewire_frame(node, fd)
 		.map_err(|err| DesktopError::capture_failed(format!("wayland screencast failed: {err}")))?;
-	let geometry = super::PortalGeometry::new(position, size, image.width(), image.height());
-	Ok((image, geometry))
+	if matches!(source, CaptureSource::Window { .. }) {
+		image = crop_transparent_padding(image);
+	}
+	let geometry = stream_geometry.unwrap_or(StreamGeometry {
+		x:      0,
+		y:      0,
+		width:  image.width(),
+		height: image.height(),
+	});
+	Ok(CapturedFrame { image, geometry })
+}
+
+#[cfg(test)]
+mod tests {
+	use image::Rgba;
+
+	use super::*;
+
+	#[test]
+	fn window_frame_crop_removes_transparent_padding() {
+		let mut image = RgbaImage::from_pixel(8, 6, Rgba([0, 0, 0, 0]));
+		for y in 1..5 {
+			for x in 2..7 {
+				image.put_pixel(x, y, Rgba([255, 0, 0, 255]));
+			}
+		}
+
+		let cropped = crop_transparent_padding(image);
+
+		assert_eq!(cropped.dimensions(), (5, 4));
+		assert!(cropped.pixels().all(|pixel| pixel.0[3] == 255));
+	}
+
+	#[test]
+	fn window_capture_token_is_stable_across_title_changes() {
+		let first = window_token_name("org.example.Editor");
+		let second = window_token_name("org.example.Editor");
+		let different_app = window_token_name("org.example.Preview");
+
+		assert_eq!(first, second);
+		assert_ne!(first, different_app);
+		assert!(first.starts_with("screencast-window-"));
+	}
 }

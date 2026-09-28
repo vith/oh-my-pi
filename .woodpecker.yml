@@ -1,0 +1,49 @@
+# Native Linux ARM64 CI for the self-hosted Forgejo mirror.
+# A repo-restricted agent owns the private build cache; no emulation or PR volumes.
+labels:
+  platform: linux/arm64
+  ci: omp
+
+steps:
+  native-ci:
+    image: localhost/omp-ci:arm64
+    environment:
+      BUN_INSTALL_CACHE_DIR: /ci-cache/bun
+      CARGO_HOME: /ci-cache/cargo
+      CARGO_TARGET_DIR: /ci-cache/target
+      CARGO_BUILD_JOBS: "2"
+      OMP_TEST_CONCURRENCY: "1"
+      RUSTUP_HOME: /opt/rustup
+    commands:
+      - |
+        set -eu
+        export PATH="/opt/cargo/bin:$PATH"
+
+        test "$(uname -m)" = aarch64
+        test "$(bun -e 'console.log(process.arch)')" = arm64
+        test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu
+        case "$(cc -dumpmachine)" in
+          aarch64*-linux-gnu) ;;
+          *) echo "cc must target aarch64 Linux" >&2; exit 1 ;;
+        esac
+        test -z "${CARGO_BUILD_TARGET:-}"
+        test -z "${CROSS_TARGET:-}"
+
+        # Exercise the fork's optional portal capture implementation, not only
+        # the default build that compiles it out.
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev
+
+        bun install --frozen-lockfile
+        bun run check:ts
+        bun run check:rs
+        OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
+        bun run ci:test:full
+        cargo nextest run -p pi-natives --features wayland-pipewire -E 'test(desktop::linux::wayland)'
+        bun run collab:web:build
+        bun --cwd=packages/coding-agent run build
+        packages/coding-agent/dist/omp --version
+        packages/coding-agent/dist/omp --smoke-test
+    when:
+      - event: [push, pull_request]
+        branch: integration

@@ -56,6 +56,19 @@ impl PortalGeometry {
 		Self { logical_x, logical_y, logical_width, logical_height, pixel_width, pixel_height }
 	}
 
+	/// Build from a portal stream geometry plus the captured buffer dimensions.
+	/// `StreamGeometry` already carries the portal's position/size mapping, so
+	/// this only splits it into the logical/physical form above.
+	#[cfg(feature = "wayland-pipewire")]
+	fn from_stream(stream: capture::StreamGeometry, pixel_width: u32, pixel_height: u32) -> Self {
+		Self::new(
+			Some((stream.x, stream.y)),
+			Some((stream.width as i32, stream.height as i32)),
+			pixel_width,
+			pixel_height,
+		)
+	}
+
 	/// Synthetic single-monitor display describing the captured buffer, with
 	/// logical bounds and scale derived from the portal geometry.
 	fn display(&self) -> DesktopDisplay {
@@ -234,10 +247,18 @@ impl Backend for WaylandBackend {
 		#[cfg(feature = "wayland-pipewire")]
 		{
 			self.selected_display_allowed()?;
-			let (image, geometry) = capture::capture()?;
-			self.displays = vec![geometry.display()];
 			match target {
-				Target::Desktop => Ok((image, FrameGeometry::for_displays(&self.displays))),
+				Target::Desktop => {
+					let captured = capture::capture(capture::CaptureSource::Monitor)?;
+					let portal = PortalGeometry::from_stream(
+						captured.geometry,
+						captured.image.width(),
+						captured.image.height(),
+					);
+					self.displays = vec![portal.display()];
+					let geometry = FrameGeometry::for_displays(&self.displays);
+					Ok((captured.image, geometry))
+				},
 				Target::Window(id) => {
 					let window = self
 						.windows()?
@@ -246,12 +267,38 @@ impl Backend for WaylandBackend {
 						.ok_or_else(|| {
 							DesktopError::window_not_found(format!("Wayland window {id} not found"))
 						})?;
-					let (x, y, width, height) = geometry.window_crop(&window).ok_or_else(|| {
+					// Prefer a dedicated window screencast; fall back to cropping
+					// the monitor capture when the compositor lacks window sources.
+					if let Ok(captured) = capture::capture(capture::CaptureSource::Window {
+						token_name: capture::window_token_name(&window.app),
+					}) {
+						let portal = PortalGeometry::from_stream(
+							captured.geometry,
+							captured.image.width(),
+							captured.image.height(),
+						);
+						self.displays = vec![portal.display()];
+						let frame = FrameGeometry::for_window(
+							&window,
+							captured.image.width(),
+							captured.image.height(),
+						);
+						return Ok((captured.image, frame));
+					}
+					let captured = capture::capture(capture::CaptureSource::Monitor)?;
+					let portal = PortalGeometry::from_stream(
+						captured.geometry,
+						captured.image.width(),
+						captured.image.height(),
+					);
+					self.displays = vec![portal.display()];
+					let (x, y, width, height) = portal.window_crop(&window).ok_or_else(|| {
 						DesktopError::capture_failed(format!(
 							"Wayland window {id} is outside the selected portal monitor"
 						))
 					})?;
-					let cropped = image::imageops::crop_imm(&image, x, y, width, height).to_image();
+					let cropped =
+						image::imageops::crop_imm(&captured.image, x, y, width, height).to_image();
 					let frame = FrameGeometry::for_window(&window, cropped.width(), cropped.height());
 					Ok((cropped, frame))
 				},
@@ -418,6 +465,24 @@ mod tests {
 			.capture(&Target::Desktop, &CaptureCaps::default())
 			.expect_err("capture must fail without the pipewire feature");
 		assert_eq!(err.code.as_str(), "CaptureFailed");
+	}
+
+	#[test]
+	#[cfg(feature = "wayland-pipewire")]
+	fn capabilities_report_capture_with_pipewire_feature() {
+		let mut backend = WaylandBackend {
+			display:     DisplaySelector::All,
+			ax:          None,
+			ax_error:    None,
+			input:       None,
+			input_error: None,
+			displays:    Vec::new(),
+		};
+		let caps = backend.capabilities();
+		// Fork builds compiled with wayland-pipewire can screencast through the
+		// portal; capabilities() must advertise exactly what the binary can do.
+		assert!(caps.capture, "capture must be true when the pipewire feature is on");
+		assert_eq!(caps.capture_permission, "prompt-or-granted");
 	}
 
 	fn portal_window(id: &str, x: i32, y: i32, width: u32, height: u32) -> DesktopWindow {

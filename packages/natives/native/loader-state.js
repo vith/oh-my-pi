@@ -187,7 +187,9 @@ export function resolveLoaderCandidates({
 // =========================================================================
 
 function parseReleaseVersion(version) {
-	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+	// Semver build metadata (`+…`) is ignored for precedence, so cache
+	// directories created for `17.2.13+vith-fork` compare as `17.2.13`.
+	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.split("+")[0]);
 	return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
 }
 
