@@ -33,7 +33,7 @@ steps:
         # Exercise the fork's optional portal capture implementation, not only
         # the default build that compiles it out.
         apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang1-19 libclang-common-19-dev
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang1-19 libclang-common-19-dev openssh-client
 
         bun install --frozen-lockfile
         bun run check:ts
