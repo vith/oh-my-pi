@@ -4,15 +4,16 @@
 # Checks only: lint + typecheck on pushes to integration and on pull
 # requests. No release builds, no native addon builds, no test buckets —
 # those need platform-specific native addons and stay local / on GitHub CI.
-# Use the repo-restricted runner's data-disk cache so Bun downloads do not
-# exhaust the OS disk shared with Forgejo and PostgreSQL.
+# The shared runner executes one workflow at a time across all repositories.
+# Mount this repo's cache per step; trusted volumes and fork approval are required.
 labels:
   platform: linux/arm64
-  ci: omp
 
 steps:
   lint:
     image: oven/bun:1.4.2
+    volumes:
+      - /var/lib/woodpecker-runner/omp-cache/pr:/ci-cache
     environment:
       BUN_INSTALL_CACHE_DIR: /ci-cache/bun
     commands:
@@ -24,6 +25,8 @@ steps:
 
   types:
     image: oven/bun:1.4.2
+    volumes:
+      - /var/lib/woodpecker-runner/omp-cache/pr:/ci-cache
     environment:
       BUN_INSTALL_CACHE_DIR: /ci-cache/bun
     depends_on: [lint]
