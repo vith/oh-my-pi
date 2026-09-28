@@ -1,12 +1,14 @@
 # Native Linux ARM64 CI for the self-hosted Forgejo mirror.
-# A repo-restricted agent owns the private build cache; no emulation or PR volumes.
+# One shared agent serializes all repos; this job mounts only the OMP cache.
+# Trusted volumes are enabled for this private repo; fork PRs require approval.
 labels:
   platform: linux/arm64
-  ci: omp
 
 steps:
   native-ci:
     image: localhost/omp-ci:arm64
+    volumes:
+      - /var/lib/woodpecker-runner/omp-cache/pr:/ci-cache
     environment:
       BUN_INSTALL_CACHE_DIR: /ci-cache/bun
       CARGO_HOME: /ci-cache/cargo
