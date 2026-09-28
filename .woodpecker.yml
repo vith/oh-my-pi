@@ -30,19 +30,10 @@ steps:
         test -z "${CARGO_BUILD_TARGET:-}"
         test -z "${CROSS_TARGET:-}"
 
-        # The default checkout volume is on the small OS disk. Keep dependency
-        # installs, generated output, and scratch files on the dedicated CI disk.
-        workspace="$(mktemp -d /ci-cache/omp-workspace.XXXXXX)"
-        trap 'rm -rf -- "$workspace"' EXIT
-        cp -a . "$workspace/"
-        cd "$workspace"
-        export TMPDIR="$workspace/.tmp"
-        mkdir -p "$TMPDIR"
-
         # Exercise the fork's optional portal capture implementation, not only
         # the default build that compiles it out.
         apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang1-19
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang1-19 libclang-common-19-dev
 
         bun install --frozen-lockfile
         bun run check:ts
