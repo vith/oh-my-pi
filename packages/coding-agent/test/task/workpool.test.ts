@@ -13,6 +13,7 @@ import type { AgentDefinition } from "../../src/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const AGENT: AgentDefinition = {
 	name: "scout",
@@ -225,6 +226,7 @@ describe("WorkPool dispatch", () => {
 				kind: "sub",
 				status: "idle",
 				session: {
+					...createSessionDefaults(),
 					setWorkPoolYieldItems: async () => {
 						throw new Error("prompt rebuild boom");
 					},

@@ -691,13 +691,13 @@ describe("InputController escape behavior", () => {
 
 		controller.setupKeyHandlers();
 		now.mockReturnValue(2_000);
-		const first = inputListeners[0]("\x1b[D");
+		const first = inputListeners.some(listener => listener("\x1b[D")?.consume);
 		now.mockReturnValue(2_200); // 200ms later — a deliberate second tap
-		const second = inputListeners[0]("\x1b[D");
+		const second = inputListeners.some(listener => listener("\x1b[D")?.consume);
 
 		// Both taps are consumed; only the second completes the gesture.
-		expect(first).toEqual({ consume: true });
-		expect(second).toEqual({ consume: true });
+		expect(first).toBe(true);
+		expect(second).toBe(true);
 		expect(ctx.unfocusSession).toHaveBeenCalledTimes(1);
 		expect(ctx.focusParentSession).not.toHaveBeenCalled();
 	});
