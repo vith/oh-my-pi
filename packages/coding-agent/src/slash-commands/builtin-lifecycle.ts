@@ -472,6 +472,14 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
+		name: "recap",
+		description: "Generate an on-demand status recap",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleRecapCommand();
+		},
+	},
+	{
 		name: "tan",
 		icon: "rocket",
 		description: "Run a full background agent on tangential work",

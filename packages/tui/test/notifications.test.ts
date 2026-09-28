@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { TUI } from "@oh-my-pi/pi-tui";
 import * as desktopNotify from "@oh-my-pi/pi-tui/desktop-notify";
 import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
 import {
@@ -7,11 +8,13 @@ import {
 	isInsideZellij,
 	isOsc99Supported,
 	NotifyProtocol,
+	resetOsc99NotificationState,
 	setOsc99Supported,
 	TERMINAL,
 	wrapTmuxPassthrough,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
-import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import * as utils from "@oh-my-pi/pi-utils";
+import { VirtualTerminal } from "./virtual-terminal";
 
 const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
 const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
@@ -78,7 +81,7 @@ let previousHeadless = false;
 describe("terminal notifications", () => {
 	beforeEach(() => {
 		setOsc99Supported(false);
-		previousHeadless = setTerminalHeadless(false);
+		previousHeadless = utils.setTerminalHeadless(false);
 		// Default the suite to a direct-terminal baseline so probe/format
 		// assertions never see inherited multiplexer markers.
 		delete Bun.env.TMUX;
@@ -100,8 +103,9 @@ describe("terminal notifications", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		setTerminalHeadless(previousHeadless);
+		utils.setTerminalHeadless(previousHeadless);
 		setOsc99Supported(false);
+		resetOsc99NotificationState();
 		mutableTerminal.notifyProtocol = originalNotifyProtocol;
 		restoreEnv("PI_TUI_OSC99_PROBE", originalOsc99Probe);
 		restoreEnv("TMUX", originalTmux);
@@ -548,6 +552,245 @@ describe("terminal notifications", () => {
 			expect(isOsc99Supported()).toBe(false);
 		} finally {
 			terminal.stop();
+		}
+	});
+
+	it("reuses the OSC 99 id so id-less notifications replace each other", () => {
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+
+		expect(writes).toHaveLength(2);
+		const ids = writes.map(w => /i=([^:;]+)/u.exec(w)?.[1]);
+		expect(ids[0]).toBeDefined();
+		expect(ids[1]).toBe(ids[0]);
+	});
+
+	it("closeNotification emits the OSC 99 close-by-id sequence after a rich send", () => {
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+		TERMINAL.closeNotification();
+
+		expect(writes).toHaveLength(2);
+		expect(writes[1]).toBe("\x1b]99;omp-1;\x1b\\");
+		TERMINAL.closeNotification();
+		expect(writes).toHaveLength(2);
+		TERMINAL.sendNotification({ title: "Session", body: "Next" });
+		expect(writes[2]).toContain("i=omp-2");
+	});
+
+	it("closeNotification is a no-op without a rich OSC 99 id to address", () => {
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.closeNotification();
+
+		expect(writes).toEqual([]);
+
+		// OSC 9 has no close surface either.
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc9;
+		TERMINAL.closeNotification();
+		expect(writes).toEqual([]);
+	});
+
+	it("under tmux, closeNotification wraps the close for passthrough without a BEL", () => {
+		Bun.env.TMUX = "/tmp/tmux-1000/default,1234,0";
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+		TERMINAL.closeNotification();
+
+		expect(writes).toHaveLength(2);
+		// Passthrough envelope, no trailing BEL — closing a toast must not ring a bell.
+		expect(writes[1]).toBe(wrapTmuxPassthrough("\x1b]99;omp-1;\x1b\\"));
+	});
+
+	it("under Zellij, closeNotification writes nothing (OSC dropped, no BEL to ring)", () => {
+		Bun.env.ZELLIJ = "0";
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.sendNotification({ title: "Session", body: "Complete" });
+		TERMINAL.closeNotification();
+
+		// Only the send wrote (OSC + BEL); the close is dropped.
+		expect(writes).toHaveLength(1);
+	});
+
+	it("Bell-protocol closeNotification fans out to the D-Bus close when the gate is open", () => {
+		mutableTerminal.notifyProtocol = NotifyProtocol.Bell;
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		vi.spyOn(desktopNotify, "shouldDeliverDesktopNotification").mockReturnValue(true);
+		const close = vi.spyOn(desktopNotify, "closeDesktopNotification").mockImplementation(() => {});
+
+		TERMINAL.closeNotification();
+
+		expect(close).toHaveBeenCalledTimes(1);
+	});
+
+	it("skips the D-Bus close when the gate forbids it", () => {
+		mutableTerminal.notifyProtocol = NotifyProtocol.Bell;
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		vi.spyOn(desktopNotify, "shouldDeliverDesktopNotification").mockReturnValue(false);
+		const close = vi.spyOn(desktopNotify, "closeDesktopNotification").mockImplementation(() => {});
+
+		TERMINAL.closeNotification();
+
+		expect(close).not.toHaveBeenCalled();
+	});
+
+	it("closeNotification respects the PI_NOTIFICATIONS=off suppression", () => {
+		Bun.env.PI_NOTIFICATIONS = "off";
+		setOsc99Supported(true);
+		mutableTerminal.notifyProtocol = NotifyProtocol.Osc99;
+		const writes: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
+			return true;
+		});
+
+		TERMINAL.closeNotification();
+
+		expect(writes).toEqual([]);
+	});
+
+	it("user input clears the live desktop notification via the TUI input loop", () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+		try {
+			tui.start();
+			// Drop any calls from startup capability probes; only the keypress below
+			// may trigger a close.
+			const before = close.mock.calls.length;
+			terminal.sendInput("x");
+			expect(close.mock.calls.length).toBeGreaterThan(before);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("ProcessTerminal enables focus reporting on start and disables it on stop", () => {
+		const { terminal, writes } = setupProcessTerminal();
+		try {
+			expect(writes.join("")).toContain("\x1b[?1004h");
+		} finally {
+			terminal.stop();
+		}
+		expect(writes.join("")).toContain("\x1b[?1004l");
+	});
+
+	it("ProcessTerminal swallows OSC 1004 focus reports and forwards them to the focus callback", () => {
+		const { terminal, received } = setupProcessTerminal();
+		const focusEvents: boolean[] = [];
+		terminal.onFocusChange(focused => focusEvents.push(focused));
+		try {
+			process.stdin.emit("data", "\x1b[I");
+			process.stdin.emit("data", "\x1b[O");
+			process.stdin.emit("data", "\x1b[I");
+			expect(focusEvents).toEqual([true, false, true]);
+			// Focus reports are terminal signals, never forwarded as input.
+			expect(received).toEqual([]);
+			// Ordinary input still flows through unchanged.
+			process.stdin.emit("data", "x");
+			expect(received).toEqual(["x"]);
+		} finally {
+			terminal.stop();
+		}
+	});
+
+	it("focus-in clears the live desktop notification via the TUI focus hook", () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+		try {
+			tui.start();
+			// Drop any calls from startup capability probes; only the focus report
+			// below may trigger a close.
+			const before = close.mock.calls.length;
+			terminal.sendFocus(true);
+			expect(close.mock.calls.length).toBeGreaterThan(before);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("focus-out does not clear the live desktop notification", () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+		try {
+			tui.start();
+			const before = close.mock.calls.length;
+			terminal.sendFocus(false);
+			expect(close.mock.calls.length).toBe(before);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("click dismisses a live toast without activating inline mouse controls", async () => {
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		tui.setInlineMouseTrackingProvider(() => true);
+		const close = vi
+			.spyOn(TERMINAL, "closeNotification")
+			.mockImplementation(() => desktopNotify.closeDesktopNotification());
+		vi.spyOn(utils, "$which").mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
+		vi.spyOn(Bun, "spawn").mockImplementation(() => ({ unref: () => {}, stdout: new Response("42").body }) as never);
+		try {
+			tui.start();
+			const received: string[] = [];
+			tui.addInputListener(data => {
+				received.push(data);
+				return undefined;
+			});
+			desktopNotify.sendDesktopNotification("first");
+			await Bun.sleep(0);
+			expect(desktopNotify.isDesktopNotificationLive()).toBe(true);
+			const before = close.mock.calls.length;
+			terminal.sendInput("\x1b[<0;10;5M");
+			expect(close.mock.calls.length).toBeGreaterThan(before);
+			expect(received).toEqual([]);
+			expect(desktopNotify.isDesktopNotificationLive()).toBe(false);
+			// Inline mouse capture remains usable when the toast is gone.
+			terminal.sendInput("\x1b[<0;10;5M");
+			expect(received).toEqual(["\x1b[<0;10;5M"]);
+			terminal.sendInput("x");
+			expect(received).toEqual(["\x1b[<0;10;5M", "x"]);
+		} finally {
+			tui.stop();
+			desktopNotify.resetDesktopNotificationTracking();
 		}
 	});
 });

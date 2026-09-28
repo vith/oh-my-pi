@@ -21,6 +21,7 @@ import {
 	setCellDimensions,
 	setOsc99Supported,
 	setTerminalGlyphProtocol,
+	setTerminalSelectionBackground,
 	TERMINAL,
 } from "./terminal-capabilities";
 import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
@@ -430,6 +431,7 @@ export function emergencyTerminalRestore(): void {
 					"\x1b[<u" + // Pop kitty keyboard protocol
 					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
 					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
+					"\x1b[?1004l" + // Disable focus reporting
 					// Leave the alternate screen only when a fullscreen overlay
 					// actually holds it — on Windows, DECRST 1049 on the main
 					// buffer homes the cursor (unconditional CursorRestoreState
@@ -645,6 +647,8 @@ export interface Terminal {
 	 * pi-tui versions keep working.
 	 */
 	onGlyphProtocolReport?(callback: GlyphProtocolReportHandler): void;
+	/** Subscribe to DECSET 1004 focus-in/out reports. */
+	onFocusChange?(callback: (focused: boolean) => void): void;
 }
 
 /**
@@ -667,9 +671,21 @@ type Da1SentinelOwner =
 	| { kind: "osc11" }
 	| { kind: "privateMode"; mode: number }
 	| { kind: "osc99Probe"; id: string }
+	| { kind: "osc17" }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" };
 
 let nextOsc99ProbeId = 1;
+
+/** OSC 17 highlight-color reply with 1–4 hex digits per channel. */
+const osc17ResponsePattern =
+	/^\x1b\]17;rgba?:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})(?:\/[0-9a-fA-F]{1,4})?(?:\x07|\x1b\\)$/;
+
+function x11ChannelToByte(hex: string): string {
+	const value = parseInt(hex, 16);
+	return Math.round((value / (16 ** hex.length - 1)) * 255)
+		.toString(16)
+		.padStart(2, "0");
+}
 
 function parseOsc99KeyValues(section: string): Map<string, string> {
 	const values = new Map<string, string>();
@@ -714,6 +730,7 @@ export interface ProcessTerminalOptions {
 export class ProcessTerminal implements Terminal {
 	#wasRaw = false;
 	#inputHandler?: (data: string) => void;
+	#focusHandler?: (focused: boolean) => void;
 	#resizeHandler?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
 	#inputDeferred = false;
@@ -795,6 +812,7 @@ export class ProcessTerminal implements Terminal {
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
+	#osc17ResponseBuffer = "";
 	/**
 	 * Handshake phase: `support` awaits the `s` reply, `confirm` awaits the `q`
 	 * coverage reply sent after the bundle was written.
@@ -907,6 +925,10 @@ export class ProcessTerminal implements Terminal {
 		this.#privateModeCallbacks.push(callback);
 	}
 
+	onFocusChange(callback: (focused: boolean) => void): void {
+		this.#focusHandler = callback;
+	}
+
 	onGlyphProtocolReport(callback: GlyphProtocolReportHandler): void {
 		this.#glyphProtocolCallbacks.push(callback);
 		// The handshake runs from enableInput(), which can precede the host's
@@ -1016,6 +1038,7 @@ export class ProcessTerminal implements Terminal {
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		this.#safeWrite("\x1b[?2004h");
+		this.#safeWrite("\x1b[?1004h");
 
 		// Force normal cursor-key (DECCKM) and numeric-keypad mode (terminfo
 		// `rmkx` = "\x1b[?1l\x1b>"). omp decodes both CSI ("\x1b[A") and SS3
@@ -1049,6 +1072,7 @@ export class ProcessTerminal implements Terminal {
 		// same DA1 sentinel FIFO as OSC 11/DECRQM so unsupported terminals resolve
 		// without leaking probe bytes to application input.
 		this.#queryOsc99Support();
+		this.#querySelectionBackground();
 
 		// Glyph Protocol support query (`s` verb), same DA1 sentinel FIFO. A reply
 		// triggers the bundled icon registration so the nerd symbol preset renders
@@ -1198,6 +1222,7 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer.length === 0 &&
 				this.#osc11ResponseBuffer.length === 0 &&
 				this.#osc99ResponseBuffer.length === 0 &&
+				this.#osc17ResponseBuffer.length === 0 &&
 				this.#glyphProtocolReplyBuffer.length === 0
 			) {
 				if (this.#inputHandler) {
@@ -1357,6 +1382,10 @@ export class ProcessTerminal implements Terminal {
 						this.#resolveOsc99Support(owner.id, false);
 						break;
 					}
+					case "osc17": {
+						this.#osc17ResponseBuffer = "";
+						break;
+					}
 					case "glyphProtocol": {
 						// The support-phase sentinel is answered after the `s` reply that
 						// already advanced the handshake; only a sentinel from the phase
@@ -1434,6 +1463,23 @@ export class ProcessTerminal implements Terminal {
 				}
 			}
 
+			// OSC 17 is terminal-to-host data even if its DA1 sentinel has
+			// already arrived. Reassemble split replies and keep them out of input.
+			if (this.#osc17ResponseBuffer || sequence.startsWith("\x1b]17;")) {
+				if (this.#osc17ResponseBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
+					this.#osc17ResponseBuffer = "";
+				} else {
+					this.#osc17ResponseBuffer += sequence;
+					const match = this.#osc17ResponseBuffer.match(osc17ResponsePattern);
+					if (!match) return;
+					this.#osc17ResponseBuffer = "";
+					setTerminalSelectionBackground(
+						`#${x11ChannelToByte(match[1]!)}${x11ChannelToByte(match[2]!)}${x11ChannelToByte(match[3]!)}`,
+					);
+					return;
+				}
+			}
+
 			if (this.#osc99PendingId && (this.#osc99ResponseBuffer || sequence.startsWith("\x1b]99;"))) {
 				if (this.#osc99ResponseBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
 					this.#osc99ResponseBuffer = "";
@@ -1474,6 +1520,10 @@ export class ProcessTerminal implements Terminal {
 					this.#mode2031DebounceTimer = undefined;
 					this.#queryBackgroundColor();
 				}, 100);
+				return;
+			}
+			if (sequence === "\x1b[I" || sequence === "\x1b[O") {
+				this.#focusHandler?.(sequence === "\x1b[I");
 				return;
 			}
 			if (this.#inputHandler) {
@@ -1576,6 +1626,14 @@ export class ProcessTerminal implements Terminal {
 		// The probe never runs under a multiplexer (see #shouldQueryOsc99Support),
 		// so it is always sent directly to the terminal.
 		this.#safeWrite(`\x1b]99;i=${id}:p=?;\x1b\\\x1b[c`);
+	}
+
+	#querySelectionBackground(): void {
+		this.#osc17ResponseBuffer = "";
+		if (this.#dead || isInsideTerminalMultiplexer($env)) return;
+		if (isBunTestRuntime() && $env.PI_TUI_OSC17_PROBE !== "1") return;
+		this.#da1SentinelOwners.push({ kind: "osc17" });
+		this.#safeWrite("\x1b]17;?\x07\x1b[c");
 	}
 
 	#handleOsc99CapabilityResponse(metaRaw: string, payload: string): boolean {
@@ -1964,7 +2022,7 @@ export class ProcessTerminal implements Terminal {
 		// Disable mouse tracking (enabled only by fullscreen overlays; safe
 		// no-ops otherwise). Covers crash paths that reach stop() without the
 		// TUI's own overlay teardown running.
-		this.#safeWrite("\x1b[?1006l\x1b[?1003l\x1b[?1000l");
+		this.#safeWrite("\x1b[?1006l\x1b[?1003l\x1b[?1000l\x1b[?1004l");
 
 		// Disable Mode 2031 appearance change notifications
 		this.#safeWrite("\x1b[?2031l");
@@ -1998,6 +2056,8 @@ export class ProcessTerminal implements Terminal {
 		this.#osc99ResponseBuffer = "";
 		this.#osc99Capabilities.clear();
 		setOsc99Supported(false);
+		this.#osc17ResponseBuffer = "";
+		setTerminalSelectionBackground(undefined);
 		this.#glyphProtocolPhase = "idle";
 		this.#glyphProtocolResult = undefined;
 		this.#glyphProtocolReplyBuffer = "";

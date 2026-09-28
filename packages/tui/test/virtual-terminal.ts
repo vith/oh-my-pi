@@ -94,6 +94,7 @@ export class VirtualTerminal implements Terminal {
 	#scrollbackCap: number;
 	#viewportY = 0;
 	#inputHandler?: (data: string) => void;
+	#focusHandler?: (focused: boolean) => void;
 	#resizeHandler?: () => void;
 	#pendingEngineResize = false;
 	// Memoized text of committed scrollback rows, keyed by absolute offset. A
@@ -168,6 +169,15 @@ export class VirtualTerminal implements Terminal {
 
 	onAppearanceChange(_callback: (appearance: TerminalAppearance) => void): void {
 		// No-op for virtual terminal.
+	}
+
+	onFocusChange(callback: (focused: boolean) => void): void {
+		this.#focusHandler = callback;
+	}
+
+	/** Simulate an OSC 1004 focus report (focus-in = true, focus-out = false). */
+	sendFocus(focused: boolean): void {
+		this.#focusHandler?.(focused);
 	}
 
 	moveBy(lines: number): void {

@@ -49,6 +49,12 @@ app.history.search: []
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
 
+## Navigate conversation turns
+
+Press `Ctrl+Up` or `Ctrl+Down` to enter transcript scroll mode and hop between user prompts. The composer stays pinned at the bottom. Page keys and the mouse wheel scroll within the transcript; `Escape` returns to the live tail. Typing also returns to the live composer and inserts the typed text without submitting it.
+
+Use `/recap` for an on-demand summary of the conversation, even when automatic idle recaps are disabled.
+
 ## Recover a cleared prompt
 
 Press `Ctrl+C` to clear an unsent composer draft, then `Up` to recall it. Older drafts and submitted prompts share the existing Up/Down navigation. Recalled drafts remain editable and are never sent until you submit them.

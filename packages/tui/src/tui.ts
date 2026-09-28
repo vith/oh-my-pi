@@ -20,9 +20,11 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { TuiDebugServer } from "./debug-server";
+import { isDesktopNotificationLive, onDesktopNotificationChange } from "./desktop-notify";
 import { isKeyRelease, matchesKey } from "./keys";
 import { KITTY_PLACEHOLDER } from "./kitty-graphics";
 import { LoopWatchdog } from "./loop-watchdog";
+import { routeSgrMouseInput } from "./mouse";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteAllImages,
@@ -421,6 +423,8 @@ export interface OverlayOptions {
 	 * when native terminal text selection takes precedence over pointer events.
 	 */
 	mouseTracking?: boolean;
+	/** Yield when another overlay opens or focus leaves this one. */
+	onYield?: () => void;
 }
 
 /**
@@ -853,6 +857,7 @@ export class TUI extends Container {
 	#sixelProbeBuffer = "";
 	#sixelProbeTimeout?: NodeJS.Timeout;
 	#sixelProbeUnsubscribe?: () => void;
+	#unsubscribeNotificationChange?: () => void;
 	#showHardwareCursor = $flag("PI_HARDWARE_CURSOR");
 	#synchronizedOutputEnabled = shouldEnableSynchronizedOutputByDefault();
 	#paintBeginSequence = this.#synchronizedOutputEnabled ? PAINT_BEGIN : PAINT_BEGIN_NO_SYNC;
@@ -1039,6 +1044,10 @@ export class TUI extends Container {
 	}
 
 	setFocus(component: Component | null): void {
+		const yielding = this.#getTopmostVisibleOverlay();
+		if (yielding?.options?.onYield && !isOverlayFocusTarget(yielding.component, component)) {
+			yielding.options.onYield();
+		}
 		const topVisibleOverlay = this.#getTopmostVisibleOverlay();
 		if (topVisibleOverlay && !isOverlayFocusTarget(topVisibleOverlay.component, component)) {
 			const currentFocus = this.#focusedComponent;
@@ -1094,6 +1103,7 @@ export class TUI extends Container {
 	 * Returns a handle to control the overlay's visibility.
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
+		this.#getTopmostVisibleOverlay()?.options?.onYield?.();
 		component.setIgnoreTight?.(true);
 		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false };
 		this.overlayStack.push(entry);
@@ -1275,6 +1285,10 @@ export class TUI extends Container {
 			this.invalidate();
 			this.requestRender(true);
 		});
+		this.terminal.onFocusChange?.(focused => {
+			if (focused) TERMINAL.closeNotification();
+		});
+		this.#unsubscribeNotificationChange = onDesktopNotificationChange(() => this.requestRender());
 		this.terminal.start(
 			data => this.#handleInput(data),
 			() => {
@@ -1970,6 +1984,8 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.#unsubscribeNotificationChange?.();
+		this.#unsubscribeNotificationChange = undefined;
 		this.#cancelPostmortemRestore?.();
 		this.#cancelPostmortemRestore = undefined;
 		this.#debugServer?.stop();
@@ -2265,6 +2281,11 @@ export class TUI extends Container {
 			data = data.slice(0, searchFrom + match.index) + data.slice(searchFrom + match.index + match[0].length);
 		}
 		if (data.length === 0) return;
+		const dismissingToast = isDesktopNotificationLive();
+		TERMINAL.closeNotification();
+		// The first click dismisses a live toast without activating controls
+		// underneath. Existing inline mouse routing resumes on subsequent input.
+		if (dismissingToast && !this.#altActive && routeSgrMouseInput(data, () => true)) return;
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every
 		// key would make idle navigation pay a full frame of latency.
@@ -3009,12 +3030,16 @@ export class TUI extends Container {
 		const wantAlt = topOverlay?.options?.fullscreen === true;
 		const wantMouse: MouseTrackingState =
 			topOverlay === undefined
-				? this.#inlineMouseProvider?.() === true
+				? this.#inlineMouseProvider?.() === true || isDesktopNotificationLive()
 					? "inline"
 					: "off"
-				: wantAlt && topOverlay.options?.mouseTracking !== false
-					? "full"
-					: "off";
+				: wantAlt
+					? topOverlay.options?.mouseTracking !== false
+						? "full"
+						: "off"
+					: isDesktopNotificationLive()
+						? "inline"
+						: "off";
 		if (wantAlt && !this.#altActive) {
 			// Enhanced keyboard modes can be buffer-local: re-push the active
 			// modified-key reporting sequence on the freshly entered alternate

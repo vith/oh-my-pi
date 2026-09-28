@@ -7137,6 +7137,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	// Input handling
+	openTranscriptScroll(delta: -1 | 1): void {
+		this.composer.openTranscriptScroll(delta, text => {
+			copyToClipboard(text).then(
+				() => this.showStatus("Copied selection to clipboard"),
+				(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
+			);
+		});
+	}
+
 	handleCtrlC(): void {
 		this.#inputController.handleCtrlC();
 	}
@@ -7181,6 +7190,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Queue slash-command input behind the active turn. */
 	handleQueueCommand(message: string): Promise<void> {
 		return this.#inputController.handleQueueCommand(message);
+	}
+
+	handleRecapCommand(): Promise<void> {
+		return this.#eventController.runRecap();
 	}
 
 	handleBtwCommand(question: string): Promise<void> {

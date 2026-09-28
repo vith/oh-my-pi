@@ -1,6 +1,6 @@
 import { encodeSixel } from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
-import { sendDesktopNotification, shouldDeliverDesktopNotification } from "./desktop-notify";
+import { closeDesktopNotification, sendDesktopNotification, shouldDeliverDesktopNotification } from "./desktop-notify";
 import {
 	detectKittyUnicodePlaceholdersSupport,
 	getKittyGraphics,
@@ -269,6 +269,25 @@ export class TerminalInfo {
 		// `monitor-bell` / X11 urgency hints / audible bell.
 		if (this.notifyProtocol === NotifyProtocol.Bell && shouldDeliverDesktopNotification(this.id, true)) {
 			sendDesktopNotification(message);
+		}
+	}
+
+	/** Clear the most recent addressable OSC 99 or D-Bus desktop notification. */
+	closeNotification(): void {
+		if (isNotificationSuppressed() || isTerminalHeadless()) return;
+		if (this.notifyProtocol === NotifyProtocol.Bell) {
+			if (shouldDeliverDesktopNotification(this.id, true)) closeDesktopNotification();
+			return;
+		}
+		if (this.notifyProtocol !== NotifyProtocol.Osc99 || !osc99CapabilitiesConfirmed) return;
+		const id = lastOsc99NotificationId;
+		if (!id) return;
+		lastOsc99NotificationId = null;
+		const formatted = `\x1b]99;${id};\x1b\\`;
+		if (isInsideTmux()) {
+			process.stdout.write(wrapTmuxPassthrough(formatted));
+		} else if (!isInsideZellij()) {
+			process.stdout.write(formatted);
 		}
 	}
 }
@@ -1430,6 +1449,17 @@ export function isOsc99Supported(): boolean {
 	return osc99CapabilitiesConfirmed;
 }
 
+/** OSC 17 selection highlight background, reported by the terminal. */
+let terminalSelectionBackground: string | undefined;
+
+export function setTerminalSelectionBackground(color: string | undefined): void {
+	terminalSelectionBackground = color;
+}
+
+export function getTerminalSelectionBackground(): string | undefined {
+	return terminalSelectionBackground;
+}
+
 /** Collapse a structured notification to a single line for non-OSC-99 sinks. */
 function notificationToLine(n: TerminalNotification): string {
 	if (n.title && n.body) return `${n.title}: ${n.body}`;
@@ -1441,6 +1471,13 @@ const OSC99_UNSAFE = /[\x00-\x1f\x7f\x80-\x9f]/u;
 const OSC99_MAX_PAYLOAD_BYTES = 2048;
 const OSC99_APP_NAME = "omp";
 let nextOsc99NotificationId = 1;
+let lastOsc99NotificationId: string | null = null;
+
+/** Reset OSC 99 notification state. Tests only. */
+export function resetOsc99NotificationState(): void {
+	lastOsc99NotificationId = null;
+	nextOsc99NotificationId = 1;
+}
 
 function base64Utf8(value: string): string {
 	return Buffer.from(value, "utf8").toString("base64");
@@ -1453,7 +1490,13 @@ function sanitizeOsc99Id(id: string | undefined): string {
 }
 
 function osc99Id(id: string | undefined): string {
-	return sanitizeOsc99Id(id) || `omp-${nextOsc99NotificationId++}`;
+	const safe = sanitizeOsc99Id(id);
+	if (safe) {
+		lastOsc99NotificationId = safe;
+		return safe;
+	}
+	if (!lastOsc99NotificationId) lastOsc99NotificationId = `omp-${nextOsc99NotificationId++}`;
+	return lastOsc99NotificationId;
 }
 
 function utf8CodePointBytes(char: string): number {
