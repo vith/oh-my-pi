@@ -12,6 +12,7 @@ steps:
       CARGO_HOME: /ci-cache/cargo
       CARGO_TARGET_DIR: /ci-cache/target
       CARGO_BUILD_JOBS: "2"
+      LIBCLANG_PATH: /usr/lib/llvm-19/lib
       OMP_TEST_CONCURRENCY: "1"
       RUSTUP_HOME: /opt/rustup
     commands:
@@ -29,10 +30,19 @@ steps:
         test -z "${CARGO_BUILD_TARGET:-}"
         test -z "${CROSS_TARGET:-}"
 
+        # The default checkout volume is on the small OS disk. Keep dependency
+        # installs, generated output, and scratch files on the dedicated CI disk.
+        workspace="$(mktemp -d /ci-cache/omp-workspace.XXXXXX)"
+        trap 'rm -rf -- "$workspace"' EXIT
+        cp -a . "$workspace/"
+        cd "$workspace"
+        export TMPDIR="$workspace/.tmp"
+        mkdir -p "$TMPDIR"
+
         # Exercise the fork's optional portal capture implementation, not only
         # the default build that compiles it out.
         apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang-dev
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang1-19
 
         bun install --frozen-lockfile
         bun run check:ts
