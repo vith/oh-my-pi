@@ -1,6 +1,15 @@
 # Native Linux ARM64 CI for the self-hosted Forgejo mirror.
 # One shared agent serializes all repos; this job mounts only the OMP cache.
 # Trusted volumes are enabled for this private repo; fork PRs require approval.
+# Fork versions require the upstream tag and complete commit ancestry.
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      tags: true
+      partial: false
+      depth: 0
+
 labels:
   platform: linux/arm64
 
