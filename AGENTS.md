@@ -270,7 +270,7 @@ For the bash tool specifically:
 
 - Commit coherent changes frequently with conventional subjects; never commit directly on `integration`.
 - Never use `tsc`/`npx tsc` — always `bun check`.
-- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass currently executes nothing (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs) and exists so the first runnable doctest added to a lib crate is actually run.
+- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a separate rustdoc pass. Keep runnable workspace doctests enabled. The vendored `napi` examples require addon-side dependencies and a JS host, so exclude that crate only from doctests; retain its working unit tests.
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
 ## Rust Build Profiles
 
@@ -327,6 +327,8 @@ Test the contract the system exposes — not the easiest internal detail to asse
 ## Changelog
 
 Location: `packages/*/CHANGELOG.md` (per package).
+
+**NEVER update changelogs unless explicitly asked.** Do not add, edit, or reorder entries as part of a feature, fix, or PR unless the user requests it.
 
 **Format** — sections under `## [Unreleased]`:
 
