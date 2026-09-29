@@ -11,6 +11,8 @@ steps:
       - /var/lib/woodpecker-runner/omp-cache/pr:/ci-cache
     environment:
       BUN_INSTALL_CACHE_DIR: /ci-cache/bun
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: /ci-cache/bun-transpiler
+      XDG_CACHE_HOME: /ci-cache/xdg
       CARGO_HOME: /ci-cache/cargo
       CARGO_TARGET_DIR: /ci-cache/target
       CARGO_BUILD_JOBS: "2"
@@ -34,13 +36,30 @@ steps:
 
         # Exercise the fork's optional portal capture implementation, not only
         # the default build that compiles it out.
-        apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libpipewire-0.3-dev libclang1-19 libclang-common-19-dev openssh-client
+        mkdir -p /ci-cache/apt/archives/partial /ci-cache/apt/lists/partial
+        apt-get -o Dir::State::lists=/ci-cache/apt/lists -o Dir::Cache::archives=/ci-cache/apt/archives update
+        DEBIAN_FRONTEND=noninteractive apt-get \
+          -o Dir::State::lists=/ci-cache/apt/lists \
+          -o Dir::Cache::archives=/ci-cache/apt/archives \
+          -o APT::Keep-Downloaded-Packages=true \
+          install -y --no-install-recommends libpipewire-0.3-dev libclang1-19 libclang-common-19-dev openssh-client rsync
+
+        # Fresh git checkouts otherwise invalidate Cargo's mtime fingerprints.
+        # Content synchronization preserves unchanged sources and dependency trees.
+        workspace="$(bash scripts/ci-prepare-workspace.sh "$PWD" /ci-cache/workspace)"
+        cd "$workspace"
 
         bun install --frozen-lockfile
+        bun test scripts/ci-prepare-workspace.test.ts
         bun run check:ts
         bun run check:rs
         OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
+        # A second identical build must reuse the linked Cargo artifact.
+        native_artifact="/ci-cache/target/aarch64-unknown-linux-gnu/ci/libpi_natives.so"
+        native_stamp="$(stat -c '%y' "$native_artifact")"
+        CARGO_LOG=cargo::core::compiler::fingerprint=info OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
+        test "$native_stamp" = "$(stat -c '%y' "$native_artifact")"
+        echo "Warm native build reused the linked artifact"
         bun run ci:test:full
         cargo nextest run -p pi-natives --features wayland-pipewire -E 'test(desktop::linux::wayland)'
         bun run collab:web:build

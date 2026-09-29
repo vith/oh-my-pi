@@ -259,7 +259,8 @@ For the bash tool specifically:
 
 - Work in dedicated `.worktrees/<name>` checkouts on `feat/*` branches; NEVER develop directly on `integration`.
 - Reuse a feature's branch for follow-up work. Preserve feature branches after merging.
-- Upstream catch-ups MUST use a branch → PR → green CI → merge workflow. NEVER compile locally; CI owns native builds, Rust checks, compiled binaries, and release builds. Local no-emit TypeScript checks and source-level tests are allowed.
+- Upstream catch-ups MUST use a branch → PR → validation → merge workflow. By default, builds and the full validation gate run in CI; local no-emit checks and source-level tests are allowed. Only an explicit user instruction may substitute equivalent local builds/checks for a particular PR. Record that exception and its evidence; NEVER describe canceled or failed remote CI as successful.
+- PR jobs persist APT lists/archives, Bun package/transpiler caches, and Cargo downloads/artifacts under `/ci-cache`. Use `scripts/ci-prepare-workspace.sh` to preserve unchanged source mtimes; serialize jobs sharing its cached workspace. Cache APT downloads rather than relying on automated base-image rebuilds.
 - For a clean-base reconstruction, start from the upstream release tag and port only retained feature-specific changes. NEVER merge old feature branches wholesale: their ancestry may include intentionally dropped features.
 - Preserve retained behavior, not obsolete implementation. Prefer current upstream APIs over resurrected duplicates; redesign poor fork integrations when necessary.
 - The fork permissions rework is retired. Use upstream approval behavior; do not restore its engine, dialogs, commands, or rule migration.
