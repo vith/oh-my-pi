@@ -9,6 +9,9 @@ steps:
     image: localhost/omp-ci:arm64
     volumes:
       - /var/lib/woodpecker-runner/omp-cache/pr:/ci-cache
+      # A separate mount lets APT's sandbox user traverse its cache without
+      # making the private compiler/dependency cache readable to that user.
+      - /var/lib/woodpecker-runner/omp-cache/pr/apt:/apt-cache
     environment:
       BUN_INSTALL_CACHE_DIR: /ci-cache/bun
       BUN_RUNTIME_TRANSPILER_CACHE_PATH: /ci-cache/bun-transpiler
@@ -36,11 +39,11 @@ steps:
 
         # Exercise the fork's optional portal capture implementation, not only
         # the default build that compiles it out.
-        mkdir -p /ci-cache/apt/archives/partial /ci-cache/apt/lists/partial
-        apt-get -o Dir::State::lists=/ci-cache/apt/lists -o Dir::Cache::archives=/ci-cache/apt/archives update
+        mkdir -p /apt-cache/archives/partial /apt-cache/lists/partial
+        apt-get -o Dir::State::lists=/apt-cache/lists -o Dir::Cache::archives=/apt-cache/archives update
         DEBIAN_FRONTEND=noninteractive apt-get \
-          -o Dir::State::lists=/ci-cache/apt/lists \
-          -o Dir::Cache::archives=/ci-cache/apt/archives \
+          -o Dir::State::lists=/apt-cache/lists \
+          -o Dir::Cache::archives=/apt-cache/archives \
           -o APT::Keep-Downloaded-Packages=true \
           install -y --no-install-recommends libpipewire-0.3-dev libclang1-19 libclang-common-19-dev openssh-client rsync
 
