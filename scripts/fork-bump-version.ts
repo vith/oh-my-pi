@@ -30,47 +30,12 @@ import * as path from "node:path";
  */
 import { $, Glob } from "bun";
 import { containsVersionStamp } from "../packages/natives/native/version-sentinel.js";
-import { compareVersions } from "../packages/utils/src/version.ts";
-
-const FORK_IDENTIFIER = process.env.OMP_FORK_IDENTIFIER?.trim() || "vith-fork";
-const IDENTIFIER_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-if (!IDENTIFIER_RE.test(FORK_IDENTIFIER)) {
-	console.error(`Error: fork identifier must match ${IDENTIFIER_RE} (got ${JSON.stringify(FORK_IDENTIFIER)})`);
-	process.exit(1);
-}
+import { prepareForkBuild } from "./prepare-fork-build.ts";
 
 const changelogGlob = new Glob("packages/*/CHANGELOG.md");
-const packageJsonGlob = new Glob("packages/*/package.json");
 
 function git(args: readonly string[]) {
 	return $`git -c core.fsmonitor=false -c core.untrackedCache=false ${args}`;
-}
-
-/**
- * Git state the fork version is derived from.
- */
-export interface ForkGitInfo {
-	/** Nearest upstream-style tag (`vX.Y.Z` without the `v`), if one is reachable. */
-	tagVersion: string | undefined;
-	/** Commits between the tag (or the repo root when no tag) and HEAD. */
-	commitsSince: number;
-	/** Short hash of HEAD. */
-	shortHash: string;
-}
-
-/**
- * Derive the fork version for the current commit.
- *
- * The core is the nearest upstream tag verbatim (or the current core version
- * when no tag is reachable) — the fork never bumps the patch, so the version
- * states exactly which upstream release it is based on. The build metadata is
- * `<identifier>.<commits since the tag>.<HEAD short hash>`, so the version is
- * deterministic per commit: new commits since the tag bump the count, and the
- * hash disambiguates two checkouts that share a count (e.g. after a sync).
- */
-export function deriveForkVersion(git: ForkGitInfo, currentVersion: string, identifier: string): string {
-	const base = git.tagVersion ?? currentVersion.split("+")[0];
-	return `${base}+${identifier}.${git.commitsSince}.${git.shortHash}`;
 }
 
 /**
@@ -95,14 +60,6 @@ export function nativesCacheDir(version: string, env: Record<string, string | un
 		return path.join(xdg, "omp", "natives", version);
 	}
 	return path.join(os.homedir(), ".omp", "natives", version);
-}
-
-/** Nearest reachable tag matching upstream release style `vX.Y.Z` (e.g. `v17.2.12`). */
-async function nearestTagVersion(): Promise<string | undefined> {
-	const result = await $`git describe --tags --abbrev=0 --match "v[0-9]*"`.quiet().nothrow();
-	if (result.exitCode !== 0) return undefined;
-	const tag = result.stdout.toString().trim().replace(/^v/, "");
-	return /^\d+\.\d+\.\d+$/.test(tag) ? tag : undefined;
 }
 
 function hasUnreleasedContent(content: string): boolean {
@@ -151,47 +108,9 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	// 2. Derive the fork version: nearest upstream tag verbatim (or the
-	// current core version when no tag is reachable), then
-	// `+identifier.commitCount.shortHash` so the version is deterministic per
-	// commit. The core is never bumped: the version must state the exact
-	// upstream release the fork is based on.
-	const tag = await nearestTagVersion();
-	const revList = tag
-		? await $`git rev-list --count ${`v${tag}`}..HEAD`.quiet()
-		: await $`git rev-list --count HEAD`.quiet();
-	const shortHash = (await $`git rev-parse --short HEAD`.quiet()).stdout.toString().trim();
-	const commitsSince = Number(revList.stdout.toString().trim());
-	if (!Number.isInteger(commitsSince) || commitsSince < 0) {
-		console.error(`Error: could not count commits since ${tag ? `v${tag}` : "the repo root"}`);
-		process.exit(1);
-	}
-	const current = (await Bun.file("packages/utils/package.json").json()) as { version: string };
-	const version = deriveForkVersion({ tagVersion: tag, commitsSince, shortHash }, current.version, FORK_IDENTIFIER);
-	console.log(
-		`  base: ${tag ?? current.version.split("+")[0]} (${tag ? "git tag" : "package.json fallback"}), commits: ${commitsSince}, head: ${shortHash}, target: ${version}`,
-	);
-
-	// The core equals the tag by design; build metadata (identifier.commits.hash)
-	// makes the version distinct. Only a strictly lower version is a mistake.
-	if (tag && compareVersions(version, tag) < 0) {
-		console.error(`Error: Version ${version} must not be older than latest tag v${tag}`);
-		process.exit(1);
-	}
-
-	// 3. Rewrite every public package.json version (mirrors release.ts:
-	// private packages are skipped).
-	console.log("Updating package versions...");
-	const pkgJsonPaths: string[] = [];
-	for await (const pkgPath of packageJsonGlob.scan(".")) {
-		const pkgJson = (await Bun.file(pkgPath).json()) as { private?: boolean; name: string };
-		if (pkgJson.private) {
-			console.log(`  Skipping ${pkgJson.name} (private)`);
-			continue;
-		}
-		pkgJsonPaths.push(pkgPath);
-	}
-	await $`sd '"version": "[^"]+"' ${`"version": "${version}"`} ${pkgJsonPaths}`;
+	// Package builds and full releases share the same derived JS/native identity.
+	const version = await prepareForkBuild(process.cwd());
+	console.log(`Prepared fork build ${version}`);
 
 	// 4. Root catalog pins (mirrors release.ts's regex exactly).
 	console.log("Updating root catalog versions...");

@@ -1,5 +1,20 @@
 # Contributing to omp
 
+## Scope: upstream contributions versus internal fork work
+
+The contributor-authorship and submission requirements below apply to PRs sent
+to upstream `can1357/oh-my-pi`, not maintainer integration PRs within this fork.
+For internal fork PRs, including `git.n3t.work/vith/oh-my-pi`, the assistant writes
+the description from verified changes and evidence. Do not request a
+human-written sentence from the user or attribute assistant-written prose to
+them. Internal PRs still follow the fork's branch, review, CI, and merge rules.
+
+Fork CI temporarily skips test execution until its runtime is optimized. It
+retains lint, formatting and type checks, builds the web UI and native CLI, and
+verifies the compiled executable reports the derived fork version. A passing
+fork pipeline does not mean the test suites passed; report skipped tests
+explicitly in internal PRs.
+
 Pull requests are welcome. Keep them focused, understand the work you submit,
 and be prepared to explain and maintain it.
 
@@ -40,7 +55,7 @@ link it from your pull request instead of creating another one.
 AI agents are welcome as tools, not as unattended contributors. Do not give an
 agent a vague goal and submit whatever it produces.
 
-Before opening a pull request, you must:
+Before opening an upstream pull request, you must:
 
 - constrain the agent to the agreed scope and reject unrelated changes;
 - review every changed file and understand the resulting behavior;
@@ -52,7 +67,7 @@ You are responsible for the code, regardless of who or what generated it.
 
 ## Pull request requirements
 
-Every pull request body **MUST include at least one sentence written by you, in
+Every upstream pull request body **MUST include at least one sentence written by you, in
 your own words**, explaining what changed and why. A generated summary, pasted
 agent transcript, or checklist alone does not satisfy this requirement.
 

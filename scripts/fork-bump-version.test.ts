@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { deriveForkVersion, nativesCacheDir } from "./fork-bump-version";
+import { nativesCacheDir } from "./fork-bump-version";
+import { deriveForkVersion } from "./prepare-fork-build";
 
 const tempDirs: string[] = [];
 
