@@ -6,6 +6,8 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
+import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { createBackgroundTanDispatchBlock } from "@oh-my-pi/pi-tui/chat/background-tan-message";
@@ -25,7 +27,6 @@ import {
 	type LateDiagnosticsFile,
 	LateDiagnosticsMessageComponent,
 } from "@oh-my-pi/pi-tui/chat/late-diagnostics-message";
-import { PermissionPendingComponent, type PermissionPendingDetails } from "../../modes/components/permission-pending";
 import {
 	groupedReadUsageCallIds,
 	ReadToolGroupComponent,
@@ -54,7 +55,6 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
-import { PERMISSION_PENDING_TYPE } from "../../tools/permissions/subagent";
 import { replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import {
@@ -244,11 +244,6 @@ export class UiHelpers {
 					}
 					if (message.customType === BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE) {
 						this.ctx.chatContainer.addChild(createBackgroundTanDispatchBlock(message as CustomMessage<unknown>));
-						break;
-					}
-					if (message.customType === PERMISSION_PENDING_TYPE) {
-						const component = new PermissionPendingComponent(message as CustomMessage<PermissionPendingDetails>);
-						this.ctx.chatContainer.addChild(component);
 						break;
 					}
 					const handoffComponent = createHandoffSummaryMessageComponent(
@@ -1121,7 +1116,7 @@ export class UiHelpers {
 					this.ctx.pendingMessagesContainer.addChild(new TruncatedText(queuedText, 1, 0));
 				}
 			}
-			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue") || "Alt+Up";
+			const dequeueKey = appKey(this.ctx.keybindings, "app.message.dequeue") || formatKeyHint("alt+up");
 			const hintText = theme.fg("dim", `  ${theme.tree.hook} ${dequeueKey} to edit`);
 			this.ctx.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}

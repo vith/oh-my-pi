@@ -2,7 +2,7 @@ import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	CompactOptions,
 	ExtensionActions,
@@ -19,7 +19,6 @@ import type {
 	ExtensionUiComponent,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
-	PermissionDialogRequest,
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
@@ -30,7 +29,6 @@ import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
-import { PermissionDialogComponent } from "../../modes/components/permission-dialog";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -39,6 +37,15 @@ import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 
 const MAX_WIDGET_LINES = 10;
+
+/**
+ * Footer hint for a guest-rendered ask selector. The guest's selector handles
+ * the keys, so the host can't know its bindings: advertise the defaults.
+ */
+function guestAskHelpText(enterAction: string, extra = ""): string {
+	return `${formatKeyHints(["up", "down"])} navigate  ${formatKeyHint("enter")} ${enterAction}  ${extra}${formatKeyHint("escape")} cancel`;
+}
+
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
@@ -84,10 +91,6 @@ export class ExtensionUiController {
 	// the rest queue. See `#presentDialog`.
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
-	/** flowId of the dialog currently presented (undefined for single-page dialogs). */
-	#dialogFlowId: string | undefined = undefined;
-	/** The flow whose page most recently settled — its next page claims the free slot. */
-	#lastSettledFlowId: string | undefined = undefined;
 	/**
 	 * Built once in `initHooksAndCustomTools()`. Reused directly by `/tree`
 	 * `ask` re-answer (issue #5642) to drive a standalone `AskTool.execute()`
@@ -120,8 +123,6 @@ export class ExtensionUiController {
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
-			showPermissionDialog: (request, dialogOptions) => this.showPermissionDialog(request, dialogOptions),
-			endPermissionFlow: flowId => this.endPermissionFlow(flowId),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setHookStatus(key, text),
@@ -657,7 +658,7 @@ export class ExtensionUiController {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
-		return this.#presentDialog<ExtensionAskDialogResult>(settle => {
+		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
 			let promptEditor: HookEditorComponent | undefined;
 			let promptResolve: ((value: string | undefined) => void) | undefined;
 			let closed = false;
@@ -755,7 +756,7 @@ export class ExtensionUiController {
 				this.ctx.ui.setFocus(this.ctx.editor);
 				this.ctx.ui.requestRender();
 			};
-		}, dialogOptions);
+		});
 	}
 
 	/**
@@ -858,9 +859,7 @@ export class ExtensionUiController {
 						selectionMarker: "checkbox",
 						checkedIndices,
 						markableCount: question.options.length,
-						helpText: hasAnswer
-							? "up/down navigate  enter toggle  Next → continue  esc cancel"
-							: "up/down navigate  enter toggle  esc cancel",
+						helpText: guestAskHelpText("toggle", hasAnswer ? "Next → continue  " : ""),
 					},
 					signal,
 				);
@@ -901,7 +900,7 @@ export class ExtensionUiController {
 						initialIndex,
 						selectionMarker: "radio",
 						markableCount: question.options.length,
-						helpText: "up/down navigate  enter select  esc cancel",
+						helpText: guestAskHelpText("select"),
 					},
 					signal,
 				);
@@ -956,7 +955,7 @@ export class ExtensionUiController {
 		dialogOptions?: InteractiveSelectorDialogOptions,
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
-		return this.#presentDialog(settle => {
+		return this.#presentDialog(dialogOptions?.signal, settle => {
 			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
 			this.ctx.hookSelector = new HookSelectorComponent(
 				title,
@@ -998,7 +997,7 @@ export class ExtensionUiController {
 			this.ctx.ui.setFocus(this.ctx.hookSelector);
 			this.ctx.ui.requestRender();
 			return () => this.hideHookSelector();
-		}, dialogOptions);
+		});
 	}
 	/**
 	 * Hide the hook selector.
@@ -1008,60 +1007,6 @@ export class ExtensionUiController {
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookSelector = undefined;
-		this.ctx.ui.setFocus(this.ctx.editor);
-		this.ctx.ui.requestRender();
-	}
-
-	/**
-	 * Show the permission approval dialog (rule candidates, YAML previews, piece
-	 * status list). Queued through the same single-surface dialog queue as
-	 * `showHookSelector`; resolves with the chosen option index, or `undefined`
-	 * when the user cancels.
-	 */
-	showPermissionDialog(
-		request: PermissionDialogRequest,
-		dialogOptions?: ExtensionUIDialogOptions,
-	): Promise<number | undefined> {
-		return this.#presentDialog<number>(settle => {
-			const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
-			this.ctx.permissionDialog = new PermissionDialogComponent(
-				request.title,
-				request.lines ?? [],
-				request.options,
-				index => settle(index),
-				() => settle(undefined),
-				{
-					// Sentinels (prompt.ts maps them, Task 6): a selection settles the
-					// raw option index; `e` on checklist row `index` settles -(index + 2);
-					// cancel settles undefined. -1 is the plain-cancel sentinel.
-					maxVisible,
-					initialIndex: request.initialIndex,
-					checklist: request.checklist,
-					allowEdit: request.allowEdit,
-					previewFor: request.previewFor,
-					helpText: request.helpText,
-					preselect: request.preselect,
-					ui: this.ctx.ui,
-					...(request.allowEdit === true ? { onEdit: index => settle(-(index + 2)) } : {}),
-					...(request.suggestions !== undefined ? { suggestions: request.suggestions, ui: this.ctx.ui } : {}),
-				},
-			);
-			this.ctx.editorContainer.clear();
-			this.ctx.editorContainer.addChild(this.ctx.permissionDialog);
-			this.ctx.ui.setFocus(this.ctx.permissionDialog);
-			this.ctx.ui.requestRender();
-			return () => this.hidePermissionDialog();
-		}, dialogOptions);
-	}
-
-	/**
-	 * Hide the permission dialog.
-	 */
-	hidePermissionDialog(): void {
-		this.ctx.permissionDialog?.dispose();
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(this.ctx.editor);
-		this.ctx.permissionDialog = undefined;
 		this.ctx.ui.setFocus(this.ctx.editor);
 		this.ctx.ui.requestRender();
 	}
@@ -1082,7 +1027,7 @@ export class ExtensionUiController {
 		placeholder?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
-		return this.#presentDialog(settle => {
+		return this.#presentDialog(dialogOptions?.signal, settle => {
 			this.ctx.hookInput = new HookInputComponent(
 				title,
 				placeholder,
@@ -1099,7 +1044,7 @@ export class ExtensionUiController {
 			this.ctx.ui.setFocus(this.ctx.hookInput);
 			this.ctx.ui.requestRender();
 			return () => this.hideHookInput();
-		}, dialogOptions);
+		});
 	}
 
 	/**
@@ -1123,7 +1068,7 @@ export class ExtensionUiController {
 		dialogOptions?: ExtensionUIDialogOptions,
 		editorOptions?: { promptStyle?: boolean },
 	): Promise<string | undefined> {
-		return this.#presentDialog(settle => {
+		return this.#presentDialog(dialogOptions?.signal, settle => {
 			this.ctx.hookEditor = new HookEditorComponent(
 				this.ctx.ui,
 				title,
@@ -1137,7 +1082,7 @@ export class ExtensionUiController {
 			this.ctx.ui.setFocus(this.ctx.hookEditor);
 			this.ctx.ui.requestRender();
 			return () => this.hideHookEditor();
-		}, dialogOptions);
+		});
 	}
 
 	/**
@@ -1322,27 +1267,21 @@ export class ExtensionUiController {
 
 	/**
 	 * Present a modal dialog on the shared editor surface, serializing against any
-	/**
-	 * Present one dialog on the single-dialog surface. All dialog kinds share
-	 * the queue: because selector / input / editor all clear `editorContainer`
-	 * and re-focus, showing a second while the first is open would orphan the
-	 * first — its promise would hang until the caller's signal aborts. So at
-	 * most one dialog is presented at a time and the rest queue (FIFO).
+	 * dialog already open. `present` builds the component, swaps it into
+	 * `editorContainer`, steals focus, and returns a `hide` closure; it is invoked
+	 * with a single `settle` callback that the component fires on submit/cancel.
 	 *
-	 * A permission decision is a multi-page FLOW: its pages share
-	 * `dialogOptions.flowId`, the first page acquires the slot, and follow-up
-	 * pages replace the active dialog in place (never queue). The flow holds
-	 * its slot until `endPermissionFlow` releases it — page settles do not
-	 * advance the queue, so a second flow can never interleave between a
-	 * flow's pages. Single-page dialogs (no flowId) keep the old semantics:
-	 * settle hides and immediately advances the queue.
+	 * Because selector / input / editor all clear `editorContainer` and re-focus,
+	 * showing a second one while the first is open would orphan the first — its
+	 * promise would hang until the caller's signal aborts. So at most one dialog is
+	 * presented at a time and the rest queue (FIFO). `settle` (or an abort) hides
+	 * the current dialog and hands the surface to the next queued request. A request
+	 * whose signal aborts before its turn resolves `undefined` and is never shown.
 	 */
 	#presentDialog<T = string>(
+		signal: AbortSignal | undefined,
 		present: (settle: (value: T | undefined) => void) => () => void,
-		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<T | undefined> {
-		const signal = dialogOptions?.signal;
-		const flowId = dialogOptions?.flowId;
 		const { promise, resolve, reject } = Promise.withResolvers<T | undefined>();
 		let settled = false;
 		let started = false;
@@ -1359,17 +1298,7 @@ export class ExtensionUiController {
 			if (started) {
 				hide?.();
 				this.#dialogActive = false;
-				if (flowId === undefined) {
-					// Single-page dialog: the surface is free for the queue.
-					this.#advanceDialogQueue();
-				} else {
-					// A flow keeps its slot across pages; its next page claims
-					// the free surface (see the dispatch below), and its own
-					// endPermissionFlow releases it — never advance here, or a
-					// sibling flow's page would interleave between this flow's
-					// pages.
-					this.#lastSettledFlowId = flowId;
-				}
+				this.#advanceDialogQueue();
 			}
 			resolve(value);
 		};
@@ -1382,14 +1311,12 @@ export class ExtensionUiController {
 			}
 			started = true;
 			this.#dialogActive = true;
-			this.#dialogFlowId = flowId;
 			try {
 				hide = present(settle);
 			} catch (error) {
 				settled = true;
 				signal?.removeEventListener("abort", onAbort);
 				this.#dialogActive = false;
-				this.#dialogFlowId = undefined;
 				reject(error);
 				this.#advanceDialogQueue();
 			}
@@ -1402,34 +1329,11 @@ export class ExtensionUiController {
 		signal?.addEventListener("abort", onAbort, { once: true });
 
 		if (this.#dialogActive) {
-			if (flowId !== undefined && flowId === this.#dialogFlowId) {
-				// Same flow, next page: the previous page already settled and
-				// hid; swap in the new page without touching the queue.
-				startPresentation();
-			} else {
-				this.#dialogQueue.push(startPresentation);
-			}
-		} else if (flowId !== undefined && flowId === this.#lastSettledFlowId) {
-			// The flow whose page just settled continues — its next page
-			// claims the free slot before any queued dialog.
-			startPresentation();
-		} else if (this.#dialogQueue.length === 0) {
-			// Nothing queued and no continuing flow: first come, first served.
-			startPresentation();
-		} else {
 			this.#dialogQueue.push(startPresentation);
+		} else {
+			startPresentation();
 		}
 		return promise;
-	}
-
-	/**
-	 * Release the slot held by a permission dialog flow: called once the
-	 * flow's last page has settled, handing the surface to the next queued
-	 * dialog.
-	 */
-	endPermissionFlow(_flowId: string): void {
-		this.#lastSettledFlowId = undefined;
-		this.#advanceDialogQueue();
 	}
 
 	#advanceDialogQueue(): void {

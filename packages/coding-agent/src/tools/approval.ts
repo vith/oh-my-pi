@@ -9,7 +9,6 @@
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 import type { Settings } from "../config/settings";
 
-import type { EngineDecision } from "./permissions/engine";
 import { cfgToolsApproval, cfgToolsApprovalMode } from "./settings";
 
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
@@ -89,12 +88,6 @@ export interface ResolvedApproval {
 	reason?: string;
 	override: boolean;
 	source?: "tool" | "user" | "mode";
-	/**
-	 * Full engine decision attached by tool approvals that run the engine
-	 * themselves (the bash tool's per-piece analysis, spec §7). Carried
-	 * through so the audit-visible decision keeps piece-level attribution.
-	 */
-	engineDecision?: EngineDecision;
 	/** User-policy key that produced `source: "user"` (defaults to the tool name). */
 	policyKey?: string;
 }
@@ -133,7 +126,7 @@ const APPROVAL_MODE_MAX_TIER: Record<ApprovalMode, ToolTier> = {
 const DEFAULT_PROMPT_TRUNCATE_CHARS = 2000;
 
 /** Best-effort conversion of an arbitrary user-supplied value to a policy. */
-export function normalizePolicy(value: unknown): ApprovalPolicy | undefined {
+function normalizePolicy(value: unknown): ApprovalPolicy | undefined {
 	if (typeof value !== "string") return undefined;
 	const lowered = value.trim().toLowerCase();
 	return POLICY_VALUES.has(lowered as ApprovalPolicy) ? (lowered as ApprovalPolicy) : undefined;
@@ -153,11 +146,6 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 		const tier = isToolTier(record.tier) ? record.tier : "exec";
 		const reason = typeof record.reason === "string" && record.reason.length > 0 ? record.reason : undefined;
 		const policy = normalizePolicy(record.policy);
-		const rawEngine = record.engineDecision;
-		const engineDecision =
-			rawEngine !== null && typeof rawEngine === "object" && !Array.isArray(rawEngine)
-				? (rawEngine as EngineDecision)
-				: undefined;
 		const policyKey =
 			typeof record.policyKey === "string" && record.policyKey.length > 0 ? record.policyKey : undefined;
 		return {
@@ -165,7 +153,6 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 			override: record.override === true,
 			...(policy ? { policy } : {}),
 			...(reason ? { reason } : {}),
-			...(engineDecision !== undefined ? { engineDecision } : {}),
 			...(policyKey ? { policyKey } : {}),
 		};
 	}
@@ -173,7 +160,7 @@ function normalizeDecision(value: unknown): Omit<ResolvedApproval, "policy"> & {
 	return { tier: "exec", override: false };
 }
 
-export function getToolDecision(
+function getToolDecision(
 	tool: ApprovalSubject,
 	args: unknown,
 ): Omit<ResolvedApproval, "policy"> & { policy?: ApprovalPolicy } {
@@ -266,18 +253,6 @@ export function resolveApproval(
 	}
 
 	if (mode === "yolo") {
-		// User `tools.approval` settings remain authoritative: an explicit
-		// user prompt beats a tool-declared allow (upstream compound-approval
-		// parity — e.g. a pattern-allowed `&&` chain under `bash: prompt`).
-		if (decision.policy === "allow" && combinedUserPolicy === "prompt") {
-			return {
-				policy: "prompt",
-				tier: decision.tier,
-				override: false,
-				source: "user",
-				...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
-			};
-		}
 		if (decision.policy) {
 			return {
 				policy: decision.policy,
@@ -305,17 +280,6 @@ export function resolveApproval(
 			source: "tool",
 			...(decision.policyKey ? { policyKey: decision.policyKey } : {}),
 			...(decision.reason ? { reason: decision.reason } : {}),
-		};
-	}
-
-	// A user prompt beats a tool allow (same authoritativeness outside yolo).
-	if (decision.policy === "allow" && combinedUserPolicy === "prompt") {
-		return {
-			policy: "prompt",
-			tier: decision.tier,
-			override: false,
-			source: "user",
-			...(combinedUserPolicyKey ? { policyKey: combinedUserPolicyKey } : {}),
 		};
 	}
 

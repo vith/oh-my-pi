@@ -21,8 +21,6 @@ declare module "@oh-my-pi/pi-agent-core" {
 		xdevTierResolved?(tier: "read" | "write" | "exec"): void;
 		/** Set only after an interactive prompt approves provider computer safety checks. */
 		providerSafetyApproved?: boolean;
-		/** Permission-engine home override (defaults to os.homedir() when absent); set by embedding/SDK hosts to isolate rule files. */
-		home?: string;
 	}
 }
 

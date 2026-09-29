@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { resolveThresholdTokens, shouldCompact } from "@oh-my-pi/pi-agent-core/compaction";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -107,6 +107,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
+		setIrcWakeTurnSettlement: (_next: unknown) => {},
 		setIrcWakeTurnAdmission: (next: FollowUpAdmission | undefined) => {
 			admission = next;
 		},
@@ -926,13 +927,14 @@ describe("persisted subagent revival", () => {
 				id: ref.id,
 				displayName: ref.displayName,
 				kind: "sub",
+				parentId: ref.parentId,
 				session: null,
 				sessionFile,
 				status: "parked",
 			});
-			const reviver = await createFactory(cwd)(ref);
-			if (!reviver) throw new Error("Expected a persisted reviver");
-			await reviver(ref);
+			const lifecycle = AgentLifecycleManager.global();
+			lifecycle.setPersistedSubagentReviverFactory(createFactory(cwd), () => 0);
+			await lifecycle.ensureLive(ref.id);
 			if (!handle) throw new Error("Expected a revived session");
 			return { ref, handle };
 		}
@@ -1182,6 +1184,40 @@ describe("persisted subagent revival", () => {
 });
 
 describe("buildWakeRelayBody", () => {
+	it("reports a paused wake as awaiting follow-up, not a completed answer or cancellation", () => {
+		const result = {
+			index: 0,
+			id: "PausedPeer",
+			agent: "task",
+			agentSource: "bundled",
+			task: "ask for external action",
+			exitCode: 0,
+			output: "",
+			stderr: "",
+			truncated: false,
+			durationMs: 10,
+			tokens: 0,
+			requests: 1,
+			paused: { toolName: "external_action", toolCallId: "call-1" },
+		} satisfies SingleResult;
+
+		const body = buildWakeRelayBody({
+			id: "PausedPeer",
+			yielded: false,
+			result,
+			turnText: "",
+			error: undefined,
+			aborted: false,
+			abortReason: undefined,
+			finalizeError: undefined,
+			alreadyMessaged: false,
+		});
+		expect(body).toContain("paused awaiting follow-up");
+		expect(body).toContain("history://PausedPeer");
+		expect(body).not.toContain("cancelled");
+		expect(body).not.toContain("produced no output");
+	});
+
 	// A wake turn can yield an artifact and then fail on a later provider call
 	// (`finalizeRunResult` rewrites `<id>.md` on `hasYield`, and the error lane
 	// does not exclude a prior yield). The observer seam cannot drive a real

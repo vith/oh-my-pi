@@ -9,8 +9,6 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { registerPersistedSubagents } from "../registry/persisted-agents";
 import { parseSessionEntries } from "../session/session-loader";
-import { setPendingApprovalLookup } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
-import { pendingApprovalsForSession } from "../tools/permissions/subagent";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
@@ -35,7 +33,6 @@ export function createAgentHubRuntime(
 	"registry" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "transcript" | "loadPersisted" | "getRoleInfo"
 > {
 	const registry = options.registry ?? AgentRegistry.global();
-	setPendingApprovalLookup(id => pendingApprovalsForSession(id).length);
 	return {
 		registry,
 		lifecycle: () => options.lifecycle ?? AgentLifecycleManager.global(),

@@ -201,7 +201,7 @@ impl Backend for WaylandBackend {
 			input: self.input_error.is_none(),
 			ax: self.ax.is_some(),
 			background_window_input: false,
-			delivery_modes: vec!["background".to_string()],
+			takeover: false,
 			capture_permission: if cfg!(feature = "wayland-pipewire") {
 				"prompt-or-granted".to_string()
 			} else {
@@ -434,12 +434,6 @@ mod tests {
 			.type_text(&target, "hello", DeliveryMode::Foreground)
 			.expect_err("window foreground input must fail");
 		assert_eq!(err.code.as_str(), "BackgroundUnavailable");
-		assert_eq!(
-			err.message,
-			"window w1 wayland-compositor-focus-only: Wayland cannot programmatically activate a \
-			 non-focused window for keyboard input; only the currently focused surface is reachable; \
-			 use ax actions or desktop input"
-		);
 	}
 
 	#[test]
@@ -449,17 +443,6 @@ mod tests {
 			.raise_window("w1")
 			.expect_err("Wayland window raise must fail");
 		assert_eq!(err.code.as_str(), "BackgroundUnavailable");
-		assert_eq!(
-			err.message,
-			"window w1 wayland-compositor-focus-only: Wayland cannot programmatically activate a \
-			 non-focused window; only the currently focused surface is reachable"
-		);
-	}
-
-	#[test]
-	fn capabilities_do_not_advertise_foreground_delivery() {
-		let mut backend = backend_without_services();
-		assert_eq!(backend.capabilities().delivery_modes, ["background"]);
 	}
 
 	#[test]

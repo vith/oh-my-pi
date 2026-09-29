@@ -3,7 +3,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -159,7 +159,7 @@ describe("AgentSession IRC wake admission", () => {
 		}
 	});
 
-	it("defers a concurrently admitted wake until the active wake settles", async () => {
+	it("defers a concurrently admitted wake until the active wake settles, then observes its own turn", async () => {
 		const firstProviderRelease = Promise.withResolvers<void>();
 		const { session, providerStarts, firstProviderStarted, tempDir } = await createParkedSession({
 			holdFirstProvider: firstProviderRelease.promise,
@@ -203,7 +203,7 @@ describe("AgentSession IRC wake admission", () => {
 			firstProviderRelease.resolve();
 			await Bun.sleep(50);
 			expect(providerStarts()).toBe(2);
-			expect(observedBodies).toEqual(["first"]);
+			expect(observedBodies).toEqual(["first", "second"]);
 			expect(
 				session.agent.state.messages.flatMap(message =>
 					message.role === "custom" && message.customType === "irc:incoming" ? [ircRecordBody(message)] : [],
@@ -215,7 +215,7 @@ describe("AgentSession IRC wake admission", () => {
 		}
 	});
 
-	it("defers a wake whose lifecycle admission resolves after disposal", async () => {
+	it("keeps a wake in the inbox when its lifecycle admission resolves after disposal", async () => {
 		const { session, providerStarts, tempDir } = await createParkedSession();
 		try {
 			const admissionEntered = Promise.withResolvers<void>();
@@ -241,6 +241,38 @@ describe("AgentSession IRC wake admission", () => {
 			expect(observerStarts).toBe(0);
 			expect(providerStarts()).toBe(0);
 			expect(session.drainPendingIrcInboxMessages("child").map(record => record.body)).toEqual(["do not start"]);
+			expect(session.drainPendingIrcInboxMessages("child")).toEqual([]);
+		} finally {
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("restores outstanding admissions to the disposed inbox in arrival order", async () => {
+		const { session, providerStarts, tempDir } = await createParkedSession();
+		try {
+			const entered = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			const releases = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+			let admissionCount = 0;
+			session.setIrcWakeTurnAdmission(async () => {
+				const index = admissionCount++;
+				entered[index]?.resolve();
+				await releases[index]?.promise;
+			});
+
+			await session.deliverIrcMessage(message("irc-dispose-first", "first"));
+			await entered[0]?.promise;
+			await session.deliverIrcMessage(message("irc-dispose-second", "second"));
+			await entered[1]?.promise;
+			session.beginDispose();
+			releases[1]?.resolve();
+			releases[0]?.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+
+			expect(providerStarts()).toBe(0);
+			expect(session.drainPendingIrcInboxMessages("child").map(record => record.body)).toEqual(["first", "second"]);
+			expect(session.drainPendingIrcInboxMessages("child")).toEqual([]);
 		} finally {
 			await session.dispose();
 			tempDir.removeSync();
@@ -360,6 +392,31 @@ describe("AgentSession IRC wake admission", () => {
 			await lifecycle.dispose();
 			AgentLifecycleManager.resetGlobalForTests();
 			AgentRegistry.resetGlobalForTests();
+			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("keeps an admitted wake's settlement when the same policy is reinstalled", async () => {
+		const firstProviderRelease = Promise.withResolvers<void>();
+		const { session, firstProviderStarted, tempDir } = await createParkedSession({
+			holdFirstProvider: firstProviderRelease.promise,
+		});
+		try {
+			const settled = Promise.withResolvers<void>();
+			const bodies: string[] = [];
+			const policy = (records: readonly object[]) => {
+				bodies.push(String(records[0] && ircRecordBody(records[0])));
+				settled.resolve();
+			};
+			session.setIrcWakeTurnSettlement(policy);
+			await session.deliverIrcMessage(message("irc-same-policy", "settle this turn"));
+			await firstProviderStarted;
+			session.setIrcWakeTurnSettlement(policy);
+			firstProviderRelease.resolve();
+			await settled.promise;
+			expect(bodies).toEqual(["settle this turn"]);
+		} finally {
 			await session.dispose();
 			tempDir.removeSync();
 		}

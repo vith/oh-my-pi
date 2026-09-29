@@ -5,7 +5,6 @@ import {
 	buildArgumentCompletions,
 	buildDirectoryArgumentCompletions,
 	buildMcpArgumentCompletions,
-	buildPermissionsArgumentCompletions,
 	buildModelSelectorCompletions,
 	buildStaticInlineHint,
 	buildSubcommandInlineHint,
@@ -63,7 +62,10 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		name: command.name,
 		aliases: command.aliases,
 		allowArgs: command.allowArgs === true,
-		description: command.description,
+		// Getter: some descriptions name keys, formatted at read time (theme/preset may change).
+		get description() {
+			return command.description;
+		},
 		icon: command.icon,
 		subcommands: command.subcommands,
 		inlineHint: command.inlineHint,
@@ -80,9 +82,7 @@ function materializeTuiBuiltinSlashCommand(
 		materialized.getArgumentCompletions =
 			cmd.name === "mcp" && runtime
 				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
-				: cmd.name === "permissions" && runtime
-					? buildPermissionsArgumentCompletions(cmd.subcommands, runtime)
-					: buildArgumentCompletions(cmd.subcommands);
+				: buildArgumentCompletions(cmd.subcommands);
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();

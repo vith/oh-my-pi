@@ -82,14 +82,9 @@ function createYieldingSession(): AgentSession {
 				},
 				isError: false,
 			});
+			return true;
 		},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
-		abort: async () => {},
-		dispose: async () => {},
-		setIrcWakeTurnObserver: () => {},
-		setIrcWakeTurnAdmission: (_next: unknown) => {},
-		setIrcWakeTurnSettlement: (_next: unknown) => {},
-		subscribeRunState: () => () => {},
 	} as unknown as AgentSession;
 }
 

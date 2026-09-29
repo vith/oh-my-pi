@@ -272,43 +272,23 @@ export class TerminalInfo {
 		}
 	}
 
-	/**
-	 * Close the notification this process most recently sent, if any.
-	 * Complements {@link sendNotification}'s replace semantics: sends collapse
-	 * into one live toast (no unread pile-up), and this clears it once it is
-	 * stale (ask answered, user back at the terminal). Mirrors the send path's
-	 * gates and multiplexer handling:
-	 * - OSC 99 closes by the id of the last notification (kitty's
-	 *   `OSC 99 ; <id> ; ST`); no trailing BEL — closing must not ring a bell.
-	 * - Bell-protocol hosts fan the close out to D-Bus
-	 *   (`CloseNotification`) when the same gate as {@link sendNotification}
-	 *   is open.
-	 * - OSC 9 and cmux surfaces have no close surface; the call is a no-op.
-	 */
+	/** Clear the most recent addressable OSC 99 or D-Bus desktop notification. */
 	closeNotification(): void {
 		if (isNotificationSuppressed() || isTerminalHeadless()) return;
 		if (this.notifyProtocol === NotifyProtocol.Bell) {
-			if (shouldDeliverDesktopNotification(this.id, true)) {
-				closeDesktopNotification();
-			}
+			if (shouldDeliverDesktopNotification(this.id, true)) closeDesktopNotification();
 			return;
 		}
-		// Only rich OSC 99 notifications carry an id; without one there is
-		// nothing addressable to close (plain OSC 99 / OSC 9 collapse forms
-		// expire on their own). Also skip under Zellij, which drops the OSC
-		// anyway and must not be flagged with a BEL.
 		if (this.notifyProtocol !== NotifyProtocol.Osc99 || !osc99CapabilitiesConfirmed) return;
 		const id = lastOsc99NotificationId;
 		if (!id) return;
+		lastOsc99NotificationId = null;
 		const formatted = `\x1b]99;${id};\x1b\\`;
 		if (isInsideTmux()) {
-			// Passthrough so the close reaches the outer terminal; deliberately
-			// no trailing BEL (see doc comment).
 			process.stdout.write(wrapTmuxPassthrough(formatted));
-			return;
+		} else if (!isInsideZellij()) {
+			process.stdout.write(formatted);
 		}
-		if (isInsideZellij()) return;
-		process.stdout.write(formatted);
 	}
 }
 
@@ -553,11 +533,15 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  * Policy (highest precedence first):
  *   1. Explicit user override (`PI_NO_HYPERLINKS=1` off, `PI_FORCE_HYPERLINKS=1`
  *      on). Opt-out wins ties.
- *   2. Static terminal capability — terminals whose {@link TerminalInfo} marks
+ *   2. Herdr pane with no nested screen/tmux: on. Herdr hides the outer
+ *      terminal (`TERM=xterm-256color`, no `TERM_PROGRAM`), but it renders
+ *      OSC 8 in its own grid and opens links itself on Ctrl+click, so the
+ *      outer terminal's support does not matter.
+ *   3. Static terminal capability — terminals whose {@link TerminalInfo} marks
  *      `hyperlinks: false` (e.g. `base`) stay off unless the user forced on.
- *   3. GNU screen's explicit session marker (`STY`) always off, even if tmux is
+ *   4. GNU screen's explicit session marker (`STY`) always off, even if tmux is
  *      also present: a screen layer anywhere in the path cannot forward OSC 8.
- *   4. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
+ *   5. tmux session (`TMUX` set): enabled when tmux self-reports >= 3.4 via
  *      `TERM_PROGRAM_VERSION` (tmux 3.4 stores OSC 8 as a cell attribute and
  *      forwards it to outer terminals whose `terminal-features` include
  *      `hyperlinks`). Older or unknown versions stay off; on outer terminals
@@ -565,11 +549,11 @@ function parseTmuxVersionFromEnv(env: NodeJS.ProcessEnv): { major: number; minor
  *      identical to today. Checked before the screen-family TERM heuristic
  *      because tmux's historical `default-terminal` is `screen-256color`, so
  *      `TERM=screen*` inside a tmux session must NOT short-circuit to off.
- *   5. screen-family TERM without `TMUX` always off: screen never gained OSC 8
+ *   6. screen-family TERM without `TMUX` always off: screen never gained OSC 8
  *      support.
- *   6. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
+ *   7. tmux-family TERM without `TMUX` env — unusual (e.g. inspection scripts);
  *      no version available, so off.
- *   7. Otherwise honor the static terminal capability.
+ *   8. Otherwise honor the static terminal capability.
  */
 export function shouldEnableHyperlinksByDefault(
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -577,6 +561,8 @@ export function shouldEnableHyperlinksByDefault(
 ): boolean {
 	const override = hyperlinksUserOverride(env);
 	if (override !== null) return override;
+
+	if (isInsideHerdr(env) && !env.STY && !env.TMUX) return true;
 
 	if (!getTerminalInfo(terminalId).hyperlinks) return false;
 
@@ -1463,20 +1449,13 @@ export function isOsc99Supported(): boolean {
 	return osc99CapabilitiesConfirmed;
 }
 
-/**
- * The terminal's own selection background (`#rrggbb`), reported by the OSC 17
- * highlight-color probe. Undefined until a terminal answers; views that draw
- * their own selection fall back to reverse video, which also follows the
- * user's palette.
- */
+/** OSC 17 selection highlight background, reported by the terminal. */
 let terminalSelectionBackground: string | undefined;
 
-/** Record the OSC 17 probe result (called by ProcessTerminal). */
 export function setTerminalSelectionBackground(color: string | undefined): void {
 	terminalSelectionBackground = color;
 }
 
-/** The terminal's reported selection background, if it answered the probe. */
 export function getTerminalSelectionBackground(): string | undefined {
 	return terminalSelectionBackground;
 }
@@ -1492,14 +1471,6 @@ const OSC99_UNSAFE = /[\x00-\x1f\x7f\x80-\x9f]/u;
 const OSC99_MAX_PAYLOAD_BYTES = 2048;
 const OSC99_APP_NAME = "omp";
 let nextOsc99NotificationId = 1;
-
-/**
- * Id of the last OSC 99 notification this process sent. Kitty replaces
- * notifications that share an id, so id-less sends reuse this id: consecutive
- * toasts collapse into one entry instead of stacking, and
- * {@link TerminalInfo.closeNotification} can address the live one. Explicit
- * caller-supplied ids are honored and become the live id.
- */
 let lastOsc99NotificationId: string | null = null;
 
 /** Reset OSC 99 notification state. Tests only. */
@@ -1524,9 +1495,7 @@ function osc99Id(id: string | undefined): string {
 		lastOsc99NotificationId = safe;
 		return safe;
 	}
-	if (!lastOsc99NotificationId) {
-		lastOsc99NotificationId = `omp-${nextOsc99NotificationId++}`;
-	}
+	if (!lastOsc99NotificationId) lastOsc99NotificationId = `omp-${nextOsc99NotificationId++}`;
 	return lastOsc99NotificationId;
 }
 

@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, expect, it, vi } from "bun:test";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
+import { createStartupStatusLine } from "@oh-my-pi/pi-tui/status-line/startup";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -31,7 +32,7 @@ async function mount(turns: number, options: { band?: Component[] } = {}) {
 		preferences: {
 			quiet: true,
 			spellingTypoDetection: false,
-			spellingAutocomplete: false,
+			spellingAutocomplete: "off",
 			spellingAutocorrect: false,
 		},
 	});
@@ -45,7 +46,17 @@ async function mount(turns: number, options: { band?: Component[] } = {}) {
 	const band = new Container();
 	for (const child of options.band ?? []) band.addChild(child);
 	band.addChild(composer.editor);
-	composer.setStatusComponent(new Text("STATUS", 0, 0));
+	const status = createStartupStatusLine({
+		settings: {},
+		gitEnabled: false,
+		autoThinking: false,
+		fastMode: false,
+		usingSubscription: false,
+		autoCompactEnabled: false,
+		compactionBoundaries: null,
+	});
+	vi.spyOn(status, "render").mockReturnValue(["STATUS"]);
+	composer.setStatusComponent(status);
 	composer.setRuntimeChildren([transcript, new Text("TODO PANEL", 0, 0), band]);
 	composer.start({ playWelcomeIntro: false });
 	await scheduler.settle(terminal);

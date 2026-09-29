@@ -31,11 +31,8 @@ function createGuard(
 		promptGeneration: () => 0,
 		emitNotice() {},
 		schedulePostPromptTask() {},
+		async continueAgent() {},
 		discardAssistantTurn() {},
-		// The fork's guard host requires continueAgent (session admission/
-		// executor paths); the upstream helper predates it and would not
-		// compile against the merged StreamGuardsHost without this stub.
-		continueAgent: async () => {},
 	});
 	return { guard, aborts };
 }

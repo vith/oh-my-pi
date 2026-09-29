@@ -172,10 +172,14 @@ export const STDOUT_BACKLOG_CLEAR_BYTES = 256 * 1024;
 /**
  * How long an armed backlog may go without any drain progress before the
  * consumer is declared gone. A slow-but-alive terminal keeps reaching new
- * low-water marks (so it never trips); a wedged one that flushes nothing is
- * torn down within this window.
+ * low-water marks (so it never trips), but a live one can also stop reading
+ * for seconds at a time: a busy tmux server holding a slow client, or a
+ * container's attach stream. Waiting costs no memory, because frames are
+ * deferred while the backlog is up (`TUI.#deferRenderForOutputBacklog`), so the
+ * window is long enough to ride those out; a reader that never comes back is
+ * still torn down within it.
  */
-const STDOUT_STALL_TIMEOUT_MS = 2_000;
+const STDOUT_STALL_TIMEOUT_MS = 60_000;
 
 /** Cadence at which {@link ProcessTerminal} re-samples the backlog while an episode is armed. */
 const STDOUT_STALL_POLL_MS = 250;
@@ -427,7 +431,7 @@ export function emergencyTerminalRestore(): void {
 					"\x1b[<u" + // Pop kitty keyboard protocol
 					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
 					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
-					"\x1b[?1004l" + // Disable focus reporting (click-to-dismiss arming)
+					"\x1b[?1004l" + // Disable focus reporting
 					// Leave the alternate screen only when a fullscreen overlay
 					// actually holds it — on Windows, DECRST 1049 on the main
 					// buffer homes the cursor (unconditional CursorRestoreState
@@ -636,13 +640,6 @@ export interface Terminal {
 	 */
 	onPrivateModeReport?(callback: PrivateModeReportHandler): void;
 	/**
-	 * Register a callback invoked with `true` on focus-in (`CSI I`) and
-	 * `false` on focus-out (`CSI O`), while DECSET 1004 focus reporting is
-	 * enabled (see ProcessTerminal.start()). Optional so custom Terminals
-	 * built against older pi-tui versions keep working.
-	 */
-	onFocusChange?(callback: (focused: boolean) => void): void;
-	/**
 	 * Register a callback fired once the startup Glyph Protocol handshake
 	 * resolves (see {@link GlyphProtocolReportHandler}). A subscriber that
 	 * arrives after the handshake already resolved is called immediately with
@@ -650,6 +647,8 @@ export interface Terminal {
 	 * pi-tui versions keep working.
 	 */
 	onGlyphProtocolReport?(callback: GlyphProtocolReportHandler): void;
+	/** Subscribe to DECSET 1004 focus-in/out reports. */
+	onFocusChange?(callback: (focused: boolean) => void): void;
 }
 
 /**
@@ -677,16 +676,15 @@ type Da1SentinelOwner =
 
 let nextOsc99ProbeId = 1;
 
-/** OSC 17 (highlight background) reply: `rgb:R/G/B` with 1-4 hex digits per channel, BEL or ST. */
+/** OSC 17 highlight-color reply with 1–4 hex digits per channel. */
 const osc17ResponsePattern =
 	/^\x1b\]17;rgba?:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})(?:\/[0-9a-fA-F]{1,4})?(?:\x07|\x1b\\)$/;
 
-/** Scale one X11 color channel of 1-4 hex digits to a two-digit byte. */
 function x11ChannelToByte(hex: string): string {
 	const value = parseInt(hex, 16);
-	const max = 16 ** hex.length - 1;
-	const byte = Number.isNaN(value) || max <= 0 ? 0 : Math.round((value / max) * 255);
-	return byte.toString(16).padStart(2, "0");
+	return Math.round((value / (16 ** hex.length - 1)) * 255)
+		.toString(16)
+		.padStart(2, "0");
 }
 
 function parseOsc99KeyValues(section: string): Map<string, string> {
@@ -732,7 +730,6 @@ export interface ProcessTerminalOptions {
 export class ProcessTerminal implements Terminal {
 	#wasRaw = false;
 	#inputHandler?: (data: string) => void;
-	/** OSC 1004 focus-reporting subscriber (single consumer: the TUI). */
 	#focusHandler?: (focused: boolean) => void;
 	#resizeHandler?: () => void;
 	/** True between a `deferInput` start() and enableInput(). */
@@ -792,6 +789,10 @@ export class ProcessTerminal implements Terminal {
 	// enqueues frames and performs the blocking write(2) on its own thread;
 	// `pendingOutputBytes` exposes the backlog for render-side frame skipping.
 	#outputPump?: TtyWriter;
+	// Upper bound on the pump's backlog: the count its last enqueue or read
+	// reported. Only #safeWrite enqueues and the pump thread only drains, so
+	// the live backlog cannot exceed this until the next enqueue refreshes it.
+	#pumpBacklogBound = 0;
 
 	#windowsVTInputRestore?: () => void;
 	#xtermScrollToBottomRestoreModes = new Set<number>();
@@ -833,6 +834,11 @@ export class ProcessTerminal implements Terminal {
 	#reportedRows?: number;
 	#mode2031DebounceTimer?: Timer;
 	#windowsTerminalAppearancePollTimer?: Timer;
+	#progressActive = false;
+	// Ghostty expires OSC 9;4 state without a heartbeat. Persistent hosts such
+	// as Windows Terminal restart their indeterminate animation on every write.
+	readonly #keepProgressAlive = TERMINAL.id === "ghostty";
+	#bracketedPasteRefreshTimer?: Timer;
 	#progressTimer?: Timer;
 
 	constructor(options?: ProcessTerminalOptions) {
@@ -919,14 +925,10 @@ export class ProcessTerminal implements Terminal {
 		this.#privateModeCallbacks.push(callback);
 	}
 
-	/**
-	 * Register the focus-reporting callback. Invoked with `true` when the
-	 * terminal reports focus-in (`CSI I`) and `false` on focus-out (`CSI O`),
-	 * only while DECSET 1004 is enabled (see start()).
-	 */
 	onFocusChange(callback: (focused: boolean) => void): void {
 		this.#focusHandler = callback;
 	}
+
 	onGlyphProtocolReport(callback: GlyphProtocolReportHandler): void {
 		this.#glyphProtocolCallbacks.push(callback);
 		// The handshake runs from enableInput(), which can precede the host's
@@ -964,14 +966,14 @@ export class ProcessTerminal implements Terminal {
 		if (process.platform !== "win32" && process.stdout.isTTY && !isBunTestRuntime() && !this.#outputPump) {
 			try {
 				this.#outputPump = new TtyWriter(1);
+				this.#pumpBacklogBound = 0;
 			} catch (err) {
 				logger.debug("tty output pump unavailable; using direct stdout writes", { err: String(err) });
 			}
 		}
 
-		// Keep unmanaged fd-2 writes (macOS libmalloc/framework diagnostics) off
-		// the viewport while we own the terminal; released in stop(). See
-		// stderr-guard in pi-utils (mirrors openai/codex#24459).
+		// Keep unmanaged native fd-2 writes off the viewport while we own the
+		// terminal; released in stop(). See stderr-guard in pi-utils.
 		suppressTerminalStderr();
 
 		// Set up resize handler immediately. The OS refreshes process.stdout
@@ -1036,13 +1038,6 @@ export class ProcessTerminal implements Terminal {
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		this.#safeWrite("\x1b[?2004h");
-
-		// Enable focus reporting (DECSET 1004): the terminal emits `CSI I` on
-		// focus-in and `CSI O` on focus-out. The TUI closes a stale desktop
-		// notification on focus-in, so returning to the window (alt-tab /
-		// click-to-focus) clears the toast even before any keystroke.
-		// Terminals without support ignore the mode and stay on input-only
-		// dismissal.
 		this.#safeWrite("\x1b[?1004h");
 
 		// Force normal cursor-key (DECCKM) and numeric-keypad mode (terminfo
@@ -1077,10 +1072,6 @@ export class ProcessTerminal implements Terminal {
 		// same DA1 sentinel FIFO as OSC 11/DECRQM so unsupported terminals resolve
 		// without leaking probe bytes to application input.
 		this.#queryOsc99Support();
-
-		// Selection highlight color via OSC 17, same DA1 sentinel FIFO. Views
-		// that draw their own text selection (transcript scroll mode) paint with
-		// the terminal's selection color so it matches the user's theme.
 		this.#querySelectionBackground();
 
 		// Glyph Protocol support query (`s` verb), same DA1 sentinel FIFO. A reply
@@ -1392,7 +1383,6 @@ export class ProcessTerminal implements Terminal {
 						break;
 					}
 					case "osc17": {
-						// DA1 beat the reply: the terminal does not report its selection color.
 						this.#osc17ResponseBuffer = "";
 						break;
 					}
@@ -1473,19 +1463,18 @@ export class ProcessTerminal implements Terminal {
 				}
 			}
 
-			// OSC 17 replies are terminal->host reports, never keystrokes: swallow
-			// them for the whole session, and a late one still reports the color.
+			// OSC 17 is terminal-to-host data even if its DA1 sentinel has
+			// already arrived. Reassemble split replies and keep them out of input.
 			if (this.#osc17ResponseBuffer || sequence.startsWith("\x1b]17;")) {
 				if (this.#osc17ResponseBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
 					this.#osc17ResponseBuffer = "";
 				} else {
 					this.#osc17ResponseBuffer += sequence;
-					const osc17Match = this.#osc17ResponseBuffer.match(osc17ResponsePattern);
-					if (!osc17Match) return;
-					const [, rHex, gHex, bHex] = osc17Match;
+					const match = this.#osc17ResponseBuffer.match(osc17ResponsePattern);
+					if (!match) return;
 					this.#osc17ResponseBuffer = "";
 					setTerminalSelectionBackground(
-						`#${x11ChannelToByte(rHex!)}${x11ChannelToByte(gHex!)}${x11ChannelToByte(bHex!)}`,
+						`#${x11ChannelToByte(match[1]!)}${x11ChannelToByte(match[2]!)}${x11ChannelToByte(match[3]!)}`,
 					);
 					return;
 				}
@@ -1533,11 +1522,6 @@ export class ProcessTerminal implements Terminal {
 				}, 100);
 				return;
 			}
-			// Focus reporting (DECSET 1004): `CSI I` = focus-in, `CSI O` =
-			// focus-out. Swallow both — focus events are terminal signals, not
-			// input — and notify the subscriber so the TUI can clear a stale
-			// toast on focus-in. No-op when the terminal does not support or
-			// report the mode.
 			if (sequence === "\x1b[I" || sequence === "\x1b[O") {
 				this.#focusHandler?.(sequence === "\x1b[I");
 				return;
@@ -1644,16 +1628,10 @@ export class ProcessTerminal implements Terminal {
 		this.#safeWrite(`\x1b]99;i=${id}:p=?;\x1b\\\x1b[c`);
 	}
 
-	#shouldQuerySelectionBackground(): boolean {
-		// Same multiplexer rule as the OSC 99 probe: tmux/screen cannot route
-		// the reply back to the sending pane, so it would leak as literal text.
-		if (isInsideTerminalMultiplexer($env)) return false;
-		return !isBunTestRuntime() || $env.PI_TUI_OSC17_PROBE === "1";
-	}
-
 	#querySelectionBackground(): void {
 		this.#osc17ResponseBuffer = "";
-		if (this.#dead || !this.#shouldQuerySelectionBackground()) return;
+		if (this.#dead || isInsideTerminalMultiplexer($env)) return;
+		if (isBunTestRuntime() && $env.PI_TUI_OSC17_PROBE !== "1") return;
 		this.#da1SentinelOwners.push({ kind: "osc17" });
 		this.#safeWrite("\x1b]17;?\x07\x1b[c");
 	}
@@ -1858,7 +1836,15 @@ export class ProcessTerminal implements Terminal {
 		// heuristic pure downside — turn it off so stall-batched keystrokes are
 		// not misread as a paste (#12540). `supported` is only true here after an
 		// explicit DECRPM reply (the DA1-sentinel fallback resolves unsupported).
-		if (mode === 2004 && supported) this.#stdinBuffer?.setRawPasteClassification(false);
+		if (mode === 2004 && supported) {
+			this.#stdinBuffer?.setRawPasteClassification(false);
+			// A terminal can reset this mode after the initial probe (for example,
+			// iTerm2's Terminal State toggle). Keep the mode asserted while we own
+			// the TTY, since the raw fallback is disabled after confirmation.
+			this.#bracketedPasteRefreshTimer ??= setInterval(() => {
+				if (this.#active && !this.#dead) this.#safeWrite("\x1b[?2004h");
+			}, 1000);
+		}
 	}
 
 	#syncWindowsTerminalAppearancePolling(mode2031Supported: boolean): void {
@@ -1990,6 +1976,10 @@ export class ProcessTerminal implements Terminal {
 		// Suppress observer/timer callbacks before any teardown can yield or throw.
 		this.#active = false;
 		this.#inputDeferred = false;
+		if (this.#bracketedPasteRefreshTimer) {
+			clearInterval(this.#bracketedPasteRefreshTimer);
+			this.#bracketedPasteRefreshTimer = undefined;
+		}
 		if (this.#headless) return;
 		// Unregister from emergency cleanup
 		if (activeTerminal === this) {
@@ -2001,7 +1991,9 @@ export class ProcessTerminal implements Terminal {
 		// step throws.
 		restoreTerminalStderr();
 
-		if (this.#clearProgressTimer()) {
+		this.#clearProgressTimer();
+		if (this.#progressActive) {
+			this.#progressActive = false;
 			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}
 
@@ -2156,6 +2148,10 @@ export class ProcessTerminal implements Terminal {
 	#markTerminalDisconnected(reason: string, err?: unknown): void {
 		if (this.#dead) return;
 		this.#dead = true;
+		if (this.#bracketedPasteRefreshTimer) {
+			clearInterval(this.#bracketedPasteRefreshTimer);
+			this.#bracketedPasteRefreshTimer = undefined;
+		}
 		this.#disarmStdoutStallWatchdog();
 		logger.warn("terminal disconnected; stopping interactive rendering", { reason, err });
 
@@ -2204,19 +2200,27 @@ export class ProcessTerminal implements Terminal {
 		this.#trackCursorVisibility(data);
 		const pump = this.#outputPump;
 		if (pump) {
-			if (pump.dead) {
+			let pending: number;
+			try {
+				pending = pump.write(data);
+			} catch (err) {
+				this.#markTerminalDisconnected("stdout failed", err);
+				return;
+			}
+			// A live enqueue reports at least this chunk's UTF-8 size, never below
+			// its UTF-16 length; a dead pump enqueues nothing and reports only the
+			// remainder it is dropping (soon zero). Only a report that small can
+			// come from a dead pump, so the native `dead` read is skipped otherwise.
+			if ((pending < data.length || data.length === 0) && pump.dead) {
 				this.#markTerminalDisconnected("stdout failed; output pump died");
 				return;
 			}
-			try {
-				// Feed the live backlog to the stall watchdog rather than tripping on
-				// the instantaneous byte count: a single large-but-draining frame (a
-				// resume repaint of many inline images) must open normally, while a
-				// never-draining reader is still torn down (#6854, #10430).
-				this.#trackStdoutBacklog(pump.write(data));
-			} catch (err) {
-				this.#markTerminalDisconnected("stdout failed", err);
-			}
+			this.#pumpBacklogBound = pending;
+			// Feed the live backlog to the stall watchdog rather than tripping on
+			// the instantaneous byte count: a single large-but-draining frame (a
+			// resume repaint of many inline images) must open normally, while a
+			// never-draining reader is still torn down (#6854, #10430).
+			this.#trackStdoutBacklog(pending);
 			return;
 		}
 		// A console-sharing child process may have flipped the console codepage
@@ -2259,8 +2263,19 @@ export class ProcessTerminal implements Terminal {
 		if (this.#inBandResizeActive && this.#reportedColumns) return this.#reportedColumns;
 		return process.stdout.columns || Number(Bun.env.COLUMNS) || 80;
 	}
+	/**
+	 * With the output pump, a backlog bound at or below
+	 * {@link STDOUT_BACKLOG_CLEAR_BYTES} is reported as-is instead of re-read:
+	 * both consumers (the render gate and the stall watchdog) act only on a
+	 * backlog above that level, so the bound already decides them and spares a
+	 * native read on every frame.
+	 */
 	get pendingOutputBytes(): number {
-		if (this.#outputPump) return this.#outputPump.pending();
+		const pump = this.#outputPump;
+		if (pump) {
+			if (this.#pumpBacklogBound > STDOUT_BACKLOG_CLEAR_BYTES) this.#pumpBacklogBound = pump.pending();
+			return this.#pumpBacklogBound;
+		}
 		// Stream fallback: bytes queued past the high-water mark by refused writes.
 		return process.stdout.writableLength ?? 0;
 	}
@@ -2365,7 +2380,9 @@ export class ProcessTerminal implements Terminal {
 			if (final === 0x68 /* h */ || final === 0x6c /* l */) break;
 			idx = idx === 0 ? -1 : data.lastIndexOf("\x1b[?25", idx - 1);
 		}
-		if (data.lastIndexOf("\x1b[?1049") > idx) {
+		// Only a switch after the last cursor sequence matters: search that tail
+		// rather than the whole frame.
+		if (data.indexOf("\x1b[?1049", idx + 1) !== -1) {
 			this.#cursorVisible = undefined;
 			return;
 		}
@@ -2392,14 +2409,17 @@ export class ProcessTerminal implements Terminal {
 	setProgress(active: boolean): void {
 		if (this.#headless) return;
 		if (active) {
+			if (this.#progressActive) return;
+			this.#progressActive = true;
 			this.#safeWrite(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
-			if (!this.#progressTimer) {
+			if (this.#keepProgressAlive && !this.#progressTimer) {
 				this.#progressTimer = setInterval(() => {
 					this.#safeWrite(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
 				}, TERMINAL_PROGRESS_KEEPALIVE_MS);
 				this.#progressTimer.unref?.();
 			}
 		} else {
+			this.#progressActive = false;
 			this.#clearProgressTimer();
 			this.#safeWrite(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
 		}

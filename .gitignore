@@ -47,7 +47,6 @@ packages/ai/test/.temp-images/
 # Project specific
 !.omp/
 .omp/plugins/
-**/.omp/permissions-audit.jsonl
 .pi_config/
 .opencode/
 .worktrees/
@@ -93,9 +92,5 @@ packages/coding-agent/bench/boot-baseline.json
 /bazel-pi
 /bazel-oh-my-pi
 /.bazelrc.user
-/bazel-omp-source
 
 .parity/
-
-# SDD scratch
-.superpowers/

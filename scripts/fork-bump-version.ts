@@ -10,7 +10,7 @@ import * as path from "node:path";
  * upstream repo) and adds the native-addon rebuild the compiled binary needs:
  * the coding-agent build embeds `packages/natives/native/*.node` but does NOT
  * compile it, so a checkout whose addon predates the version bump embeds a
- * stale addon and the binary dies at startup with a sentinel mismatch.
+ * stale addon and the binary dies at startup with a release-identity mismatch.
  *
  * Version shape: `<nearest vX.Y.Z tag>+<identifier>.<commits since the
  * tag>.<HEAD short hash>`, default identifier `vith-fork` (override via
@@ -23,12 +23,13 @@ import * as path from "node:path";
  * upstream to a newer tag moves the base and resets the count.
  *
  * Pipeline: pre-flight → derive → bump version files → regenerate lockfiles →
- * `bun run check` → commit the bump → build natives → verify sentinel → clear
+ * `bun run check` → commit the bump → build natives → verify release stamp → clear
  * the per-version natives cache → build the binary → smoke-test → link `omp`
  * into PATH. Creates no tag and pushes nothing (a fork tag would become the
  * nearest `v[0-9]*` tag and poison the next derivation).
  */
 import { $, Glob } from "bun";
+import { containsVersionStamp } from "../packages/natives/native/version-sentinel.js";
 import { compareVersions } from "../packages/utils/src/version.ts";
 
 const FORK_IDENTIFIER = process.env.OMP_FORK_IDENTIFIER?.trim() || "vith-fork";
@@ -72,11 +73,6 @@ export function deriveForkVersion(git: ForkGitInfo, currentVersion: string, iden
 	return `${base}+${identifier}.${git.commitsSince}.${git.shortHash}`;
 }
 
-/** The napi export name the loader validates, e.g. `__piNativesV17_2_13_vith_fork`. */
-export function expectedSentinel(version: string): string {
-	return `__piNativesV${version.replace(/[^A-Za-z0-9]/g, "_")}`;
-}
-
 /**
  * Addon filenames for a platform tag, mirroring the loader's
  * `getAddonFilenames` (modern/baseline are x64-only variants).
@@ -99,15 +95,6 @@ export function nativesCacheDir(version: string, env: Record<string, string | un
 		return path.join(xdg, "omp", "natives", version);
 	}
 	return path.join(os.homedir(), ".omp", "natives", version);
-}
-
-async function fileContainsSentinel(filePath: string, sentinel: string): Promise<boolean> {
-	try {
-		const content = await Bun.file(filePath).text();
-		return content.includes(sentinel);
-	} catch {
-		return false;
-	}
 }
 
 /** Nearest reachable tag matching upstream release style `vX.Y.Z` (e.g. `v17.2.12`). */
@@ -145,6 +132,9 @@ async function promoteChangelogs(version: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
+	if (!Bun.env.CI || /^(?:0|false)$/i.test(Bun.env.CI)) {
+		throw new Error("Fork releases must run in CI; local compilation is disabled.");
+	}
 	console.log("\n=== Fork Release ===\n");
 
 	// 1. Pre-flight: no tracked changes. Untracked files are ignored — the pi
@@ -213,26 +203,8 @@ async function main(): Promise<void> {
 	console.log("Updating Rust workspace version...");
 	await $`sd '^version = "[^"]+"' ${`version = "${version}"`} Cargo.toml`;
 
-	// 6. pi-natives version sentinel in lock-step (mirrors release.ts's sd +
-	// verification; `expectedSentinel` is the same rule the JS loader uses, so
-	// the suffix stays consistent across all three files).
-	console.log(`Bumping pi-natives version sentinel to v${version}...`);
-	const sentinelName = expectedSentinel(version);
-	const sentinelFiles = [
-		"crates/pi-natives/src/lib.rs",
-		"packages/natives/native/index.d.ts",
-		"packages/natives/native/index.js",
-	];
-	await $`sd '__piNativesV[A-Za-z0-9_]+' ${sentinelName} ${sentinelFiles}`;
-	const libRs = await Bun.file("crates/pi-natives/src/lib.rs").text();
-	if (!libRs.includes(`js_name = "${sentinelName}"`)) {
-		console.error(
-			`Error: pi-natives version sentinel did not move to ${sentinelName} in crates/pi-natives/src/lib.rs. ` +
-				"The `__piNativesV…` literal may have been removed or renamed; restore it before bumping.",
-		);
-		process.exit(1);
-	}
-	console.log(`  sentinel: ${sentinelName}`);
+	// The native build stamps package.json's version into the addon after linking.
+	// No per-release Rust export or generated-binding edits are needed.
 
 	// 7. Changelog promotion (mirrors release.ts).
 	console.log("Updating CHANGELOGs...");
@@ -241,14 +213,15 @@ async function main(): Promise<void> {
 	// 8. Regenerate lockfiles (mirrors release.ts) — the pins rewritten in
 	// step 4 are what keep `bun install` resolving locally.
 	console.log("Regenerating lockfiles...");
-	await $`rm -f bun.lock`;
 	await $`bun install`;
-	await $`cargo generate-lockfile`;
+	await $`cargo update --workspace`;
 	// The fork version bump changes Cargo.toml/Cargo.lock, whose content
 	// hashes MODULE.bazel.lock embeds — refresh it so the bump commit stays
 	// in sync. A stale bazel lock otherwise dirties the tree on the next
 	// bazel/bazelisk invocation (observed repeatedly after fork releases).
-	await $`bazelisk mod deps`;
+	await $`bun scripts/gen-nix-bun.ts`;
+	await $`bun scripts/gen-clippy-bazelrc.ts`;
+	await $`bun scripts/gen-bazel-lock.ts`;
 
 	// 9. Checks (mirrors release.ts).
 	console.log("Running checks...");
@@ -269,8 +242,8 @@ async function main(): Promise<void> {
 	// On Linux, build through the local Cargo/N-API path with the
 	// wayland-pipewire feature so the fork binary supports Wayland screencast
 	// capture. The Bazel-shipped addons compile with crate_features = [] (the
-	// pipewire crate needs system libpipewire via pkg-config, unavailable in
-	// CI/cross builds), so the feature only exists on the local host build.
+	// pipewire crate needs system libpipewire via pkg-config). The native CI
+	// image/job must provide that dependency for the host build.
 	console.log("Building native addon...");
 	// Bun Shell's .env() replaces the child environment rather than merging it;
 	// preserve PATH, HOME, Cargo configuration, and the rest of the caller's
@@ -284,17 +257,17 @@ async function main(): Promise<void> {
 	const platformTag = `${process.platform}-${process.arch}`;
 	const nativeDir = "packages/natives/native";
 
-	// 12. Verify the rebuilt addon carries the current sentinel.
-	console.log("Verifying addon sentinel...");
+	// 12. Verify the post-link release identity using the loader's own check.
+	console.log("Verifying addon release stamp...");
 	const builtAddons = addonFilenames(platformTag).filter(name => fs.existsSync(path.join(nativeDir, name)));
 	const validAddons: string[] = [];
 	for (const name of builtAddons) {
 		const fullPath = path.join(nativeDir, name);
-		if (await fileContainsSentinel(fullPath, sentinelName)) {
+		if (containsVersionStamp(await Bun.file(fullPath).bytes(), version)) {
 			validAddons.push(name);
-			console.log(`  ✓ ${name} exposes ${sentinelName}`);
+			console.log(`  ${name} carries ${version}`);
 		} else {
-			console.error(`  ✗ ${name} does NOT expose ${sentinelName} (stale addon)`);
+			console.error(`  ${name} does NOT carry ${version} (stale addon)`);
 		}
 	}
 	if (builtAddons.length === 0) {
@@ -303,8 +276,7 @@ async function main(): Promise<void> {
 	}
 	if (validAddons.length === 0) {
 		console.error(
-			`Error: the built addons do not expose ${sentinelName}. The Rust crate is out of sync with the ` +
-				"version bump — check crates/pi-natives/src/lib.rs and the natives build.",
+			`Error: the built addons do not carry release ${version}. Check the native post-link stamping step.`,
 		);
 		process.exit(1);
 	}
@@ -333,7 +305,7 @@ async function main(): Promise<void> {
 	if (smoke.exitCode !== 0 || !output.includes(`omp/${version}`)) {
 		console.error(
 			`Error: smoke test failed — "${binary} --version" exited ${smoke.exitCode} with:\n${output}\n` +
-				"If it is a natives sentinel error, delete the cache and re-run.",
+				"If it is a native release-identity error, check the addon stamp.",
 		);
 		process.exit(1);
 	}

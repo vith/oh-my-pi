@@ -182,6 +182,9 @@ function createDurableSession(manager: SessionManager): DurableSessionHarness {
 		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages.at(-1),
 		abort: async () => {},
+		isAdvisorActive: () => false,
+		getToolByName: (_name: string) => undefined,
+		setWorkPoolYieldItems: async (_items: readonly unknown[]) => {},
 		hasPendingAsyncWork: () => false,
 		setIrcWakeTurnObserver: () => {},
 		setIrcWakeTurnAdmission: (_next: unknown) => {},
@@ -277,6 +280,9 @@ function createDeferredDurableSession(manager: SessionManager): DeferredDurableS
 		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages.at(-1),
 		abort: async () => {},
+		isAdvisorActive: () => false,
+		getToolByName: (_name: string) => undefined,
+		setWorkPoolYieldItems: async (_items: readonly unknown[]) => {},
 		hasPendingAsyncWork: () => false,
 		setIrcWakeTurnObserver: () => {},
 		setIrcWakeTurnAdmission: (_next: unknown) => {},
@@ -339,6 +345,24 @@ describe("durable subagent follow-up delivery", () => {
 
 		expect(await inspectDurableFollowUp(appendedFile, "resolution:r1")).toBe("appended");
 		expect(await inspectDurableFollowUp(answeredFile, "resolution:r1")).toBe("answered");
+	});
+
+	it("recognizes upstream model-usage entries without mistaking them for corruption", async () => {
+		const sessionFile = path.join(tempDir.path(), "model-usage.jsonl");
+		await writeTranscript(sessionFile, [
+			sessionEntry("init", null, { type: "session_init", systemPrompt: "test", task: "test", tools: [] }),
+			sessionEntry("usage", "init", {
+				type: "model_usage",
+				purpose: "subagent",
+				api: "openai-responses",
+				provider: "openai",
+				model: "mock",
+				usage,
+				stopReason: "stop",
+			}),
+		]);
+
+		expect(await inspectDurableFollowUp(sessionFile, "resolution:r1")).toBe("absent");
 	});
 
 	it("does not treat malformed transcript records as an absent delivery", async () => {
@@ -477,6 +501,34 @@ describe("durable subagent follow-up delivery", () => {
 			details: { deliveryKey: "resolution:r1" },
 		});
 		await manager.close();
+	});
+
+	it("does not append a follow-up whose caller cancelled before admission", async () => {
+		const sessionFile = path.join(tempDir.path(), "cancelled-follow-up.jsonl");
+		await writeTranscript(sessionFile, [
+			sessionEntry("init", null, { type: "session_init", systemPrompt: "test", task: "test", tools: [] }),
+		]);
+		AgentRegistry.global().register({
+			id: "CancelledFollowUp",
+			displayName: "CancelledFollowUp",
+			kind: "sub",
+			parentId: "Main",
+			status: "parked",
+			session: null,
+			sessionFile,
+		});
+		const controller = new AbortController();
+		controller.abort(new Error("cancelled before admission"));
+		await expect(
+			runDurableSubagentFollowUpTurn({
+				id: "CancelledFollowUp",
+				agent,
+				deliveryKey: "resolution:r1",
+				message: "Do not send.",
+				signal: controller.signal,
+			}),
+		).rejects.toThrow("cancelled before admission");
+		expect(await inspectDurableFollowUp(sessionFile, "resolution:r1")).toBe("absent");
 	});
 
 	it("leaves an already-appended follow-up untouched when no answer started", async () => {

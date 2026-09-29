@@ -37,14 +37,11 @@ export function clampHubLine(line: string, width: number): string {
 	return truncateToWidth(line.replace(/[\r\n]+/g, " "), Math.max(1, width), Ellipsis.Omit);
 }
 
-/**
- * Status glyph, colored per theme status conventions. The title-line counts
- * spell out the words. A row with parked approvals awaiting an answer always
- * shows the pending glyph, overriding the status glyph for display only.
- */
-export function statusGlyph(status: AgentRecordLike["status"], pendingApprovals = 0): string {
-	if (pendingApprovals > 0) return theme.fg("accent", theme.status.pending);
+/** Status glyph, colored per theme status conventions. The title-line counts spell out the words. */
+export function statusGlyph(status: AgentRecordLike["status"] | "paused"): string {
 	switch (status) {
+		case "paused":
+			return theme.fg("warning", theme.status.pending);
 		case "running":
 			return theme.fg("accent", theme.status.running);
 		case "idle":
@@ -56,9 +53,10 @@ export function statusGlyph(status: AgentRecordLike["status"], pendingApprovals 
 	}
 }
 
-export function statusText(status: AgentRecordLike["status"], text: string, pendingApprovals = 0): string {
-	if (pendingApprovals > 0) return theme.fg("accent", "awaiting approval");
+export function statusText(status: AgentRecordLike["status"] | "paused", text: string): string {
 	switch (status) {
+		case "paused":
+			return theme.fg("warning", text);
 		case "running":
 			return theme.fg("accent", text);
 		case "idle":
@@ -67,46 +65,6 @@ export function statusText(status: AgentRecordLike["status"], text: string, pend
 			return theme.fg("muted", text);
 		case "aborted":
 			return theme.fg("error", text);
-	}
-}
-
-/**
- * Host-injected pending-approval counter. The tui package cannot import the
- * coding-agent permission registry without a package cycle
- * (coding-agent → pi-tui already exists via agent-registry), so the host
- * wires the real lookup at startup with {@link setPendingApprovalLookup}:
- * `setPendingApprovalLookup(id => pendingApprovalsForSession(id).length)`.
- * Until wired, the count is 0 and rows render under their real status.
- */
-let pendingApprovalLookup: ((sessionId: string) => number) | undefined;
-export function setPendingApprovalLookup(fn: ((sessionId: string) => number) | undefined): void {
-	pendingApprovalLookup = fn;
-}
-/**
- * Parked approvals awaiting an answer for the ref's live session (0 when
- * detached or unwired). Read at render time, so the roster marker tracks the
- * pending registry on every paint: the hub re-renders on registry/observer events
- * and on its 5s age cadence, so a park/resolve that emits no data event
- * still refreshes within one cadence. Display-only — the ref's status is
- * untouched, and the header counts keep including the row under its real
- * status.
- */
-export function pendingApprovalCount(ref: AgentRecordLike): number {
-	if (!pendingApprovalLookup) return 0;
-	const session = ref.session as unknown as {
-		sessionManager?: { getSessionId?: () => string };
-	} | null;
-	let sessionId = "";
-	try {
-		sessionId = session?.sessionManager?.getSessionId?.() ?? "";
-	} catch {
-		sessionId = "";
-	}
-	if (!sessionId) return 0;
-	try {
-		return pendingApprovalLookup(sessionId);
-	} catch {
-		return 0;
 	}
 }
 

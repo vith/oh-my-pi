@@ -40,7 +40,6 @@ import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-executio
 import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import type { HookSelectorComponent, HookSelectorOptions } from "@oh-my-pi/pi-tui/overlays/hook-selector";
-import type { PermissionDialogComponent } from "./components/permission-dialog";
 import type { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import type { ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
@@ -259,7 +258,6 @@ export interface InteractiveModeContext {
 	hookSelector: HookSelectorComponent | undefined;
 	hookInput: HookInputComponent | undefined;
 	hookEditor: HookEditorComponent | undefined;
-	permissionDialog: PermissionDialogComponent | undefined;
 	lastStatusSpacer: Spacer | undefined;
 	lastStatusText: Text | undefined;
 	fileSlashCommands: Set<string>;
@@ -329,14 +327,17 @@ export interface InteractiveModeContext {
 	ensureLoadingAnimation(): void;
 	/** Reconcile the idle "F5 to Retry" status row with the transcript tail. */
 	syncRetryHintRow(): void;
-	startPendingSubmission(input: {
-		text: string;
-		images?: ImageContent[];
-		imageLinks?: (string | undefined)[];
-		customType?: string;
-		display?: boolean;
-		streamingBehavior?: "steer" | "followUp";
-	}): SubmittedUserInput;
+	startPendingSubmission(
+		input: {
+			text: string;
+			images?: ImageContent[];
+			imageLinks?: (string | undefined)[];
+			customType?: string;
+			display?: boolean;
+			streamingBehavior?: "steer" | "followUp";
+		},
+		options?: { preserveDraft?: boolean; clearEditor?: boolean },
+	): SubmittedUserInput;
 	cancelPendingSubmission(): boolean;
 	markPendingSubmissionStarted(input: SubmittedUserInput): boolean;
 	finishPendingSubmission(input: SubmittedUserInput): void;
@@ -474,8 +475,6 @@ export interface InteractiveModeContext {
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
-	/** Scroll the whole conversation in omp's own view, seated one prompt hop from the tail. */
-	openTranscriptScroll(delta: -1 | 1): void;
 	showUserMessageSelector(): void;
 	showCopySelector(): void;
 	showTreeSelector(): void;
@@ -491,6 +490,10 @@ export interface InteractiveModeContext {
 	showHookConfirm(title: string, message: string): Promise<boolean>;
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: AgentHubOpenOptions): void;
+	/** Scroll the conversation one prompt hop from the tail. */
+	openTranscriptScroll(delta: -1 | 1): void;
+	/** Run a manual recap of the active session. */
+	handleRecapCommand(): Promise<void>;
 	resetObserverRegistry(): void;
 
 	// Input handling
@@ -504,7 +507,6 @@ export interface InteractiveModeContext {
 	/** Queue a message for delivery only after the active agent turn would stop. */
 	handleQueueCommand(message: string): Promise<void>;
 	handleBtwCommand(question: string): Promise<void>;
-	handleRecapCommand(): Promise<void>;
 	handleTanCommand(work: string): Promise<void>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;

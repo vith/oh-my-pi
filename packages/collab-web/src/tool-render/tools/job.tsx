@@ -26,7 +26,7 @@ interface JobSnapshotLike {
 
 interface CancelOutcomeLike {
 	id: string;
-	/** "cancelled" | "not_found" | "already_completed" | "failed" upstream. */
+	/** "cancelled" | "not_found" | "already_completed" | "failed". */
 	status: string;
 }
 

@@ -103,9 +103,6 @@ function createMockSession(
 		setIrcWakeTurnObserver: observer => {
 			ircWakeTurnObserver = observer;
 		},
-		setIrcWakeTurnAdmission: (_next: unknown) => {},
-		setIrcWakeTurnSettlement: (_next: unknown) => {},
-		subscribeRunState: () => () => {},
 		trackIrcReply: () => {},
 		deliverIrcMessage: async msg => {
 			const record: CustomMessage = {

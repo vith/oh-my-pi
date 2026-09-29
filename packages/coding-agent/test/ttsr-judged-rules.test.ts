@@ -65,7 +65,7 @@ function setup(rules: Rule[], judge: Judge) {
 		emitSessionEvent: async () => {},
 		schedulePostPromptTask: vi.fn(),
 		scheduleAgentContinue: vi.fn(),
-		continueAgent: vi.fn(),
+		continueAgent: async () => {},
 		promptGeneration: () => 0,
 		ruleJudge: () => judge,
 		deliverRuleWarning: async (content: string, ruleNames: string[]) => {

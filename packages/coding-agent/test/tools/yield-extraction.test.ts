@@ -45,7 +45,6 @@ describe("yield subprocess extraction", () => {
 
 	it("classifies terminal and incremental yield completions", () => {
 		expect(handler?.shouldTerminate).toBeDefined();
-		expect(handler?.terminalDisposition).toBeUndefined();
 		expect(
 			handler?.shouldTerminate?.({
 				toolName: "yield",

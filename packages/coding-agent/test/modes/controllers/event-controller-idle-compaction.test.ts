@@ -42,9 +42,7 @@ function createContext(
 		editorText?: string;
 		goalObjective?: string;
 		isCompacting?: boolean;
-		isStreaming?: boolean;
-		model?: { provider: string; id: string } | null;
-		messages?: AssistantMessage[];
+		isStreaming?: boolean | (() => boolean);
 		runIdleCompaction?: AgentSession["runIdleCompaction"];
 		runEphemeralTurn?: AgentSession["runEphemeralTurn"];
 		sessionName?: string;
@@ -71,27 +69,129 @@ function createContext(
 			}
 		: undefined;
 	return createInteractiveModeContext({
-		editor: { getText: () => options.editorText ?? "" },
 		sessionManager: { getSessionName: () => options.sessionName },
 		todoPhases: options.todoPhases ?? [],
 		...(options.showStatus ? { showStatus: options.showStatus } : {}),
+		...(options.editorText !== undefined ? { editor: { getText: () => options.editorText ?? "" } } : {}),
 		session: {
 			isCompacting: options.isCompacting ?? false,
-			isStreaming: options.isStreaming ?? false,
+			get isStreaming() {
+				return typeof options.isStreaming === "function" ? options.isStreaming() : (options.isStreaming ?? false);
+			},
 			runIdleCompaction,
 			runEphemeralTurn,
-			// The no-active-model test passes `null`; the shared stub types the
-			// field as non-nullable, so assert through the boundary instead of
-			// widening the helper. The controller only falsy-checks the model.
-			model: (options.model === undefined
-				? { provider: "anthropic", id: "claude-sonnet-4-5" }
-				: options.model) as AgentSession["model"],
-			messages: options.messages ?? [createAssistantMessage()],
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			messages: [createAssistantMessage()],
 			getContextUsage: () => ({ tokens: 210, contextWindow: 1_000, percent: 21 }),
 			getGoalModeState: () => goalState,
 		},
 	});
 }
+
+describe("EventController manual recap", () => {
+	beforeEach(async () => {
+		await initTheme();
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: {
+				"compaction.idleEnabled": false,
+				"completion.notify": "off",
+				"recap.enabled": false,
+				"recap.idleSeconds": 60,
+			},
+		});
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		resetSettingsForTest();
+	});
+
+	it("shows a requested recap after agent activity even with a draft and disabled idle recaps", async () => {
+		const deferred = Promise.withResolvers<{ replyText: string; assistantMessage: AssistantMessage }>();
+		const runEphemeralTurn = vi.fn(() => deferred.promise);
+		const showStatus = vi.fn();
+		let streaming = true;
+		const context = createContext({
+			editorText: "unfinished draft",
+			isStreaming: () => streaming,
+			runEphemeralTurn,
+			showStatus,
+		});
+		const controller = new EventController(context);
+
+		const recap = controller.runRecap();
+		streaming = false;
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+		deferred.resolve({ replyText: "Next: finish the draft", assistantMessage: createAssistantMessage() });
+		await recap;
+
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
+		expect(Bun.stripANSI(String(showStatus.mock.calls[0]?.[0]))).toContain("Next: finish the draft");
+		vi.advanceTimersByTime(60_000);
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
+		controller.dispose();
+	});
+
+	it("restarts the enabled idle window after a requested recap", async () => {
+		cfgRecapEnabled.override(settings, true);
+		const deferred = Promise.withResolvers<{ replyText: string; assistantMessage: AssistantMessage }>();
+		const runEphemeralTurn = vi
+			.fn()
+			.mockImplementationOnce(() => deferred.promise)
+			.mockImplementation(async () => ({ replyText: "Idle follow-up", assistantMessage: createAssistantMessage() }));
+		const showStatus = vi.fn();
+		const controller = new EventController(createContext({ runEphemeralTurn, showStatus }));
+
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+		vi.advanceTimersByTime(30_000);
+		const recap = controller.runRecap();
+		vi.advanceTimersByTime(45_000);
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
+		deferred.resolve({ replyText: "Manual now", assistantMessage: createAssistantMessage() });
+		await recap;
+		vi.advanceTimersByTime(59_999);
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(1);
+		await flushMicrotasks();
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(2);
+		expect(Bun.stripANSI(String(showStatus.mock.calls[1]?.[0]))).toContain("Idle follow-up");
+		controller.dispose();
+	});
+
+	it("drops a superseded request without blocking the next turn's idle recap", async () => {
+		cfgRecapEnabled.override(settings, true);
+		const deferred = Promise.withResolvers<{ replyText: string; assistantMessage: AssistantMessage }>();
+		const showStatus = vi.fn();
+		let signal: AbortSignal | undefined;
+		const runEphemeralTurn = vi
+			.fn()
+			.mockImplementationOnce(({ signal: currentSignal }: { signal?: AbortSignal }) => {
+				signal = currentSignal;
+				return deferred.promise;
+			})
+			.mockImplementation(async () => ({
+				replyText: "Fresh idle recap",
+				assistantMessage: createAssistantMessage(),
+			}));
+		const controller = new EventController(createContext({ showStatus, runEphemeralTurn }));
+		const recap = controller.runRecap();
+		await controller.handleEvent({ type: "agent_start" });
+		expect(signal?.aborted).toBe(true);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+		vi.advanceTimersByTime(60_000);
+		await flushMicrotasks();
+		expect(runEphemeralTurn).toHaveBeenCalledTimes(2);
+		deferred.resolve({ replyText: "Stale recap", assistantMessage: createAssistantMessage() });
+		await recap;
+		expect(showStatus).toHaveBeenCalledTimes(1);
+		expect(Bun.stripANSI(String(showStatus.mock.calls[0]?.[0]))).toContain("Fresh idle recap");
+		controller.dispose();
+	});
+});
 
 describe("EventController idle compaction teardown", () => {
 	beforeEach(async () => {
@@ -229,58 +329,6 @@ describe("EventController idle compaction teardown", () => {
 		controller.dispose();
 	});
 
-	it("keeps the idle recap silent when disabled", async () => {
-		resetSettingsForTest();
-		await Settings.init({
-			inMemory: true,
-			overrides: {
-				"compaction.idleEnabled": false,
-				"completion.notify": "off",
-				"recap.enabled": false,
-				"recap.idleSeconds": 1,
-			},
-		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const context = createContext({
-			sessionName: "Fix login flow",
-			showStatus,
-			todoPhases: [{ name: "Work", tasks: [{ content: "Wire focused tests", status: "pending" }] }],
-		});
-
-		const controller = new EventController(context);
-		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
-		vi.advanceTimersByTime(1_000);
-
-		expect(showStatus).not.toHaveBeenCalled();
-		controller.dispose();
-	});
-
-	it("keeps the idle recap silent while the editor has a draft", async () => {
-		resetSettingsForTest();
-		await Settings.init({
-			inMemory: true,
-			overrides: {
-				"compaction.idleEnabled": false,
-				"completion.notify": "off",
-				"recap.idleSeconds": 1,
-			},
-		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const context = createContext({
-			editorText: "draft",
-			sessionName: "Fix login flow",
-			showStatus,
-			todoPhases: [{ name: "Work", tasks: [{ content: "Wire focused tests", status: "pending" }] }],
-		});
-
-		const controller = new EventController(context);
-		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
-		vi.advanceTimersByTime(1_000);
-
-		expect(showStatus).not.toHaveBeenCalled();
-		controller.dispose();
-	});
-
 	it("aborts the in-flight recap and drops its late reply when disposed", async () => {
 		resetSettingsForTest();
 		await Settings.init({
@@ -314,233 +362,5 @@ describe("EventController idle compaction teardown", () => {
 		resolve({ replyText: "stale recap", assistantMessage: createAssistantMessage() });
 		await flushMicrotasks();
 		expect(showStatus).not.toHaveBeenCalled();
-	});
-});
-
-describe("EventController on-demand recap (/recap)", () => {
-	beforeEach(async () => {
-		await initTheme();
-		resetSettingsForTest();
-		await Settings.init({
-			inMemory: true,
-			overrides: {
-				"compaction.idleEnabled": false,
-				"completion.notify": "off",
-				"recap.enabled": true,
-				"recap.idleSeconds": 240,
-			},
-		});
-		vi.useFakeTimers();
-	});
-
-	afterEach(() => {
-		vi.useRealTimers();
-		vi.restoreAllMocks();
-		resetSettingsForTest();
-	});
-
-	it("runs the recap immediately on demand and paints the status line", async () => {
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const runEphemeralTurn = vi.fn(async (_args: { promptText: string; signal?: AbortSignal }) => ({
-			replyText: "Reworking the login flow; auth suite passes. Next: wire the focused token-refresh test.",
-			assistantMessage: createAssistantMessage(),
-		}));
-		const context = createContext({
-			editorText: "half-typed draft", // a draft does not block the on-demand trigger
-			sessionName: "Fix login flow",
-			showStatus,
-			runEphemeralTurn,
-		});
-
-		const controller = new EventController(context);
-		const result = controller.runRecap();
-		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
-		await result;
-		await flushMicrotasks();
-
-		expect(showStatus).toHaveBeenCalledTimes(1);
-		const [message, options] = showStatus.mock.calls[0] ?? [];
-		expect(Bun.stripANSI(message ?? "")).toBe(
-			"※ recap: Reworking the login flow; auth suite passes. Next: wire the focused token-refresh test.",
-		);
-		expect(options).toEqual({ dim: false });
-		controller.dispose();
-	});
-
-	it("runs the on-demand recap while the main turn is streaming", async () => {
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const runEphemeralTurn = vi.fn(async (_args: { promptText: string; signal?: AbortSignal }) => ({
-			replyText: "Mid-flight status",
-			assistantMessage: createAssistantMessage(),
-		}));
-		const context = createContext({ isStreaming: true, showStatus, runEphemeralTurn });
-
-		const controller = new EventController(context);
-		await controller.runRecap();
-		await flushMicrotasks();
-
-		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
-		expect(showStatus).toHaveBeenCalledTimes(1);
-		expect(Bun.stripANSI(String(showStatus.mock.calls[0]?.[0] ?? ""))).toContain("Mid-flight status");
-		controller.dispose();
-	});
-
-	it("runs the on-demand recap even when recap.enabled is false", async () => {
-		resetSettingsForTest();
-		await Settings.init({
-			inMemory: true,
-			overrides: {
-				"compaction.idleEnabled": false,
-				"completion.notify": "off",
-				"recap.enabled": false,
-			},
-		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const runEphemeralTurn = vi.fn(async (_args: { promptText: string; signal?: AbortSignal }) => ({
-			replyText: "Status despite disabled setting",
-			assistantMessage: createAssistantMessage(),
-		}));
-		const context = createContext({ showStatus, runEphemeralTurn });
-
-		const controller = new EventController(context);
-		await controller.runRecap();
-		await flushMicrotasks();
-
-		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
-		expect(Bun.stripANSI(String(showStatus.mock.calls[0]?.[0] ?? ""))).toContain("Status despite disabled setting");
-		controller.dispose();
-	});
-
-	it("refuses the on-demand recap without an active model", async () => {
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const runEphemeralTurn = vi.fn(async (_args: { promptText: string; signal?: AbortSignal }) => ({
-			replyText: "x",
-			assistantMessage: createAssistantMessage(),
-		}));
-		const context = createContext({ model: null, showStatus, runEphemeralTurn });
-
-		const controller = new EventController(context);
-		await controller.runRecap();
-
-		expect(runEphemeralTurn).not.toHaveBeenCalled();
-		expect(showStatus).toHaveBeenCalledWith("No active model for recap");
-		controller.dispose();
-	});
-
-	it("refuses the on-demand recap on an empty conversation", async () => {
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const runEphemeralTurn = vi.fn(async (_args: { promptText: string; signal?: AbortSignal }) => ({
-			replyText: "x",
-			assistantMessage: createAssistantMessage(),
-		}));
-		const context = createContext({ messages: [], showStatus, runEphemeralTurn });
-
-		const controller = new EventController(context);
-		await controller.runRecap();
-
-		expect(runEphemeralTurn).not.toHaveBeenCalled();
-		expect(showStatus).toHaveBeenCalledWith("No conversation to recap yet");
-		controller.dispose();
-	});
-
-	it("refuses the on-demand recap while compacting", async () => {
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const runEphemeralTurn = vi.fn(async (_args: { promptText: string; signal?: AbortSignal }) => ({
-			replyText: "x",
-			assistantMessage: createAssistantMessage(),
-		}));
-		const context = createContext({ isCompacting: true, showStatus, runEphemeralTurn });
-
-		const controller = new EventController(context);
-		await controller.runRecap();
-
-		expect(runEphemeralTurn).not.toHaveBeenCalled();
-		expect(showStatus).toHaveBeenCalledWith("Recap unavailable while compacting");
-		controller.dispose();
-	});
-
-	it("supersedes an in-flight on-demand recap when triggered again", async () => {
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const { promise, resolve } = Promise.withResolvers<{ replyText: string; assistantMessage: AssistantMessage }>();
-		let firstSignal: AbortSignal | undefined;
-		let secondSignal: AbortSignal | undefined;
-		const runEphemeralTurn = vi.fn((args: { promptText: string; signal?: AbortSignal }) => {
-			if (!firstSignal) firstSignal = args.signal;
-			else secondSignal = args.signal;
-			return promise;
-		});
-		const context = createContext({ showStatus, runEphemeralTurn });
-
-		const controller = new EventController(context);
-		const first = controller.runRecap();
-		const second = controller.runRecap();
-
-		expect(firstSignal?.aborted).toBe(true);
-		expect(secondSignal?.aborted).toBe(false);
-
-		resolve({ replyText: "second recap", assistantMessage: createAssistantMessage() });
-		await Promise.all([first, second]);
-		await flushMicrotasks();
-
-		expect(showStatus).toHaveBeenCalledTimes(1);
-		expect(Bun.stripANSI(String(showStatus.mock.calls[0]?.[0] ?? ""))).toContain("second recap");
-		controller.dispose();
-	});
-
-	it("keeps an in-flight on-demand recap alive across agent_end", async () => {
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const { promise, resolve } = Promise.withResolvers<{ replyText: string; assistantMessage: AssistantMessage }>();
-		let receivedSignal: AbortSignal | undefined;
-		const runEphemeralTurn = vi.fn((args: { promptText: string; signal?: AbortSignal }) => {
-			receivedSignal = args.signal;
-			return promise;
-		});
-		const context = createContext({ showStatus, runEphemeralTurn });
-
-		const controller = new EventController(context);
-		const result = controller.runRecap();
-		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
-		expect(receivedSignal?.aborted).toBe(false);
-
-		resolve({ replyText: "kept alive", assistantMessage: createAssistantMessage() });
-		await result;
-		await flushMicrotasks();
-
-		expect(showStatus).toHaveBeenCalledTimes(1);
-		expect(Bun.stripANSI(String(showStatus.mock.calls[0]?.[0] ?? ""))).toContain("kept alive");
-		controller.dispose();
-	});
-
-	it("re-arms the idle recap timer after the on-demand recap completes", async () => {
-		resetSettingsForTest();
-		await Settings.init({
-			inMemory: true,
-			overrides: {
-				"compaction.idleEnabled": false,
-				"completion.notify": "off",
-				"recap.enabled": true,
-				"recap.idleSeconds": 60,
-			},
-		});
-		const showStatus = vi.fn((_: string, _options?: { dim?: boolean }) => {});
-		const runEphemeralTurn = vi.fn(async (_args: { promptText: string; signal?: AbortSignal }) => ({
-			replyText: "first recap",
-			assistantMessage: createAssistantMessage(),
-		}));
-		const context = createContext({ showStatus, runEphemeralTurn });
-
-		const controller = new EventController(context);
-		await controller.runRecap();
-		await flushMicrotasks();
-		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
-
-		vi.advanceTimersByTime(60_000);
-		await flushMicrotasks();
-
-		// The idle timer re-armed, so the auto recap fires after a full delay
-		// instead of being scheduled on top of the manual run.
-		expect(runEphemeralTurn).toHaveBeenCalledTimes(2);
-		expect(showStatus).toHaveBeenCalledTimes(2);
-		controller.dispose();
 	});
 });

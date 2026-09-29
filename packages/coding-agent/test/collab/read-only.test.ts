@@ -18,6 +18,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: FakeWebSocket + InMemoryRelay (see ./helpers/in-memory-relay)
@@ -291,7 +292,7 @@ describe("collab read-only links", () => {
 			if (replacement) await replacement;
 		}
 	});
-	for (const kind of ["advisor", "main", "sub"] as const) {
+	for (const kind of ["advisor", "sub"] as const) {
 		it(`${kind === "advisor" ? "denies" : "serves"} ${kind} transcripts requested by a view-link guest`, async () => {
 			await using dir = await TempDir.create("@pi-collab-transcript-");
 			const id = `transcript-${kind}-${crypto.randomUUID()}`;
@@ -374,12 +375,11 @@ describe("collab read-only links", () => {
 		const registry = AgentRegistry.global();
 		let aborts = 0;
 		const session = {
+			...createSessionDefaults(),
 			abort: async () => {
 				aborts++;
 			},
 			dispose: async () => {},
-			setIrcWakeTurnAdmission: (_next: unknown) => {},
-			setIrcWakeTurnSettlement: (_next: unknown) => {},
 		} as unknown as AgentSession;
 		const ref = registry.register({
 			id,

@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui";
 import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	InteractiveMode,
@@ -391,18 +392,6 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("Inline: sync work");
 	});
 
-	it("retains paused lifecycle snapshots without presenting them as active work", () => {
-		const eventBus = new EventBus();
-		const registry = new SessionObserverRegistry();
-		registry.subscribeToEventBus(eventBus, eventBus);
-		const lifecycle = makeLifecycle("Paused", 0, "waiting on extension", true);
-		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, lifecycle);
-		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...lifecycle, status: "paused" });
-
-		expect(registry.getSession("Paused")).toMatchObject({ status: "paused", detached: true });
-		expect(renderSubagentHudLines(registry.getSessions(), 120)).toEqual([]);
-	});
-
 	it("renders nested ids as a breadcrumb and truncates long descriptions to the viewport", () => {
 		const out = render([makeSession({ id: "Anna.Bob", description: `start ${"x".repeat(300)} end` })], 60);
 		expect(out).toContain("Anna>Bob:");
@@ -423,6 +412,22 @@ describe("subagent HUD lines", () => {
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload);
 		expect(kinds).toEqual(["lifecycle"]);
 		expect(registry.getActiveSubagentCount()).toBe(1);
+		registry.dispose();
+	});
+
+	it("keeps a paused subagent observable without counting it as running", () => {
+		const eventBus = new EventBus();
+		const registry = new SessionObserverRegistry();
+		registry.subscribeToEventBus(eventBus, eventBus);
+
+		const started = makeLifecycle("PausedWorker", 0, "Needs a human", true);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, started);
+		expect(registry.getActiveSubagentCount()).toBe(1);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...started, status: "paused" });
+		expect(registry.getSession("PausedWorker")).toMatchObject({ status: "paused", detached: true });
+		expect(registry.getActiveSubagentCount()).toBe(0);
+		expect(renderSubagentHudLines(registry.getSessions(), 120)).toEqual([]);
+
 		registry.dispose();
 	});
 
@@ -537,6 +542,43 @@ describe("SubagentHudComponent click rows", () => {
 		expect(hud.getClickAgentAtRow(3)).toBe("Long");
 		expect(hud.getClickAgentAtRow(shortRow)).toBe("Short");
 		expect(hud.getClickAgentAtRow(shortRow + 1)).toBeUndefined();
+	});
+
+	it("maps clicks after wrapping and resizing while leaving clicks before rendering unmapped", () => {
+		const hud = new SubagentHudComponent(["", "Subagents", ` ${"x".repeat(100)}`, "short"], ["Long", "Short"]);
+		expect(hud.getClickAgentAtRow(2)).toBeUndefined();
+
+		const narrowRows = hud.render(40);
+		const narrowShortRow = narrowRows.findIndex(line => Bun.stripANSI(line).includes("short"));
+		expect(narrowShortRow).toBeGreaterThan(3);
+		expect(hud.getClickAgentAtRow(narrowShortRow - 1)).toBe("Long");
+		expect(hud.getClickAgentAtRow(narrowShortRow)).toBe("Short");
+
+		const wideRows = hud.render(120);
+		expect(wideRows.length).toBeLessThan(narrowRows.length);
+		const wideShortRow = wideRows.findIndex(line => Bun.stripANSI(line).includes("short"));
+		expect(hud.getClickAgentAtRow(wideShortRow)).toBe("Short");
+		expect(hud.getClickAgentAtRow(wideShortRow + 1)).toBeUndefined();
+	});
+
+	it("remaps clicks when runtime character width changes", () => {
+		setHangulCompatibilityJamoWidth(1);
+		try {
+			const hud = new SubagentHudComponent(["", "Subagents", ` ${"ㅁ".repeat(25)}`, "next"], ["Jamo", "Next"]);
+			const narrowRows = hud.render(40);
+			const narrowNextRow = narrowRows.findIndex(line => Bun.stripANSI(line).includes("next"));
+			expect(hud.getClickAgentAtRow(narrowNextRow)).toBe("Next");
+
+			setHangulCompatibilityJamoWidth(2);
+			expect(hud.getClickAgentAtRow(narrowNextRow)).toBe("Next");
+			const wideRows = hud.render(40);
+			const wideNextRow = wideRows.findIndex(line => Bun.stripANSI(line).includes("next"));
+			expect(wideNextRow).toBeGreaterThan(narrowNextRow);
+			expect(hud.getClickAgentAtRow(wideNextRow - 1)).toBe("Jamo");
+			expect(hud.getClickAgentAtRow(wideNextRow)).toBe("Next");
+		} finally {
+			resetHangulCompatibilityJamoWidthForTests();
+		}
 	});
 });
 

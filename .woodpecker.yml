@@ -1,38 +1,73 @@
-# Woodpecker CI for the self-hosted Forgejo mirror
-# (https://git.n3t.work/vith/oh-my-pi, runs on the n3t.work ARM box).
-#
-# Checks only: lint + typecheck on pushes to integration and on pull
-# requests. No release builds, no native addon builds, no test buckets —
-# those need platform-specific native addons and stay local / on GitHub CI.
-# The shared runner executes one workflow at a time across all repositories.
-# Mount this repo's cache per step; trusted volumes and fork approval are required.
+# Native Linux ARM64 CI for the self-hosted Forgejo mirror.
+# One shared agent serializes all repos; this job mounts only the OMP cache.
+# Trusted volumes are enabled for this private repo; fork PRs require approval.
 labels:
   platform: linux/arm64
 
 steps:
-  lint:
-    image: oven/bun:1.4.2
+  native-ci:
+    image: localhost/omp-ci:arm64
     volumes:
       - /var/lib/woodpecker-runner/omp-cache/pr:/ci-cache
+      # A separate mount lets APT's sandbox user traverse its cache without
+      # making the private compiler/dependency cache readable to that user.
+      - /var/lib/woodpecker-runner/omp-cache/pr/apt:/apt-cache
     environment:
       BUN_INSTALL_CACHE_DIR: /ci-cache/bun
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: /ci-cache/bun-transpiler
+      XDG_CACHE_HOME: /ci-cache/xdg
+      CARGO_HOME: /ci-cache/cargo
+      CARGO_TARGET_DIR: /ci-cache/target
+      LIBCLANG_PATH: /usr/lib/llvm-19/lib
+      OMP_TEST_CONCURRENCY: "1"
+      RUSTUP_HOME: /opt/rustup
     commands:
-      - bun install --frozen-lockfile
-      - bun run check:tools
-    when:
-      - event: [push, pull_request]
-        branch: integration
+      - |
+        set -eu
+        export PATH="/opt/cargo/bin:$PATH"
 
-  types:
-    image: oven/bun:1.4.2
-    volumes:
-      - /var/lib/woodpecker-runner/omp-cache/pr:/ci-cache
-    environment:
-      BUN_INSTALL_CACHE_DIR: /ci-cache/bun
-    depends_on: [lint]
-    commands:
-      - bun install --frozen-lockfile
-      - bun run ci:check:full
+        test "$(uname -m)" = aarch64
+        test "$(bun -e 'console.log(process.arch)')" = arm64
+        test "$(rustc -vV | sed -n 's/^host: //p')" = aarch64-unknown-linux-gnu
+        case "$(cc -dumpmachine)" in
+          aarch64*-linux-gnu) ;;
+          *) echo "cc must target aarch64 Linux" >&2; exit 1 ;;
+        esac
+        test -z "${CARGO_BUILD_TARGET:-}"
+        test -z "${CROSS_TARGET:-}"
+
+        # Exercise the fork's optional portal capture implementation, not only
+        # the default build that compiles it out.
+        mkdir -p /apt-cache/archives/partial /apt-cache/lists/partial
+        apt-get -o Dir::State::lists=/apt-cache/lists -o Dir::Cache::archives=/apt-cache/archives update
+        DEBIAN_FRONTEND=noninteractive apt-get \
+          -o Dir::State::lists=/apt-cache/lists \
+          -o Dir::Cache::archives=/apt-cache/archives \
+          -o APT::Keep-Downloaded-Packages=true \
+          install -y --no-install-recommends libpipewire-0.3-dev libclang1-19 libclang-common-19-dev openssh-client rsync
+
+        # Fresh git checkouts otherwise invalidate Cargo's mtime fingerprints.
+        # Content synchronization preserves unchanged sources and dependency trees.
+        workspace="$(bash scripts/ci-prepare-workspace.sh "$PWD" /ci-cache/workspace)"
+        cd "$workspace"
+
+        bun install --frozen-lockfile
+        bun test scripts/ci-prepare-workspace.test.ts
+        bun run check:ts
+        bun run check:rs
+        OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
+        # A second identical build must reuse the linked Cargo artifact.
+        native_artifact="/ci-cache/target/aarch64-unknown-linux-gnu/ci/libpi_natives.so"
+        native_stamp="$(stat -c '%y' "$native_artifact")"
+        CARGO_LOG=cargo::core::compiler::fingerprint=info OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
+        test "$native_stamp" = "$(stat -c '%y' "$native_artifact")"
+        echo "Warm native build reused the linked artifact"
+        bun run ci:test:full
+        cargo nextest run -p pi-natives --features wayland-pipewire -E 'test(desktop::linux::wayland)'
+        bun run collab:web:build
+        bun --cwd=packages/coding-agent run build
+        packages/coding-agent/dist/omp --version
+        packages/coding-agent/dist/omp --smoke-test
     when:
       - event: [push, pull_request]
         branch: integration

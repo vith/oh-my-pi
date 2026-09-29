@@ -43,7 +43,7 @@ import { recoverConflictUriPrefix } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 
 import { outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd, pathTargetsSsh, probeLiteralPathExists } from "./path-utils";
+import { formatPathRelativeToCwd, probeLiteralPathExists } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import {
 	enforcePlanModeWrite,
@@ -418,12 +418,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const { path: rawPath, content } = args as Partial<WriteParams>;
 		if (typeof rawPath !== "string") return "write";
 		// Unwrap a hashline `[path#TAG]` wrapper first (parity with execute) so a
-		// Remote SSH writes open an outbound connection and run a remote shell —
-		// gate them like the exec-tier `ssh` tool, ahead of the router tier
-		// logic. Substring match also covers selector-suffixed targets.
-		if (pathTargetsSsh(rawPath)) {
-			return { tier: "exec", override: true, policy: "prompt", reason: "ssh:// remote target" };
-		}
 		// wrapped `[scheme://h/x#ABCD]` gets the same tier as the bare URL.
 		return InternalUrlRouter.instance().writeTier(
 			unwrapHashlineHeaderPath(rawPath),

@@ -37,16 +37,14 @@ import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
 import {
-	type AgentDefinition,
 	type AgentProgress,
-	canSpawnAtDepth,
-	getTaskSchema,
 	type SingleResult,
+	type TaskItem,
+	type TaskParams,
 	type TaskToolDetails,
-	type TaskToolSchemaInstance,
-} from "./types";
-import type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
+} from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobError, type AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -279,6 +277,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 		return params.tasks;
 	}
 	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+	if ("solutionSpace" in params) item.solutionSpace = params.solutionSpace;
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
@@ -300,6 +299,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	const spawn: TaskParams = { agent: item.agent?.trim() || defaultAgent };
 	if (item.name !== undefined) spawn.name = item.name;
 	if (item.task !== undefined) spawn.task = item.task;
+	if (item.solutionSpace !== undefined) spawn.solutionSpace = item.solutionSpace;
 	if (params.context !== undefined) spawn.context = params.context;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
@@ -615,7 +615,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			agents:
 				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
 				this.#discoveredAgents,
-			sessionAgents: this.session.getSessionAgents?.() ?? [],
+			sessionAgents: this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [],
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
 			disabledAgents,
@@ -1065,13 +1065,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const spawn = syncSpawns[position];
 			const result = merged.results.find(r => r.id === spawn.agentId);
 			if (result) {
-				spawn.progress.status = result.paused
-					? "paused"
-					: result.aborted
-						? "aborted"
-						: result.exitCode === 0 && !result.error
-							? "completed"
-							: "failed";
+				spawn.progress.status =
+					result.paused && result.exitCode === 0 && !result.error
+						? "paused"
+						: result.aborted
+							? "aborted"
+							: result.exitCode === 0 && !result.error
+								? "completed"
+								: "failed";
 				spawn.progress.durationMs = result.durationMs;
 			} else {
 				spawn.progress.status = payloads[position] ? "failed" : "aborted";
@@ -1109,15 +1110,18 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			options;
 		const buildFollowUpHint = async (outcome: "aborted" | "paused" | "completed"): Promise<string> => {
 			if (outcome === "paused") {
-				const followUp = ircEnabled ? "message it via `hub` to resume; " : "";
-				return `\n\n${agentId} is paused and resumable — ${followUp}transcript at history://${agentId}`;
+				const followUp = ircEnabled ? "message it to resume; " : "";
+				const lifetime = spawnParams.isolated
+					? "its isolated session can be resumed only while still live"
+					: "it is resumable";
+				return `\n\n${agentId} is paused — ${lifetime}; ${followUp}transcript at history://${agentId}`;
 			}
+			const aborted = outcome === "aborted";
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
 			// caller at a follow-up path that no longer exists. The template says
 			// nothing about the worktree itself: the runner keeps it when captured
 			// changes could not be written, and names that path in the result.
-			const aborted = outcome === "aborted";
 			const isolated = spawnParams.isolated === true;
 			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
@@ -1233,19 +1237,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// error on a zero exit (changes captured but not landed, or a
 					// retained workspace) is a failure too: the work needs manual
 					// recovery, which a "completed" job would hide. Mirrors the sync
-					// path's status derivation.
+					// path's status derivation. `isError` marks a child that finished
+					// before a later step (isolation merge, nested patch apply) threw.
 					const resultFailed =
+						result.isError === true ||
 						!singleResult ||
 						(singleResult.aborted ?? false) ||
 						singleResult.exitCode !== 0 ||
 						singleResult.error !== undefined;
-					progress.status = singleResult?.paused
-						? "paused"
-						: singleResult?.aborted
-							? "aborted"
-							: resultFailed
-								? "failed"
-								: "completed";
+					progress.status =
+						singleResult?.paused && !resultFailed
+							? "paused"
+							: singleResult?.aborted
+								? "aborted"
+								: resultFailed
+									? "failed"
+									: "completed";
 					progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
 					progress.tokens = singleResult?.tokens ?? 0;
 					progress.requests = singleResult?.requests ?? 0;
@@ -1277,7 +1284,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 							: `Background task ${agentId} complete.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const deliveryText = `${finalText}${await buildFollowUpHint(
-						singleResult?.paused ? "paused" : singleResult?.aborted ? "aborted" : "completed",
+						!resultFailed && singleResult?.paused ? "paused" : singleResult?.aborted ? "aborted" : "completed",
 					)}`;
 					const structured = singleResult?.structuredOutput;
 					if (resultFailed) {
@@ -1520,6 +1527,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				solutionSpace: params.solutionSpace,
 				...(params.tools?.length
 					? {
 							customTools: createEvalCustomTools(
@@ -1570,12 +1578,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		} catch (error) {
 			const message = error instanceof StructuredSubagentError ? error.message : String(error);
+			// A child that finished before the failure keeps its exit status,
+			// usage, and artifact path. `error` is set so nothing reads a zero
+			// exit code as a completed run.
+			const settled = error instanceof StructuredSubagentError ? error.result : undefined;
+			const cause = error instanceof StructuredSubagentError ? error.cause : undefined;
+			const salvaged = settled
+				? { ...settled, error: settled.error ?? (cause instanceof Error ? cause.message : message) }
+				: undefined;
 			return {
 				content: [{ type: "text", text: `Task execution failed: ${message}` }],
+				isError: true,
 				details: {
 					projectAgentsDir: null,
-					results: [],
+					results: salvaged ? [salvaged] : [],
 					totalDurationMs: Date.now() - startTime,
+					...(salvaged?.usage ? { usage: salvaged.usage } : {}),
+					...(salvaged?.outputPath ? { outputPaths: [salvaged.outputPath] } : {}),
 					...(latestProgress ? { progress: [latestProgress] } : {}),
 				},
 			};

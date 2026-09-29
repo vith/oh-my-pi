@@ -6,6 +6,7 @@ import {
 	type DesktopNotifier,
 	hasLinuxDesktopSession,
 	isDesktopNotificationLive,
+	onDesktopNotificationChange,
 	resetDesktopNotificationTracking,
 	resetDesktopNotifierCache,
 	resolveDesktopNotifier,
@@ -46,12 +47,6 @@ describe("shouldDeliverDesktopNotification", () => {
 		expect(shouldDeliverDesktopNotification("ghostty", false, "linux", LINUX_ENV)).toBe(false);
 		expect(shouldDeliverDesktopNotification("wezterm", false, "linux", LINUX_ENV)).toBe(false);
 		expect(shouldDeliverDesktopNotification("iterm2", false, "linux", LINUX_ENV)).toBe(false);
-	});
-
-	it("lets Bell-only terminals use D-Bus while true in-band notify protocols skip it", () => {
-		expect(shouldDeliverDesktopNotification("vscode", true, "linux", LINUX_ENV)).toBe(true);
-		expect(shouldDeliverDesktopNotification("ghostty", false, "linux", LINUX_ENV)).toBe(false);
-		expect(shouldDeliverDesktopNotification("kitty", false, "linux", LINUX_ENV)).toBe(false);
 	});
 
 	it("respects the PI_NO_DESKTOP_NOTIFY=1 opt-out", () => {
@@ -444,99 +439,32 @@ describe("closeDesktopNotification", () => {
 	});
 });
 
-describe("click-to-dismiss tracking", () => {
-	const stdoutIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-	let writes: string[];
-
+describe("desktop notification live-state transitions", () => {
 	beforeEach(() => {
 		resetDesktopNotifierCache();
 		resetDesktopNotificationTracking();
-		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-		writes = [];
-		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
-			writes.push(typeof chunk === "string" ? chunk : chunk.toString());
-			return true;
-		});
 	});
-
 	afterEach(() => {
 		vi.restoreAllMocks();
 		resetDesktopNotifierCache();
 		resetDesktopNotificationTracking();
-		if (stdoutIsTtyDescriptor) {
-			Object.defineProperty(process.stdout, "isTTY", stdoutIsTtyDescriptor);
-		} else {
-			delete (process.stdout as { isTTY?: boolean }).isTTY;
+	});
+
+	it("notifies the TUI when a daemon-assigned id arrives and when it is cleared", async () => {
+		vi.spyOn(utils, "$which").mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
+		vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
+		const transitions: boolean[] = [];
+		const unsubscribe = onDesktopNotificationChange(() => transitions.push(isDesktopNotificationLive()));
+		try {
+			sendDesktopNotification("first");
+			await Bun.sleep(0);
+			expect(transitions).toEqual([true]);
+			closeDesktopNotification();
+			expect(transitions).toEqual([true, false]);
+			closeDesktopNotification();
+			expect(transitions).toEqual([true, false]);
+		} finally {
+			unsubscribe();
 		}
-	});
-
-	it("arms button-event tracking when the daemon assigns a notification id", async () => {
-		const which = vi.spyOn(utils, "$which");
-		which.mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
-		vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
-
-		sendDesktopNotification("first");
-		await Bun.sleep(0);
-
-		expect(writes).toContain("\x1b[?1000h\x1b[?1006h");
-	});
-
-	it("never arms when no id comes back, so selection stays untouched", async () => {
-		const which = vi.spyOn(utils, "$which");
-		which.mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
-		vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
-
-		sendDesktopNotification("first");
-		await Bun.sleep(0);
-
-		expect(writes).toEqual([]);
-	});
-
-	it("disarms when the toast closes and stays disarmed for no-op closes", async () => {
-		const which = vi.spyOn(utils, "$which");
-		which.mockImplementation(name =>
-			name === "notify-send" ? "/usr/bin/notify-send" : name === "gdbus" ? "/usr/bin/gdbus" : null,
-		);
-		const spawn = vi
-			.spyOn(Bun, "spawn")
-			.mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
-
-		sendDesktopNotification("first");
-		await Bun.sleep(0);
-		expect(writes).toContain("\x1b[?1000h\x1b[?1006h");
-
-		spawn.mockImplementation((..._args: unknown[]) => ({ unref: vi.fn() }) as never);
-		closeDesktopNotification();
-		expect(writes.filter(w => w === "\x1b[?1006l\x1b[?1000l")).toHaveLength(1);
-
-		// A repeated close is a no-op and must not toggle tracking again.
-		closeDesktopNotification();
-		expect(writes.filter(w => w === "\x1b[?1006l\x1b[?1000l")).toHaveLength(1);
-	});
-
-	it("isDesktopNotificationLive tracks the armed window", async () => {
-		const which = vi.spyOn(utils, "$which");
-		which.mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
-		vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
-
-		expect(isDesktopNotificationLive()).toBe(false);
-		sendDesktopNotification("first");
-		await Bun.sleep(0);
-		expect(isDesktopNotificationLive()).toBe(true);
-		closeDesktopNotification();
-		expect(isDesktopNotificationLive()).toBe(false);
-	});
-
-	it("writes no tracking sequences outside a real terminal", async () => {
-		Object.defineProperty(process.stdout, "isTTY", { value: false, configurable: true });
-		const which = vi.spyOn(utils, "$which");
-		which.mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
-		vi.spyOn(Bun, "spawn").mockImplementation((..._args: unknown[]) => childWithStdout("42", vi.fn()) as never);
-
-		sendDesktopNotification("first");
-		await Bun.sleep(0);
-		closeDesktopNotification();
-
-		expect(writes).toEqual([]);
 	});
 });

@@ -9,11 +9,11 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	SpeculativePhysicalOutcome,
-	ToolApprovalDecision,
 	ToolSpeculationAssessment,
 	ToolSpeculationCommitContext,
 	ToolSpeculationDiscardContext,
 	ToolSpeculationExecutionContext,
+	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
 import {
@@ -82,7 +82,6 @@ import { postProcessToolResult, resolveOutputMaxColumns } from "./output-meta";
 import {
 	expandPath,
 	formatPathRelativeToCwd,
-	pathTargetsSsh,
 	probeLiteralPathExists,
 	resolveReadPathAsync,
 	splitDelimitedPathEntry,
@@ -840,16 +839,14 @@ async function assessLocalReadSpeculation(
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
 	readonly readsSkillUris = true;
-	readonly approval = (args: unknown): ToolApprovalDecision => {
+	readonly approval = (args: unknown): ToolTier => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
-		if (pathTargetsSsh(readPath))
-			return { tier: "exec", override: true, policy: "prompt", reason: "ssh:// remote target" };
 		const urlTier = InternalUrlRouter.instance().readTier(readPath);
 		if (urlTier !== "read") return urlTier;
 		readPath = splitImageQuestionTarget(readPath).path;
 		const target = splitPathAndSel(readPath);
-		return target.sel === undefined && splitPdfImageReadPath(readPath) ? { tier: "exec" } : "read";
+		return target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
 	};
 	readonly label = "Read";
 	readonly loadMode = "essential";

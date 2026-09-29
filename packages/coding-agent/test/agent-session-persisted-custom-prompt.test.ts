@@ -44,7 +44,7 @@ describe("AgentSession persisted custom prompt", () => {
 			.join("\n");
 	}
 
-	it("flushes a persisted custom prompt before the provider observes it without duplicating its entry", async () => {
+	it("materializes and flushes a fresh session before the provider observes a durable prompt", async () => {
 		tempDir = TempDir.createSync("@pi-persisted-custom-prompt-");
 		authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
@@ -53,18 +53,14 @@ describe("AgentSession persisted custom prompt", () => {
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
-		await sessionManager.ensureOnDisk();
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");
+		expect(await Bun.file(sessionFile).exists()).toBe(false);
 
-		const providerStarted = Promise.withResolvers<void>();
-		const releaseProvider = Promise.withResolvers<void>();
 		let transcriptAtProviderStart = "";
 		const mock = createMockModel({
 			handler: async () => {
 				transcriptAtProviderStart = await Bun.file(sessionFile).text();
-				providerStarted.resolve();
-				await releaseProvider.promise;
 				return { content: ["Done"] };
 			},
 		});
@@ -80,18 +76,14 @@ describe("AgentSession persisted custom prompt", () => {
 			modelRegistry,
 		});
 
-		const turn = session.promptCustomMessagePersisted({
+		await session.promptCustomMessagePersisted({
 			customType: "subagent-durable-follow-up",
 			content: "Use port 8080.",
 			display: true,
 			details: { deliveryKey: "resolution:r1" },
 			attribution: "user",
 		});
-		await providerStarted.promise;
-
 		expect(transcriptAtProviderStart.match(/resolution:r1/g)).toHaveLength(1);
-		releaseProvider.resolve();
-		await turn;
 		await sessionManager.flush();
 		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);
 		await sessionManager.close();
@@ -416,12 +408,26 @@ describe("AgentSession persisted custom prompt", () => {
 			stopReason: "stop" as const,
 			timestamp: Date.now() - 1,
 		};
+		// Exceed the speculative grace band so this exercises blocking pre-prompt
+		// compaction, with an earlier complete turn available to summarize.
+		const olderUser = {
+			...seedUser,
+			content: [{ type: "text" as const, text: "older user context".repeat(4000) }],
+			timestamp: Date.now() - 4,
+		};
+		const olderAssistant = {
+			...seedAssistant,
+			content: [{ type: "text" as const, text: "older assistant context".repeat(40) }],
+			timestamp: Date.now() - 3,
+		};
+		sessionManager.appendMessage(olderUser);
+		sessionManager.appendMessage(olderAssistant);
 		sessionManager.appendMessage(seedUser);
 		sessionManager.appendMessage(seedAssistant);
 		await sessionManager.ensureOnDisk();
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");
-		const compact = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
 			summary: "pre-prompt compacted",
 			shortSummary: undefined,
 			firstKeptEntryId: preparation.firstKeptEntryId,
@@ -429,9 +435,11 @@ describe("AgentSession persisted custom prompt", () => {
 			details: {},
 		}));
 		let durableMessagesAtProvider = 0;
+		let compactedBeforeProvider = false;
 		const marker = "DURABLE-PORT-8080";
 		const mock = createMockModel({
 			handler: context => {
+				compactedBeforeProvider = sessionManager.getEntries().some(entry => entry.type === "compaction");
 				durableMessagesAtProvider = context.messages.reduce(
 					(count, message) =>
 						count + (textFromProviderContent(message.content).match(new RegExp(marker, "g"))?.length ?? 0),
@@ -442,7 +450,12 @@ describe("AgentSession persisted custom prompt", () => {
 		});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [seedUser, seedAssistant] },
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [olderUser, olderAssistant, seedUser, seedAssistant],
+			},
 			convertToLlm,
 			streamFn: mock.stream,
 		});
@@ -467,7 +480,7 @@ describe("AgentSession persisted custom prompt", () => {
 			attribution: "user",
 		});
 
-		expect(compact).toHaveBeenCalledTimes(1);
+		expect(compactedBeforeProvider).toBe(true);
 		expect(durableMessagesAtProvider).toBe(1);
 		await sessionManager.flush();
 		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);

@@ -20,10 +20,10 @@ function createTestToolSession(cwd: string): ToolSession {
 	};
 }
 
-function callApproval(tool: { approval?: unknown }, args: unknown): unknown {
+function callApproval(tool: { approval?: unknown }, args: unknown): string {
 	const approval = tool.approval;
 	if (typeof approval !== "function") throw new Error("expected a dynamic approval function");
-	return approval(args);
+	return approval(args) as string;
 }
 
 describe("ssh:// tools require exec-tier approval", () => {
@@ -33,12 +33,7 @@ describe("ssh:// tools require exec-tier approval", () => {
 
 	it("read: ssh:// targets are exec, local paths stay read", () => {
 		const tool = new ReadTool(createTestToolSession(os.tmpdir()));
-		expect(callApproval(tool, { path: "ssh://icaro/etc/hostname" })).toEqual({
-			tier: "exec",
-			override: true,
-			policy: "prompt",
-			reason: "ssh:// remote target",
-		});
+		expect(callApproval(tool, { path: "ssh://icaro/etc/hostname" })).toBe("exec");
 		expect(callApproval(tool, { path: "/etc/hostname" })).toBe("read");
 		expect(callApproval(tool, { path: "local://notes" })).toBe("read");
 		expect(callApproval(tool, {})).toBe("read");
@@ -48,18 +43,8 @@ describe("ssh:// tools require exec-tier approval", () => {
 		const tool = new GrepTool(createTestToolSession(os.tmpdir()));
 		// The delimited string is one entry at approval time (expansion happens
 		// later), so an anchored check would miss it — the substring scan must not.
-		expect(callApproval(tool, { paths: "src,ssh://icaro/etc/hosts" })).toEqual({
-			tier: "exec",
-			override: true,
-			policy: "prompt",
-			reason: "ssh:// remote target",
-		});
-		expect(callApproval(tool, { paths: ["src", "ssh://icaro/etc/hosts"] })).toEqual({
-			tier: "exec",
-			override: true,
-			policy: "prompt",
-			reason: "ssh:// remote target",
-		});
+		expect(callApproval(tool, { paths: "src,ssh://icaro/etc/hosts" })).toBe("exec");
+		expect(callApproval(tool, { paths: ["src", "ssh://icaro/etc/hosts"] })).toBe("exec");
 		expect(callApproval(tool, { paths: ["src", "lib"] })).toBe("read");
 		expect(callApproval(tool, { paths: "src" })).toBe("read");
 		expect(callApproval(tool, {})).toBe("read");
@@ -67,19 +52,9 @@ describe("ssh:// tools require exec-tier approval", () => {
 
 	it("write: ssh:// is exec even when wrapped in a hashline header", () => {
 		const tool = new WriteTool(createTestToolSession(os.tmpdir()));
-		expect(callApproval(tool, { path: "ssh://icaro/tmp/x" })).toEqual({
-			tier: "exec",
-			override: true,
-			policy: "prompt",
-			reason: "ssh:// remote target",
-		});
+		expect(callApproval(tool, { path: "ssh://icaro/tmp/x" })).toBe("exec");
 		// A pasted `[path#TAG]` wrapper must not let an ssh write dodge the exec tier.
-		expect(callApproval(tool, { path: "[ssh://icaro/tmp/x#ABCD]" })).toEqual({
-			tier: "exec",
-			override: true,
-			policy: "prompt",
-			reason: "ssh:// remote target",
-		});
+		expect(callApproval(tool, { path: "[ssh://icaro/tmp/x#ABCD]" })).toBe("exec");
 		expect(callApproval(tool, { path: "/tmp/local-file.txt" })).toBe("write");
 	});
 });

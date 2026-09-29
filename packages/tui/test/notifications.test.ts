@@ -13,7 +13,7 @@ import {
 	TERMINAL,
 	wrapTmuxPassthrough,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
-import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "./virtual-terminal";
 
 const stdinIsTtyDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
@@ -81,7 +81,7 @@ let previousHeadless = false;
 describe("terminal notifications", () => {
 	beforeEach(() => {
 		setOsc99Supported(false);
-		previousHeadless = setTerminalHeadless(false);
+		previousHeadless = utils.setTerminalHeadless(false);
 		// Default the suite to a direct-terminal baseline so probe/format
 		// assertions never see inherited multiplexer markers.
 		delete Bun.env.TMUX;
@@ -103,7 +103,7 @@ describe("terminal notifications", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		setTerminalHeadless(previousHeadless);
+		utils.setTerminalHeadless(previousHeadless);
 		setOsc99Supported(false);
 		resetOsc99NotificationState();
 		mutableTerminal.notifyProtocol = originalNotifyProtocol;
@@ -587,6 +587,10 @@ describe("terminal notifications", () => {
 
 		expect(writes).toHaveLength(2);
 		expect(writes[1]).toBe("\x1b]99;omp-1;\x1b\\");
+		TERMINAL.closeNotification();
+		expect(writes).toHaveLength(2);
+		TERMINAL.sendNotification({ title: "Session", body: "Next" });
+		expect(writes[2]).toContain("i=omp-2");
 	});
 
 	it("closeNotification is a no-op without a rich OSC 99 id to address", () => {
@@ -755,10 +759,15 @@ describe("terminal notifications", () => {
 		}
 	});
 
-	it("consumes main-view mouse reports so click-to-dismiss never reaches components", () => {
+	it("click dismisses a live toast without activating inline mouse controls", async () => {
 		const terminal = new VirtualTerminal(80, 24);
 		const tui = new TUI(terminal);
-		const close = vi.spyOn(TERMINAL, "closeNotification").mockImplementation(() => {});
+		tui.setInlineMouseTrackingProvider(() => true);
+		const close = vi
+			.spyOn(TERMINAL, "closeNotification")
+			.mockImplementation(() => desktopNotify.closeDesktopNotification());
+		vi.spyOn(utils, "$which").mockImplementation(name => (name === "notify-send" ? "/usr/bin/notify-send" : null));
+		vi.spyOn(Bun, "spawn").mockImplementation(() => ({ unref: () => {}, stdout: new Response("42").body }) as never);
 		try {
 			tui.start();
 			const received: string[] = [];
@@ -766,19 +775,22 @@ describe("terminal notifications", () => {
 				received.push(data);
 				return undefined;
 			});
+			desktopNotify.sendDesktopNotification("first");
+			await Bun.sleep(0);
+			expect(desktopNotify.isDesktopNotificationLive()).toBe(true);
 			const before = close.mock.calls.length;
-			// SGR mouse press (button 0, col 10, row 5): the click-to-dismiss
-			// report the send path arms while a toast is live.
 			terminal.sendInput("\x1b[<0;10;5M");
 			expect(close.mock.calls.length).toBeGreaterThan(before);
-			// The report is consumed at the TUI dispatch: neither input listeners
-			// nor focused components observe it.
 			expect(received).toEqual([]);
-			// Ordinary keys still flow through to listeners.
+			expect(desktopNotify.isDesktopNotificationLive()).toBe(false);
+			// Inline mouse capture remains usable when the toast is gone.
+			terminal.sendInput("\x1b[<0;10;5M");
+			expect(received).toEqual(["\x1b[<0;10;5M"]);
 			terminal.sendInput("x");
-			expect(received).toEqual(["x"]);
+			expect(received).toEqual(["\x1b[<0;10;5M", "x"]);
 		} finally {
 			tui.stop();
+			desktopNotify.resetDesktopNotificationTracking();
 		}
 	});
 });

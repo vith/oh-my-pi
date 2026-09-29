@@ -1,7 +1,4 @@
-import { afterAll, describe, expect, it, spyOn } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import { describe, expect, it, spyOn } from "bun:test";
 import { customToolToDefinition } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
 import {
@@ -14,7 +11,6 @@ import {
 	truncateForPrompt,
 } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import { EditTool } from "../../src/edit";
 import type { ToolSession } from "../../src/tools";
@@ -29,31 +25,7 @@ function tool(
 	return { name, approval, formatApprovalDetails };
 }
 
-/**
- * Isolated home for engine rule resolution: the engine reads the user and
- * dynamic rule layers from `<home>/.omp/agent/permissions*.yml`, falling back
- * to `os.homedir()` when no home is supplied. An empty temp home keeps
- * developer-remembered rules out of these assertions (hermetic, deterministic).
- */
-const HERMETIC_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "pi-approval-test-"));
-const HERMETIC_CWD = path.join(HERMETIC_HOME, "cwd");
-
-afterAll(() => {
-	// Windows can briefly hold tempdir handles; retry a few times.
-	for (let attempt = 0; attempt < 5; attempt++) {
-		try {
-			removeSyncWithRetries(HERMETIC_HOME);
-			break;
-		} catch (err) {
-			const code = (err as NodeJS.ErrnoException).code;
-			if (code !== "EBUSY" && code !== "ENOTEMPTY" && code !== "EPERM") throw err;
-			if (attempt === 4) break; // best-effort: OS will reclaim
-		}
-	}
-});
-
 function createBashTool(settingsOverrides: Record<string, unknown> = {}, resolvedShell = "/bin/bash"): BashTool {
-	fs.mkdirSync(HERMETIC_CWD, { recursive: true });
 	const settings = Settings.isolated({
 		"async.enabled": false,
 		"bash.autoBackground.enabled": false,
@@ -69,14 +41,7 @@ function createBashTool(settingsOverrides: Record<string, unknown> = {}, resolve
 		env: {},
 		prefix: undefined,
 	});
-	// Hermetic home: the engine resolves user/dynamic rule layers from
-	// `<home>/.omp/agent/permissions*.yml`, so an unset home would fall back
-	// to os.homedir() and leak developer-remembered rules into assertions.
-	return new BashTool({
-		settings,
-		cwd: HERMETIC_CWD,
-		home: HERMETIC_HOME,
-	} as unknown as ConstructorParameters<typeof BashTool>[0]);
+	return new BashTool({ settings } as unknown as ConstructorParameters<typeof BashTool>[0]);
 }
 
 function bashApproval(command: string, settingsOverrides: Record<string, unknown> = {}, resolvedShell?: string) {
@@ -384,7 +349,7 @@ describe("decision policyKey scopes user policy to a sub-tool", () => {
 });
 
 describe("tool-owned dynamic approval declarations", () => {
-	it("denies curated critical bash patterns per piece through BashTool.approval", () => {
+	it("classifies critical bash patterns through BashTool.approval", () => {
 		for (const command of [
 			"rm -rf /",
 			":(){ :|:& };:",
@@ -403,7 +368,7 @@ describe("tool-owned dynamic approval declarations", () => {
 			"rm -rf -i /",
 			"rm -v -rf /",
 		]) {
-			expect(bashApproval(command)).toMatchObject({ tier: "exec", policy: "deny" });
+			expect(bashApproval(command)).toEqual({ tier: "exec", override: true, reason: "Critical pattern detected" });
 		}
 	});
 
@@ -419,9 +384,6 @@ describe("tool-owned dynamic approval declarations", () => {
 			"rm --recursive --force ./dist",
 			"rm -v /tmp/scratch",
 		]) {
-			// No rule or curated pattern matches; the engine's default posture
-			// (prompt) decides, and the approval fn surfaces it as a bare exec
-			// tier so the mode layer resolves it (ruling R4).
 			expect(bashApproval(command)).toBe("exec");
 		}
 	});
@@ -439,42 +401,46 @@ describe("tool-owned dynamic approval declarations", () => {
 			expect(bashApproval(command, settingsOverrides)).toEqual({ tier: "write", policy: "allow" });
 		}
 
-		expect(bashApproval("rm -rf build", settingsOverrides)).toMatchObject({
+		expect(bashApproval("rm -rf build", settingsOverrides)).toEqual({
 			tier: "exec",
+			override: true,
 			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf *",
 		});
-		expect(bashApproval("rm -rf build", settingsOverrides)).toHaveProperty(
-			"reason",
-			expect.stringContaining("rm -rf build"),
-		);
-		// The compound can't ride the `git *` allow, and the legacy `*` prompt
-		// rule matching the whole chain surfaces explicitly (upstream
-		// `bash.allowCompoundCommands` parity) instead of a bare posture prompt.
 		expect(
 			bashApproval("git diff packages/coding-agent/src/tools/bash.ts && rm file.txt", settingsOverrides),
-		).toMatchObject({ tier: "exec", policy: "prompt" });
-		expect(bashApproval("echo hello", settingsOverrides)).toBe("exec");
+		).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "prompt",
+			reason: "Prompt required by bash pattern: *",
+		});
+		expect(bashApproval("echo hello", settingsOverrides)).toEqual({
+			tier: "exec",
+			override: true,
+			policy: "prompt",
+			reason: "Prompt required by bash pattern: *",
+		});
 	});
 
-	it("curated critical denies win over a blanket allow pattern", () => {
+	it("keeps critical bash patterns prompt-gated unless explicitly denied", () => {
 		const settingsOverrides = {
 			"bash.patterns": [{ match: "*", approval: "allow" }],
 		};
 
-		expect(bashApproval("rm -rf /", settingsOverrides)).toMatchObject({
+		expect(bashApproval("rm -rf /", settingsOverrides)).toEqual({
 			tier: "exec",
-			policy: "deny",
+			override: true,
+			reason: "Critical pattern detected",
 		});
 		expect(bashApproval("echo hello", settingsOverrides)).toEqual({
 			tier: "write",
 			policy: "allow",
 		});
-		// A compound line can't ride the blanket allow: both pieces fall to the
-		// default posture prompt instead of an implicit exec.
 		expect(bashApproval("echo hello && rm file.txt", settingsOverrides)).toBe("exec");
 	});
 
-	it("gives deny patterns precedence over earlier allow patterns", () => {
+	it("applies the first matching bash approval pattern", () => {
 		const settingsOverrides = {
 			"bash.patterns": [
 				{ match: "*", approval: "allow" },
@@ -482,13 +448,7 @@ describe("tool-owned dynamic approval declarations", () => {
 			],
 		};
 
-		// The engine evaluates legacy denies before any allow, regardless of
-		// list order (the old inline logic matched the first rule instead).
-		expect(bashApproval("git status", settingsOverrides)).toMatchObject({
-			tier: "exec",
-			policy: "deny",
-		});
-		expect(bashApproval("echo hi", settingsOverrides)).toEqual({
+		expect(bashApproval("git status", settingsOverrides)).toEqual({
 			tier: "write",
 			policy: "allow",
 		});
@@ -499,9 +459,11 @@ describe("tool-owned dynamic approval declarations", () => {
 			"bash.patterns": [{ match: "rm -rf *", approval: "deny" }],
 		};
 
-		expect(bashApproval("rm -rf /", settingsOverrides)).toMatchObject({
+		expect(bashApproval("rm -rf /", settingsOverrides)).toEqual({
 			tier: "exec",
+			override: true,
 			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf *",
 		});
 	});
 
@@ -510,32 +472,25 @@ describe("tool-owned dynamic approval declarations", () => {
 			"bash.patterns": [{ match: "rm -rf /*", approval: "deny" }],
 		};
 
+		const denied = {
+			tier: "exec",
+			override: true,
+			policy: "deny",
+			reason: "Blocked by bash pattern: rm -rf /*",
+		} as const;
 		// Dangerous segment in any position (not just leading) must trigger deny.
-		// `cat f | rm -rf /var/x` and the subshell deny through the curated
-		// critical patterns (the anchored legacy glob can't match a pipeline
-		// piece); the rest deny through the legacy rule itself.
-		for (const command of [
-			"rm -rf /tmp/scratch-a",
-			"cd /tmp && rm -rf /tmp/scratch-b && echo done",
-			"echo start; rm -rf /var/x",
-			"cat f | rm -rf /var/x",
-			"sleep 1 & rm -rf /tmp/scratch-b",
-			"(rm -rf /tmp/scratch-b)",
-		]) {
-			expect(bashApproval(command, settingsOverrides)).toMatchObject({
-				tier: "exec",
-				policy: "deny",
-			});
-		}
-
-		// A quoted binary evades both the anchored glob and the curated regex
-		// (the closing quote breaks `\brm\s+`), but never auto-approves: the
-		// engine falls back to the default posture prompt.
-		expect(bashApproval('cd /tmp && "rm" -rf /tmp/scratch-b', settingsOverrides)).toBe("exec");
+		expect(bashApproval("rm -rf /tmp/scratch-a", settingsOverrides)).toEqual(denied);
+		expect(bashApproval("cd /tmp && rm -rf /tmp/scratch-b && echo done", settingsOverrides)).toEqual(denied);
+		expect(bashApproval("echo start; rm -rf /var/x", settingsOverrides)).toEqual(denied);
+		expect(bashApproval("cat f | rm -rf /var/x", settingsOverrides)).toEqual(denied);
+		// Single `&` (background) and subshells are command boundaries too.
+		expect(bashApproval("sleep 1 & rm -rf /tmp/scratch-b", settingsOverrides)).toEqual(denied);
+		expect(bashApproval("(rm -rf /tmp/scratch-b)", settingsOverrides)).toEqual(denied);
+		// Quotes around the binary do not hide it from a deny rule.
+		expect(bashApproval('cd /tmp && "rm" -rf /tmp/scratch-b', settingsOverrides)).toEqual(denied);
 
 		// Segments that do not match the glob must not be denied by it. `rm -rf`
-		// on a relative target has no leading `/`, so the `/`-anchored rule stays
-		// out; both calls fall to the default posture prompt.
+		// on a relative target has no leading `/`, so the `/`-anchored rule stays out.
 		expect(bashApproval("cd /tmp && rm -rf relative-dir", settingsOverrides)).toBe("exec");
 		expect(bashApproval("cd /tmp && ls -la /nope", settingsOverrides)).toBe("exec");
 	});
@@ -545,11 +500,11 @@ describe("tool-owned dynamic approval declarations", () => {
 			"bash.patterns": [{ match: "curl *", approval: "prompt" }],
 		};
 
-		// The legacy `curl *` prompt rule fires per piece (ruling R2), so the
-		// curl segment surfaces the rule's prompt decision explicitly.
-		expect(bashApproval("cd /tmp && curl http://x -o out.txt", settingsOverrides)).toMatchObject({
+		expect(bashApproval("cd /tmp && curl http://x -o out.txt", settingsOverrides)).toEqual({
 			tier: "exec",
+			override: true,
 			policy: "prompt",
+			reason: "Prompt required by bash pattern: curl *",
 		});
 	});
 	it("never auto-approves a command that only prefixes an allow pattern", () => {
@@ -557,10 +512,7 @@ describe("tool-owned dynamic approval declarations", () => {
 			"bash.patterns": [{ match: "git *", approval: "allow" }],
 		};
 
-		// Shell control syntax after (or around) the allowed prefix must not ride
-		// the allow rule: compounds are split into pieces, and single-piece shell
-		// control (pipelines, substitutions, redirects, `-c` reinterpreting
-		// options) degrades the allow to a prompt (ruling R1).
+		// Shell control syntax after (or around) the allowed prefix must not ride the allow rule.
 		for (const command of [
 			"git status; rm file.txt",
 			"git status && rm file.txt",
@@ -949,12 +901,9 @@ describe("tool-owned dynamic approval declarations", () => {
 			],
 		});
 
-		// R4: engine `prompt` decisions surface as a bare exec tier (no policy,
-		// no override), so yolo resolves them through the mode — prompting is
-		// the gate's job, not the tool's declaration.
 		expect(resolveApproval(tool, { command: "echo hello" }, "yolo", {})).toMatchObject({
-			policy: "allow",
-			source: "mode",
+			policy: "prompt",
+			source: "tool",
 		});
 		expect(resolveApproval(tool, { command: "git status" }, "yolo", {})).toMatchObject({
 			policy: "allow",

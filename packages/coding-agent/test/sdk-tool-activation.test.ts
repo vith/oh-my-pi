@@ -103,13 +103,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		agentDir: tempDir,
 		modelRegistry,
 		sessionManager: SessionManager.inMemory(),
-		settings: Settings.isolated({
-			// Pre-permission-engine semantics: unconfigured approval was
-			// yolo-allow, so tool-execution assertions in this file (e.g. the
-			// native pi_edit grant) opt back into that posture explicitly
-			// instead of hitting the prompt gate.
-			"tools.approvalMode": "yolo",
-		}),
+		settings: Settings.isolated(),
 		model: getBundledModel("openai", "gpt-4o-mini"),
 		disableExtensionDiscovery: true,
 		skills: [],

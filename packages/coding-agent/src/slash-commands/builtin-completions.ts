@@ -7,7 +7,6 @@ import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
 import { expandTilde } from "../tools/path-utils";
-import { loadRuleLayers } from "../tools/permissions/rules";
 import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";
 
 /**
@@ -146,88 +145,6 @@ async function buildMcpRemoveCompletions(
 		)
 		.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
 	return matches.length > 0 ? matches : null;
-}
-
-/** /permissions subcommands whose argument is a rule id (per their `usage: "<id>"`). */
-const PERMISSION_RULE_ID_SUBCOMMANDS: Readonly<Record<string, "all" | "user">> = {
-	show: "all",
-	remove: "user",
-	edit: "user",
-};
-
-/** Human label for a rule layer in completion descriptions. */
-function permissionLayerLabel(layer: string): string {
-	switch (layer) {
-		case "project":
-			return "project · repo-committed";
-		case "user":
-			return "user · personal";
-		case "session":
-			return "session · this session";
-		default:
-			return layer;
-	}
-}
-
-/**
- * Build getArgumentCompletions for /permissions. Delegates to the generic
- * declarative subcommand completer while the subcommand name itself is still
- * being typed, then switches to rule-id completion (sourced from the
- * file-backed rule layers) once a recognized id-taking subcommand is
- * followed by a space. `remove` completes user rules and, after an explicit
- * `--project` flag, project rules too — the flag itself is offered while
- * typing it. `edit` only ever succeeds against user-layer rules, so it
- * completes those only; `show` accepts any file-backed id. Subcommands with
- * a different argument shape (add, test, clear, ...) get no argument
- * completion.
- */
-export function buildPermissionsArgumentCompletions(
-	subcommands: SubcommandDef[],
-	runtime: TuiSlashCommandRuntime,
-): (argumentPrefix: string) => Promise<AutocompleteItem[] | null> {
-	const genericCompletions = buildArgumentCompletions(subcommands);
-	return async (argumentPrefix: string) => {
-		const spaceIndex = argumentPrefix.indexOf(" ");
-		if (spaceIndex === -1) return genericCompletions(argumentPrefix);
-
-		const rawSubcommand = argumentPrefix.slice(0, spaceIndex);
-		const idScope = PERMISSION_RULE_ID_SUBCOMMANDS[rawSubcommand.toLowerCase()];
-		if (idScope === undefined) return null;
-
-		let argPrefix = argumentPrefix.slice(spaceIndex + 1);
-		let includeProject = false;
-		if (rawSubcommand.toLowerCase() === "remove") {
-			const flagMatch = /^(--project|project)\s+/u.exec(argPrefix);
-			if (flagMatch !== null) {
-				includeProject = true;
-				argPrefix = argPrefix.slice(flagMatch[0].length);
-			} else if (argPrefix.trim().startsWith("-")) {
-				// Typing the flag: offer it before any ids.
-				return [
-					{
-						value: `${rawSubcommand} --project `,
-						label: "--project",
-						description: "Also allow removing repo-committed project rules",
-					},
-				];
-			}
-		}
-		const idPrefix = argPrefix.toLowerCase();
-
-		const { rules } = loadRuleLayers(runtime.ctx.sessionManager.getCwd());
-		const matches: AutocompleteItem[] = rules
-			.filter(rule => {
-				if (idScope === "user") return includeProject || rule.layer === "user";
-				return true;
-			})
-			.filter(rule => rule.id.toLowerCase().startsWith(idPrefix))
-			.map(rule => ({
-				value: `${rawSubcommand}${includeProject ? " --project" : ""} ${rule.id} `,
-				label: rule.id,
-				description: `${rule.tool} ${JSON.stringify(rule.match)} → ${rule.action} (${permissionLayerLabel(rule.layer)})`,
-			}));
-		return matches.length > 0 ? matches : null;
-	};
 }
 
 /**

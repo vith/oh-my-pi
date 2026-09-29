@@ -107,25 +107,14 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 		expect(ok).toBeDefined();
 	});
 
-	it("write: ssh:// requires approval (tool-declared prompt), a local write runs (per-tool allow)", async () => {
-		// The engine maps legacy write mode onto the prompt posture (no tier
-		// comparison), so the local call rides the legacy per-tool allow while
-		// the tool-declared ssh:// prompt (engine precedence: tool prompt before
-		// user allow) still gates remote writes in every posture.
-		const writeCtx = {
-			settings: Settings.isolated({
-				...BASE_SETTINGS,
-				"tools.approvalMode": "write",
-				"tools.approval": { write: "allow" },
-			}),
-		} as AgentToolContext;
+	it("write: ssh:// requires approval (exec), a local write runs (write tier, write mode)", async () => {
 		await expect(
 			tool("write").execute(
 				"w-ssh",
 				{ path: "ssh://localhost/tmp/x", content: "x" },
 				undefined,
 				undefined,
-				writeCtx,
+				ctx("write"),
 			),
 		).rejects.toThrow(APPROVAL_RE);
 		const ok = await tool("write").execute(
@@ -133,7 +122,7 @@ describe("ssh:// tools are exec-gated through the production approval wrapper", 
 			{ path: "out.txt", content: "data\n" },
 			undefined,
 			undefined,
-			writeCtx,
+			ctx("write"),
 		);
 		expect(JSON.stringify(ok.content)).toContain("out.txt");
 	});

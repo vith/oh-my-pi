@@ -8,7 +8,7 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	ToolApprovalDecision,
+	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
@@ -40,7 +40,6 @@ import {
 	formatPathRelativeToCwd,
 	hasGlobPathChars,
 	isLineInRanges,
-	pathTargetsSsh,
 	probeLiteralPathExists,
 	relativeSearchResultPath,
 	resolveReadPath,
@@ -327,25 +326,26 @@ type SearchParams = typeof searchSchema.infer;
 /**
  * Construction-time overrides for callers that are not the model.
  *
- * The model-facing schema deliberately does not grow these: they exist for
- * wire bridges (the Cursor `pi_grep` frame) whose protocol carries an explicit
- * context width and total match cap, and which would otherwise have to drop
- * them. Unset means "use the session settings / built-in caps" — the behavior
- * every model-issued call keeps.
+ * The model-facing schema deliberately does not grow these: Cursor's native
+ * grep frames carry context widths and match caps that the shared tool cannot
+ * accept per call. Unset means "use session settings / built-in caps" for
+ * ordinary model-issued calls.
  */
 export interface GrepToolOptions {
-	/** Overrides `grep.contextBefore`/`grep.contextAfter` for every call on this instance. */
+	/** Overrides both context widths unless the corresponding direction is also supplied. */
 	context?: number;
+	/** Overrides the number of lines before each match. */
+	contextBefore?: number;
+	/** Overrides the number of lines after each match. */
+	contextAfter?: number;
 	/** Caps total surfaced matches. Applied on top of the built-in per-file and file-window caps, never above them. */
 	totalMatchLimit?: number;
 }
 
 export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
 	readonly name = "grep";
-	readonly approval = (args: unknown): ToolApprovalDecision => {
+	readonly approval = (args: unknown): ToolTier => {
 		const a = args as { path?: string | string[]; paths?: string | string[] };
-		if (toPathList(a.path ?? a.paths).some(pathTargetsSsh))
-			return { tier: "exec", override: true, policy: "prompt", reason: "ssh:// remote target" };
 		// Substring scan over the raw entries: delimited lists are only split after approval.
 		return InternalUrlRouter.instance().readTier(toPathList(a.path ?? a.paths).join("\n"));
 	};
@@ -368,15 +368,18 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 	readonly parameters = searchSchema;
 	readonly strict = true;
 
-	readonly #contextOverride?: number;
+	readonly #contextBeforeOverride?: number;
+	readonly #contextAfterOverride?: number;
 	readonly #totalMatchLimit?: number;
 
 	constructor(
 		private readonly session: ToolSession,
 		options?: GrepToolOptions,
 	) {
-		const context = options?.context;
-		this.#contextOverride = context !== undefined ? Math.max(0, Math.floor(context)) : undefined;
+		const before = options?.contextBefore ?? options?.context;
+		const after = options?.contextAfter ?? options?.context;
+		this.#contextBeforeOverride = before !== undefined ? Math.max(0, Math.floor(before)) : undefined;
+		this.#contextAfterOverride = after !== undefined ? Math.max(0, Math.floor(after)) : undefined;
 		const total = options?.totalMatchLimit;
 		this.#totalMatchLimit = total !== undefined ? Math.max(1, Math.floor(total)) : undefined;
 	}
@@ -445,8 +448,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							`or pass a UTF-8 text member.`,
 					);
 				}
-				const normalizedContextBefore = this.#contextOverride ?? cfgGrepContextBefore.get(this.session.settings);
-				const normalizedContextAfter = this.#contextOverride ?? cfgGrepContextAfter.get(this.session.settings);
+				const normalizedContextBefore =
+					this.#contextBeforeOverride ?? cfgGrepContextBefore.get(this.session.settings);
+				const normalizedContextAfter = this.#contextAfterOverride ?? cfgGrepContextAfter.get(this.session.settings);
 				const ignoreCase = !(caseSensitive ?? true);
 				const useGitignore = gitignore ?? true;
 				const patternHasNewline = normalizedPattern.includes("\n") || normalizedPattern.includes("\\n");
@@ -538,9 +542,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					limitReached: false,
 				};
 				let skippedOversizedCount = 0;
-				// Scope globs are relative to their base path: `dir/*.go` must stay in
-				// `dir`. Only a bare glob rooted at cwd (`*.ts`) matches at any depth.
-				const cwdRoot = path.resolve(this.session.cwd);
+				// Only a glob spelled without a directory prefix matches at any depth.
+				// The parsed base alone cannot distinguish `*.ts` from `./*.ts`.
 				try {
 					if (exactFilePaths || multiTargets) {
 						const matches: GrepMatch[] = [];
@@ -552,6 +555,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							? exactFilePaths.map(filePath => ({
 									basePath: filePath,
 									glob: undefined as string | undefined,
+									bareGlob: false,
 								}))
 							: (multiTargets ?? []);
 						for (const target of targets) {
@@ -560,7 +564,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 									pattern: normalizedPattern,
 									path: target.basePath,
 									glob: target.glob,
-									recursive: path.resolve(target.basePath) === cwdRoot,
+									recursive: target.bareGlob === true,
 									ignoreCase,
 									multiline: effectiveMultiline,
 									hidden: true,
@@ -608,7 +612,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								pattern: normalizedPattern,
 								path: searchPath,
 								glob: globFilter,
-								recursive: path.resolve(searchPath) === cwdRoot,
+								recursive: scope.bareGlob,
 								ignoreCase,
 								multiline: effectiveMultiline,
 								hidden: true,
@@ -642,7 +646,8 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					const filteredMatches: GrepMatch[] = [];
 					for (const match of result.matches) {
 						const abs = resolveSearchResultPath(searchPath, match.path);
-						const ranges = rangesByAbsPath.get(abs);
+						// Native absolute matches can retain forward slashes on Windows; range keys use path.resolve.
+						const ranges = rangesByAbsPath.get(path.isAbsolute(match.path) ? path.resolve(abs) : abs);
 						if (!ranges) {
 							// Path has no line-range constraint (e.g. a peer entry without `:N-M`).
 							filteredMatches.push(match);

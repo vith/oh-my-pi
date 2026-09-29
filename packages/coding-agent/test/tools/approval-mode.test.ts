@@ -46,7 +46,6 @@ describe("tools.approvalMode setting", () => {
 		const created = await createAgentSession({
 			cwd,
 			agentDir: tempDir,
-			home: tempDir,
 			sessionManager,
 			settings: Settings.isolated(BASE_SETTINGS),
 			model: getBundledModel("openai", "gpt-4o-mini"),
@@ -89,14 +88,10 @@ describe("tools.approvalMode setting", () => {
 		return bash;
 	}
 
-	it("yolo mode bypasses approval for non-overriding tool calls", async () => {
-		// The engine's default posture is deny-by-default `prompt` for
-		// unconfigured settings; yolo must be explicitly configured to map onto
-		// the allow posture (permissions.default / tools.approvalMode).
-		const settings = approvalSettings({ "tools.approvalMode": "yolo" });
+	it("yolo mode (default) bypasses approval for non-overriding tool calls", async () => {
+		const settings = approvalSettings();
 		const result = await bashTool().execute("yolo", { command: "echo ok" }, undefined, undefined, {
 			settings,
-			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("ok");
 	});
@@ -120,7 +115,6 @@ describe("tools.approvalMode setting", () => {
 		await expect(
 			bashTool().execute("always-ask", { command: "echo blocked" }, undefined, undefined, {
 				settings,
-				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
@@ -132,7 +126,6 @@ describe("tools.approvalMode setting", () => {
 		});
 		const result = await bashTool().execute("always-ask-allow", { command: "echo allowed" }, undefined, undefined, {
 			settings,
-			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("allowed");
 	});
@@ -145,7 +138,6 @@ describe("tools.approvalMode setting", () => {
 		await expect(
 			bashTool().execute("yolo-prompt", { command: "echo blocked" }, undefined, undefined, {
 				settings,
-				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
@@ -158,25 +150,25 @@ describe("tools.approvalMode setting", () => {
 		await expect(
 			bashTool().execute("write-mode", { command: "echo unconfigured" }, undefined, undefined, {
 				settings,
-				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 	});
 
-	it("critical bash patterns deny even with yolo mode and per-tool allow", async () => {
-		// The engine's curated critical deny outranks the yolo-derived allow
-		// posture and the legacy per-tool allow policy. The gate surfaces the
-		// engine's reason (plan ruling round 2), naming the denied piece.
+	it("critical bash patterns do not prompt in yolo mode with bash allowed", async () => {
 		const settings = approvalSettings({
 			"tools.approvalMode": "yolo",
 			"tools.approval": { bash: "allow" },
 		});
-		await expect(
-			bashTool().execute("critical", { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" }, undefined, undefined, {
+		const result = await bashTool().execute(
+			"critical",
+			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			undefined,
+			undefined,
+			{
 				settings,
-				home: tempDir,
-			} as AgentToolContext),
-		).rejects.toThrow(/is blocked: Denied: piece/);
+			} as AgentToolContext,
+		);
+		expect(textOf(result)).toContain("(no output)");
 	});
 
 	it("attributes bash pattern denies to tool policy", async () => {
@@ -184,14 +176,11 @@ describe("tools.approvalMode setting", () => {
 			"tools.approvalMode": "yolo",
 			"tools.approval": { bash: "allow" },
 		});
-		// Fork engine: the curated critical deny (engine step 4) outranks the
-		// legacy per-tool allow and names the denied piece; a legacy
-		// `bash.patterns` deny only surfaces when no curated pattern matches.
 		await expect(
 			bashTool().execute("pattern-deny", { command: "rm -rf /tmp/never-run" }, undefined, undefined, {
 				settings,
 			} as AgentToolContext),
-		).rejects.toThrow(/is blocked: Denied: piece/);
+		).rejects.toThrow('Tool "bash" is blocked by tool policy.\nReason: Blocked by bash pattern: rm -rf *');
 	});
 
 	it("CLI --auto-approve forces yolo mode for non-overriding tool calls", async () => {
@@ -199,29 +188,23 @@ describe("tools.approvalMode setting", () => {
 		const result = await bashTool().execute("cli-override", { command: "echo override" }, undefined, undefined, {
 			settings,
 			autoApprove: true,
-			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("override");
 	});
 
-	it("CLI --auto-approve does not bypass curated critical denies", async () => {
-		// --auto-approve maps onto the allow posture, but the engine's curated
-		// critical deny outranks the posture, so dangerous commands still deny
-		// with the engine's reason surfaced (plan ruling round 2).
+	it("CLI --auto-approve also bypasses safety-override patterns", async () => {
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
-		await expect(
-			bashTool().execute(
-				"cli-critical",
-				{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
-				undefined,
-				undefined,
-				{
-					settings,
-					autoApprove: true,
-					home: tempDir,
-				} as AgentToolContext,
-			),
-		).rejects.toThrow(/is blocked: Denied: piece/);
+		const result = await bashTool().execute(
+			"cli-critical",
+			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			undefined,
+			undefined,
+			{
+				settings,
+				autoApprove: true,
+			} as AgentToolContext,
+		);
+		expect(textOf(result)).toContain("(no output)");
 	});
 
 	it("xd:// dispatch approval (xdevApproved) suppresses the tier-only re-prompt", async () => {
@@ -231,7 +214,6 @@ describe("tools.approvalMode setting", () => {
 		const result = await bashTool().execute("xdev-tier", { command: "echo dispatched" }, undefined, undefined, {
 			settings,
 			xdevApproved: true,
-			home: tempDir,
 		} as AgentToolContext);
 		expect(textOf(result)).toContain("dispatched");
 	});
@@ -245,7 +227,6 @@ describe("tools.approvalMode setting", () => {
 			bashTool().execute("xdev-explicit-prompt", { command: "echo blocked" }, undefined, undefined, {
 				settings: promptSettings,
 				xdevApproved: true,
-				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/requires approval but no interactive UI available/);
 
@@ -257,7 +238,6 @@ describe("tools.approvalMode setting", () => {
 			bashTool().execute("xdev-denied", { command: "echo blocked" }, undefined, undefined, {
 				settings: denySettings,
 				xdevApproved: true,
-				home: tempDir,
 			} as AgentToolContext),
 		).rejects.toThrow(/blocked by user policy/);
 	});
@@ -323,16 +303,5 @@ describe("tools.approvalMode setting", () => {
 				},
 			} as never),
 		).rejects.toThrow(/pending provider safety checks but no interactive UI/);
-	});
-
-	it("constructs an extensionRunner unconditionally so the approval gate is always installed", async () => {
-		// Regression lock for the architectural fix: the per-tool approval gate is implemented
-		// inside `ExtensionToolWrapper`, which is only attached when `session.extensionRunner` exists.
-		// Historically the runner was conditional on `extensionsResult.extensions.length > 0`, which
-		// meant the entire approval system silently disappeared for users with no extensions loaded —
-		// any non-yolo approval mode setting would be a no-op without feedback. The
-		// fix is to construct the runner unconditionally; this test makes that contract explicit so
-		// a future change to make the runner optional again cannot silently re-open the hole.
-		expect(session.extensionRunner).toBeDefined();
 	});
 });

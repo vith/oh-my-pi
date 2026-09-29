@@ -187,16 +187,12 @@ function createScriptedSession(
 		prompt: async () => {
 			await script(emit);
 			emittedGate.resolve();
+			return true;
 		},
 		abort: async () => {
 			aborted = true;
 		},
 		isAborted: () => aborted,
-		dispose: async () => {},
-		setIrcWakeTurnObserver: () => {},
-		setIrcWakeTurnAdmission: (_next: unknown) => {},
-		setIrcWakeTurnSettlement: (_next: unknown) => {},
-		subscribeRunState: () => () => {},
 	};
 	// AgentSession is a concrete class; the executor consumes only this
 	// structural subset. Deliberate documented test-double escape hatch,

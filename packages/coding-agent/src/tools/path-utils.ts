@@ -297,20 +297,6 @@ function isInternalUrlPath(filePath: string): boolean {
 }
 
 /**
- * True when a tool path argument references the `ssh://` scheme anywhere.
- *
- * Substring (not anchored) on purpose: it feeds the read/search/write approval
- * tier, which runs synchronously on the raw args. `search` only flattens a
- * delimited `paths: "a,ssh://h/x"` into separate entries *after* approval, so an
- * anchored check would let an embedded `ssh://` slip through at the read tier.
- * Matching the literal `ssh://` substring also tracks exactly what routes to the
- * SSH handler; over-matching only over-prompts (fail-closed).
- */
-export function pathTargetsSsh(path: string): boolean {
-	return /ssh:\/\//i.test(path);
-}
-
-/**
  * Resolve a path relative to the given cwd.
  * Handles ~ expansion and absolute paths.
  *
@@ -757,6 +743,7 @@ export interface ParsedFindPattern {
 export interface ResolvedSearchTarget {
 	basePath: string;
 	glob?: string;
+	bareGlob?: boolean;
 }
 
 export interface ResolvedMultiSearchPath {
@@ -844,6 +831,10 @@ export function parseSearchPath(filePath: string): ParsedSearchPath {
 		basePath: segments.slice(0, firstGlobIndex).join("/"),
 		glob: segments.slice(firstGlobIndex).join("/"),
 	};
+}
+
+function isBareSearchGlob(raw: string, parsed: ParsedSearchPath): boolean {
+	return Boolean(parsed.glob) && ((!raw.includes("/") && !raw.includes("\\")) || parsed.basePath.endsWith("://"));
 }
 
 /**
@@ -1037,10 +1028,15 @@ async function resolveSearchPathItems(
 	const demotesFileItem =
 		fanOutFileItems && !allExactFiles && parsedItems.some(item => !item.parsedPath.glob && item.type === "file");
 	const targets =
-		hostItems.length < parsedItems.length || (parsedItems.length > 1 && (!commonIsRequestedScope || demotesFileItem))
+		hostItems.length < parsedItems.length ||
+		(parsedItems.length > 1 &&
+			(!commonIsRequestedScope ||
+				demotesFileItem ||
+				(fanOutFileItems && parsedItems.some(item => item.parsedPath.glob))))
 			? parsedItems.map(item => ({
 					basePath: item.absoluteBasePath,
 					glob: item.parsedPath.glob ? combineSearchGlobs(item.parsedPath.glob, suffixGlob) : suffixGlob,
+					bareGlob: isBareSearchGlob(item.raw, item.parsedPath),
 				}))
 			: undefined;
 
@@ -1346,6 +1342,7 @@ export interface ToolScopeResolution {
 	searchPath: string;
 	scopePath: string;
 	globFilter: string | undefined;
+	bareGlob: boolean;
 	isDirectory: boolean;
 	multiTargets?: ResolvedSearchTarget[];
 	exactFilePaths?: string[];
@@ -1436,12 +1433,14 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	let searchPath: string;
 	let scopePath: string;
 	let globFilter: string | undefined;
+	let bareGlob = false;
 	let multiTargets: ResolvedSearchTarget[] | undefined;
 	let exactFilePaths: string[] | undefined;
 	if (effectivePaths.length === 1) {
 		const parsedPath = await parseSearchPathPreferringLiteral(effectivePaths[0] ?? ".", cwd);
 		searchPath = resolveSearchBase(parsedPath.basePath, cwd);
 		globFilter = parsedPath.glob;
+		bareGlob = isBareSearchGlob(effectivePaths[0]!, parsedPath);
 		scopePath = formatPathRelativeToCwd(searchPath, cwd);
 	} else {
 		const multiSearchPath = await resolveExplicitSearchPaths(
@@ -1483,6 +1482,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		searchPath,
 		scopePath,
 		globFilter,
+		bareGlob,
 		isDirectory,
 		multiTargets,
 		exactFilePaths,

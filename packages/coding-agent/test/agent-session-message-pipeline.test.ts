@@ -2103,10 +2103,6 @@ describe("AgentSession message pipeline", () => {
 				"compaction.enabled": false,
 				"bash.autoBackground.enabled": false,
 				"bashInterceptor.enabled": false,
-				// Pre-permission-engine semantics: unconfigured approval was
-				// yolo-allow, so a headless grant-asserting test opts back into
-				// that posture explicitly instead of hitting the prompt gate.
-				"tools.approvalMode": "yolo",
 			}),
 			model,
 			disableExtensionDiscovery: true,
@@ -2320,10 +2316,6 @@ describe("AgentSession message pipeline", () => {
 				"bash.autoBackground.enabled": false,
 				"bashInterceptor.enabled": false,
 				"tools.xdev": false,
-				// Pre-permission-engine semantics: unconfigured approval was
-				// yolo-allow, so a headless grant-asserting test opts back into
-				// that posture explicitly instead of hitting the prompt gate.
-				"tools.approvalMode": "yolo",
 			}),
 			model,
 			disableExtensionDiscovery: true,

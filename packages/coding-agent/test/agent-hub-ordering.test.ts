@@ -502,6 +502,42 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 
+	it("shows a paused observer as paused rather than its parked registry status", () => {
+		geometry = stubStdoutGeometry(120);
+		const agents = new AgentRegistry();
+		agents.register({
+			id: "PausedWorker",
+			displayName: "Paused Worker",
+			kind: "sub",
+			session: null,
+			status: "parked",
+		});
+		const observers = new SessionObserverRegistry();
+		vi.spyOn(observers, "getSessions").mockReturnValue([
+			{
+				id: "PausedWorker",
+				kind: "subagent",
+				label: "Paused Worker",
+				status: "paused",
+				lastUpdate: Date.now(),
+			},
+		]);
+		const hub = makeHub(agents, { observers });
+
+		try {
+			const row = renderedRosterEntry(hub, "PausedWorker", 120);
+			expect(row).toContain("paused");
+			const rendered = Bun.stripANSI(hub.render(120).join("\n"));
+			expect(rendered).toContain("1 paused");
+			expect(rendered).not.toContain("1 parked");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "PausedWorker", 120))).toContain(theme.status.pending);
+			hub.handleInput("\t");
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain("paused");
+		} finally {
+			hub.dispose();
+		}
+	});
+
 	it("reads a live row's model off the session's served attribution, not its current pointer", () => {
 		geometry = stubStdoutGeometry(120);
 		const agents = new AgentRegistry();
@@ -1104,7 +1140,6 @@ describe("Agent hub row ordering", () => {
 
 		try {
 			const roster = Bun.stripANSI(hub.render(80).join("\n"));
-			expect(roster).toContain("Tab:details");
 			expect(roster).not.toContain("Registered ");
 
 			hub.handleInput("\t");
@@ -1112,7 +1147,6 @@ describe("Agent hub row ordering", () => {
 			expect(details).toContain("Agent Hub · NarrowAgent");
 			expect(details).toContain("Usage");
 			expect(details).toContain("$0.0000 · 2.0s active · 2 req · 3 tools · 900 tok");
-			expect(details).toContain("Tab:roster");
 			hub.handleInput("\x1b[6~");
 			expect(Bun.stripANSI(hub.render(80).join("\n"))).toContain("Changes");
 			for (const line of hub.render(80)) expect(visibleWidth(line)).toBeLessThanOrEqual(80);

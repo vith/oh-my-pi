@@ -101,6 +101,8 @@ import type {
 	AutoCompactionStartEvent,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	CacheWarmingDecisionEvent,
+	CacheWarmingDecisionEventResult,
 	ContextEvent,
 	GoalUpdatedEvent,
 	RetryFallbackAppliedEvent,
@@ -149,60 +151,6 @@ export interface ExtensionUISelectOption {
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
 
-/** One rendered line of the permission dialog: text segments (safe tails dimmable) plus an optional right-aligned status. */
-export interface PermissionDialogLine {
-	segments: Array<{ text: string; dim?: boolean }>;
-	style?: "muted" | "text" | "accent" | "allowed" | "denied";
-	status?: { text: string; style?: "muted" | "text" | "accent" };
-}
-
-/** One numbered option in the permission approval dialog. */
-export interface PermissionDialogOption {
-	label: string;
-	/** Secondary lines shown under the label (e.g. the YAML preview the option writes). */
-	description?: string;
-	/** Checklist mode: starts checked. */
-	checked?: boolean;
-	/** Checklist mode: space toggles this option. */
-	toggleable?: boolean;
-	/** Checklist mode: recompute the label from the current checked array (write button count). */
-	labelFor?: (checked: boolean[]) => string;
-}
-
-/** Content of the permission approval dialog. */
-export interface PermissionDialogRequest {
-	title: string;
-	/** Context lines shown under the title (decision context, per-piece status list). */
-	lines?: readonly (string | PermissionDialogLine)[];
-	options: PermissionDialogOption[];
-	/** Row to preselect; -1/omitted = no selection (Task 6's Pattern preselect). */
-	initialIndex?: number;
-	/**
-	 * Resolves to the row to preselect once the model's recommendation lands.
-	 * Applied only while the dialog is untouched (no key pressed, not settled);
-	 * resolving `undefined` keeps the current selection. May be a starter
-	 * function the dialog invokes on mount: queued dialogs then begin their
-	 * recommendation when presented instead of at gate time, keeping the full
-	 * timeout budget and never overlapping a sibling dialog's request.
-	 */
-	preselect?: Promise<number | undefined> | (() => Promise<number | undefined>);
-	/** Help line shown at the bottom; defaults to the standard navigate/select/cancel text. */
-	helpText?: string;
-	/** Checklist mode: space toggles toggleable options. */
-	checklist?: boolean;
-	/** Edit mode: a key opens a text editor for the picked option. */
-	allowEdit?: boolean;
-	/** Checklist mode: summary line computed from the current checked array; empty string hides it. */
-	previewFor?: (checked: boolean[]) => string;
-	/**
-	 * Task 11 (§5.3): asynchronously appended LLM-suggested rules. The dialog
-	 * shows a spinner while the promise is pending and appends the options when
-	 * it settles; suggestions that resolve after the user chose are dropped.
-	 * May be a starter function the dialog invokes on mount (see `preselect`).
-	 */
-	suggestions?: Promise<PermissionDialogOption[]> | (() => Promise<PermissionDialogOption[]>);
-}
-
 import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 export type {
 	ExtensionAskDialogOption,
@@ -223,14 +171,6 @@ export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): 
 export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
 	timeout?: number;
-	/**
-	 * Dialog-flow identity: dialog calls carrying the same id belong to one
-	 * multi-page flow (a permission decision). While a flow's dialog is
-	 * presented, a follow-up page with the same id replaces it in place —
-	 * it never queues behind unrelated dialogs; the flow releases its slot
-	 * via `endPermissionFlow`.
-	 */
-	flowId?: string;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;
 	/** Invoked when the UI-managed timeout countdown starts */
@@ -311,30 +251,11 @@ export interface ExtensionUIContext {
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, dialogOptions?: ExtensionUIDialogOptions): Promise<string | undefined>;
 
-	/**
-	 * Show the permission approval dialog (rule candidates, YAML previews, piece
-	 * status) and return the chosen option index, or `undefined` on cancel.
-	 * Optional: callers without the dialog fall back to `select` with the option
-	 * labels.
-	 */
-	showPermissionDialog?(
-		request: PermissionDialogRequest,
-		dialogOptions?: ExtensionUIDialogOptions,
-	): Promise<number | undefined>;
-
 	/** Show the rich ask dialog when the interactive TUI surface is available. */
 	askDialog?(
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;
-
-	/**
-	 * Release the dialog slot held by a permission dialog flow: called when a
-	 * multi-page flow (all its `showPermissionDialog` pages sharing a
-	 * `flowId`) completes, letting the next queued dialog present. Optional —
-	 * callers without a flow-aware UI rely on the single-page settle advance.
-	 */
-	endPermissionFlow?(flowId: string): void;
 
 	/** Show a notification to the user. */
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -550,14 +471,7 @@ export interface ExtensionContext {
 	sessionManager: ReadonlySessionManager;
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;
-	/**
-	 * Settings instance for the current session. Prefer over the global
-	 * singleton: `Settings.instance` is process-global and is the *root*
-	 * session's, while every session built by `createAgentSession` carries its
-	 * own — a subagent's is the derived instance from `createSubagentSettings`,
-	 * not its parent's. Optional because contexts synthesised outside a live
-	 * session (legacy shims, tests) have none.
-	 */
+	/** Session-scoped settings; absent in contexts created without a live session. */
 	settings?: Settings;
 	/** Calling session's `local://` root mapping for external tool bridges. */
 	localProtocolOptions?: LocalProtocolOptions;
@@ -773,7 +687,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
 	onSession?: (event: ToolSessionEvent, ctx: ExtensionContext) => void | Promise<void>;
 
-	/** Custom rendering for tool call display */
+	/**
+	 * Custom rendering for tool call display.
+	 *
+	 * At runtime `options` also answers the {@link Theme} API, so renderers
+	 * ported from upstream pi — declared `renderCall(args, theme, context)` —
+	 * keep styling correctly.
+	 */
 	renderCall?: (args: Static<TParams>, options: ToolRenderResultOptions, theme: Theme) => Component;
 
 	/** Custom rendering for tool result display */
@@ -858,6 +778,18 @@ export type {
 // ============================================================================
 
 export type { ContextEvent } from "../shared-events";
+
+// ============================================================================
+// Cache Warming Events
+// ============================================================================
+
+export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../shared-events";
+export type {
+	CacheWarmingAction,
+	CacheWarmingDecision,
+	CacheWarmingMode,
+	CacheWarmingStatus,
+} from "../../session/cache-warmer";
 
 /** Fired before a provider request is sent. Can replace the payload. */
 export interface BeforeProviderRequestEvent {
@@ -1212,6 +1144,7 @@ export type ExtensionEvent =
 	| ResourcesDiscoverEvent
 	| SessionEvent
 	| ContextEvent
+	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
@@ -1385,6 +1318,10 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): void;
 	on(event: "session.compacting", handler: ExtensionHandler<SessionCompactingEvent, SessionCompactingResult>): void;
+	on(
+		event: "cache_warming_decision",
+		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
+	): void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
@@ -1558,13 +1495,17 @@ export interface ExtensionAPI {
 	/**
 	 * Send a custom message to the session.
 	 *
+	 * `evaluateToolCalls: true` executes tool-call XML in the content and delivers the
+	 * resulting assistant/tool exchange using the selected delivery mode.
+	 *
+	 * With the default delivery (no `deliverAs`), an idle `display: true` message renders in the
+	 * transcript immediately, even with `triggerTurn: false`, without starting a turn. This does
+	 * not apply to `deliverAs: "nextTurn"` or `deliverAs: "aside"`, which keep the semantics
+	 * described below (`nextTurn` stays hidden until consumed; `aside` starts a turn when idle).
+	 *
 	 * `deliverAs: "nextTurn"` keeps the message hidden from the editable pending-message UI.
 	 * If `triggerTurn` is also true while the current turn is still unwinding, the session schedules
 	 * an internal continuation that consumes the message on the next turn.
-	 *
-	 * `evaluateToolCalls: true` parses tool-call XML (`<invoke name="..."><parameter …>`) from
-	 * the message content, executes each tool, and injects an assistant message + tool results.
-	 * Works alongside any `deliverAs` mode.
 	 *
 	 * `deliverAs: "aside"` injects the message at the next agent step boundary without interrupting
 	 * the in-flight tool batch; when the session is idle it starts a turn regardless of `triggerTurn`

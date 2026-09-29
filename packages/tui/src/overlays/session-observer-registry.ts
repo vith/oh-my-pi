@@ -26,7 +26,7 @@ export interface SubagentLifecyclePayload {
 	agent: string;
 	agentSource: AgentSource;
 	description?: string;
-	status: "started" | "completed" | "failed" | "aborted";
+	status: "started" | "paused" | "completed" | "failed" | "aborted";
 	sessionFile?: string;
 	parentToolCallId?: string;
 	index: number;

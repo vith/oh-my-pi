@@ -16,6 +16,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import type { Settings } from "../config/settings";
 import { applyDirenvPreflight, type BashResult, executeBash } from "../exec/bash-executor";
@@ -50,9 +51,7 @@ import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { resolveInlineByteCapBudget } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { evaluateBashCommand } from "./permissions/engine";
-import { engineSettingsFrom } from "./permissions/settings";
-import { extractLeadingCdTarget } from "./shell-tokenize";
+import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
@@ -68,15 +67,79 @@ import {
 	cfgToolsMaxTimeout,
 } from "./settings";
 import {
+	cfgBashAllowCompoundCommands,
 	cfgBashAutoBackgroundEnabled,
 	cfgBashAutoBackgroundThresholdMs,
 	cfgBashDirenv,
 	cfgBashDirenvLoadTimeoutMs,
 	cfgBashInterceptorEnabled,
 	cfgBashInterceptorPatterns,
+	cfgBashPatterns,
 } from "../exec/settings";
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone } from "../task/settings";
+
+const BASH_APPROVAL_SHELL_CONTROL_CHARS: Record<string, true> = {
+	"\n": true,
+	"\r": true,
+	";": true,
+	"&": true,
+	"|": true,
+	"<": true,
+	">": true,
+	"`": true,
+	$: true,
+	"(": true,
+	")": true,
+};
+const BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE = /(?:^|[ \t])(?:-[^-]*[ce]|--(?:command|eval))(?:[= \t]|$)/u;
+
+function hasBashApprovalShellControl(command: string): boolean {
+	let quote: "'" | '"' | undefined;
+	let hasReinterpretableShellControl = false;
+	for (let i = 0; i < command.length; i++) {
+		const ch = command[i];
+		if (quote === "'") {
+			if (ch === "'") {
+				quote = undefined;
+			} else if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, ch)) {
+				hasReinterpretableShellControl = true;
+			}
+			continue;
+		}
+		if (ch === "\\") {
+			const escaped = command[i + 1];
+			if (escaped && Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, escaped)) {
+				hasReinterpretableShellControl = true;
+			}
+			i++;
+			continue;
+		}
+		if (quote === '"') {
+			if (ch === '"') {
+				quote = undefined;
+				continue;
+			}
+			// Expansion is active inside double quotes even in the original line.
+			if (ch === "`" || ch === "$") return true;
+			// Other control characters are literal here but become executable if a
+			// `-c`/`-e` option reinterprets the argument through another shell.
+			if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, ch)) hasReinterpretableShellControl = true;
+			continue;
+		}
+		if (ch === "'" || ch === '"') {
+			quote = ch;
+			continue;
+		}
+		if (Object.hasOwn(BASH_APPROVAL_SHELL_CONTROL_CHARS, ch)) return true;
+	}
+	// Options such as `git -c alias.x='!...'` and `sh -c "..."` reinterpret
+	// otherwise literal quoted or escaped arguments as executable code.
+	return hasReinterpretableShellControl && BASH_APPROVAL_REINTERPRETED_ARGUMENT_RE.test(command);
+}
+
+const BASH_PATTERN_APPROVAL_VALUES = new Set(["allow", "deny", "prompt"]);
+
 /**
  * Shape a shell command line for an ACP-conformant `terminal/create` request.
  *
@@ -121,22 +184,136 @@ function shellBuiltinsDisabled(settings: Settings): boolean {
  * Kept intentionally tight — the cost of a false negative is data loss or a compromised host,
  * while false positives remain actionable through user policy control.
  * New patterns should target shapes that are virtually never legitimate in automation.
- *
- * Re-exported (defined in `./permissions/critical-patterns`) so the curated
- * layer can reference it without a module cycle (`BashTool` → engine → curated).
  */
-export { CRITICAL_BASH_PATTERNS } from "./permissions/critical-patterns";
+export const CRITICAL_BASH_PATTERNS = [
+	// Recursive destruction.
+	// Options may sit on either side of the recursive/force flag, so only that flag is pinned and
+	// any other options are skipped: `rm -rf /`, `rm -rf -- /`, `rm --recursive --force /`,
+	// `rm -rf -v /`, `rm -v -rf /`. An absolute target is still required.
+	/\brm\s+(?:-\S+\s+)*(?:-[a-z]*[rRfF][a-z]*|--recursive|--force)\s+(?:-\S+\s+)*\//i,
+	// `--no-preserve-root` defeats coreutils' own refusal to recurse on `/`, so it is critical
+	// wherever it appears — including forms this list would otherwise reach only via the target.
+	/\brm\s+(?:-\S+\s+)*--no-preserve-root\b/i,
+	/\bsudo\s+rm\b/i, // any `sudo rm`.
+	/\bchmod\s+-R\s+[0-7]+\s+\//i, // `chmod -R 777 /`.
+	/\bchmod\s+-R\s+[ugoa+\-=rwxXst,]+\s+\//, // `chmod -R u+x /`, `chmod -R u+rwx,o+w /etc` (symbolic mode, root target).
+	/\bchown\s+-R\s+\S+\s+\//i, // `chown -R user /`.
 
-export function normalizeBashApprovalPattern(value: string): string {
+	// Fork bomb (a few common spacings).
+	/:\(\)\s*\{\s*:\s*\|\s*:/i,
+
+	// Disk / filesystem destruction.
+	/>\s*\/dev\/sd[a-z]/i, // write to disk device.
+	/\bmkfs(\.|\b)/i, // format filesystem.
+	/\bdd\s+if=.+of=\/dev\//i, // dd to a device.
+	/\bshred\s+\/dev\//i,
+	/\bcryptsetup\b/i,
+
+	// System-config destruction.
+	/>\s*\/etc\/(?:passwd|shadow|sudoers)\b/i,
+	/\btee\s+(?:-a\s+)?\/etc\/(?:passwd|shadow|sudoers)\b/i, // `tee /etc/passwd`, `tee -a /etc/sudoers`.
+
+	// Remote-fetch-then-execute (curl/wget piped to a shell or process-subbed).
+	/\b(?:curl|wget|fetch)\b[^|]*\|\s*(?:bash|sh|zsh|fish)\b/i,
+	// Process-sub variants — `bash <(curl …)`, `source <(curl …)`, `. <(curl …)`. `.` and `source` are
+	// anchored to a command boundary so `find . -name` and similar don't false-positive.
+	/(?:^|[\s;&|(])(?:bash|sh|zsh|source|\.)\s+<\(\s*(?:curl|wget|fetch)\b/i,
+	// `eval "$(curl …)"` / `eval $(curl …)` / `eval \`curl …\``.
+	/\beval\s+["'`]?\$\(\s*(?:curl|wget|fetch)\b|\beval\s+`\s*(?:curl|wget|fetch)\b/i,
+
+	// Process/host control.
+	/\bkill\s+-9\s+1\b/, // kill PID 1.
+	// Process/host control — must sit at command position so `npm run reboot-tests`
+	// or `echo 'shutdown the queue'` don't false-positive.
+	/(?:^|[\s;&|(])(?:shutdown|poweroff|reboot|halt)(?:\s|$|[;|&])/i,
+	/(?:^|[\s;&|(])init\s+0\b/i,
+
+	// Network-shell exfil.
+	/\bnc\b[^|;]*\s-[a-zA-Z]*[ec][a-zA-Z]*\s/i, // `nc -e` / `nc -c`.
+] as const;
+
+type BashPatternApproval = "allow" | "deny" | "prompt";
+
+interface BashApprovalPatternRule {
+	match: string;
+	approval: BashPatternApproval;
+}
+
+function normalizeBashApprovalPattern(value: string): string {
 	return value.trim().replace(/\s+/gu, " ");
 }
 
-export function bashApprovalPatternToRegExp(pattern: string): RegExp {
+function bashApprovalPatternToRegExp(pattern: string): RegExp {
 	const escaped = normalizeBashApprovalPattern(pattern)
 		.split("*")
 		.map(part => part.replace(/[\\^$+?.()|[\]{}]/gu, "\\$&"))
 		.join(".*");
 	return new RegExp(`^${escaped}$`, "u");
+}
+
+function normalizeBashPatternApproval(value: unknown): BashPatternApproval | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = value.trim().toLowerCase();
+	return BASH_PATTERN_APPROVAL_VALUES.has(normalized) ? (normalized as BashPatternApproval) : undefined;
+}
+
+function getBashApprovalPatternRules(value: unknown): BashApprovalPatternRule[] {
+	if (!Array.isArray(value)) return [];
+	return value
+		.map(item => {
+			if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
+			const record = item as Record<string, unknown>;
+			if (typeof record.match !== "string") return undefined;
+			const match = normalizeBashApprovalPattern(record.match);
+			const approval = normalizeBashPatternApproval(record.approval);
+			return match.length > 0 && approval ? { match, approval } : undefined;
+		})
+		.filter((rule): rule is BashApprovalPatternRule => !!rule);
+}
+
+function commandMatchesBashApprovalPattern(command: string, pattern: string): boolean {
+	const normalizedCommand = normalizeBashApprovalPattern(command);
+	if (normalizedCommand.length === 0) return false;
+	return bashApprovalPatternToRegExp(pattern).test(normalizedCommand);
+}
+
+// `deny`/`prompt` rules are matched per segment so a dangerous command buried in
+// a compound line (`cd x && rm -rf /`, `sleep 1 & rm -rf /`) is still caught.
+// Reuse the shared shell tokenizer so segmentation stays in one place and honors
+// every command boundary (`;`, `&&`, `||`, `|`, `&`, subshells, newlines).
+function bashCommandSegments(command: string): string[] {
+	return tokenizeShellSegments(command)
+		.map(segment => segment.join(" "))
+		.filter(segment => segment.length > 0);
+}
+
+// `deny`/`prompt` matching: the rule fires when its glob matches the whole
+// command or any single segment of a compound command.
+function commandSegmentMatchesBashApprovalPattern(command: string, pattern: string): boolean {
+	const regex = bashApprovalPatternToRegExp(pattern);
+	const normalizedCommand = normalizeBashApprovalPattern(command);
+	if (normalizedCommand.length === 0) return false;
+	if (regex.test(normalizedCommand)) return true;
+	return bashCommandSegments(command).some(segment => regex.test(segment));
+}
+
+// A rule "applies" to a command under approval-specific semantics: `allow` must
+// vouch for the ENTIRE command and never rides a compound line (shell control
+// syntax could smuggle an unsafe segment past a narrow allow), while `deny` and
+// `prompt` fire on any matching segment so they mean what they appear to.
+function bashApprovalRuleMatches(command: string, rule: BashApprovalPatternRule): boolean {
+	if (rule.approval === "allow") {
+		if (hasBashApprovalShellControl(command)) return false;
+		return commandMatchesBashApprovalPattern(command, rule.match);
+	}
+	return commandSegmentMatchesBashApprovalPattern(command, rule.match);
+}
+
+function findBashApprovalPatternRule(
+	command: string,
+	rules: readonly BashApprovalPatternRule[],
+): BashApprovalPatternRule | undefined {
+	return rules.find(rule => bashApprovalRuleMatches(command, rule));
 }
 
 async function saveBashOriginalArtifact(session: ToolSession, originalText: string): Promise<string | undefined> {
@@ -213,6 +390,40 @@ export interface BashToolInput {
 	env?: Record<string, string>;
 	async?: boolean;
 	pty?: boolean;
+}
+
+/**
+ * Treats a blank string as an unset field.
+ *
+ * Some tool-call layers materialize every optional argument, spelling "not set"
+ * as `""`; a whitespace-only service name is no more a name than a missing one.
+ */
+function blankToUndefined(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Drops readiness fields that carry no condition, and the whole spec when none
+ * survive. An empty `log` pattern would otherwise match the first byte of
+ * output and an empty `host` would break the TCP probe, so placeholder values
+ * must not reach {@link startService}.
+ */
+function normalizeReady(ready: ServiceReady | undefined): ServiceReady | undefined {
+	if (!ready) return undefined;
+	const log = blankToUndefined(ready.log);
+	const host = blankToUndefined(ready.host);
+	const port = Number.isFinite(ready.port) ? ready.port : undefined;
+	const timeout = Number.isFinite(ready.timeout) ? ready.timeout : undefined;
+	if (log === undefined && host === undefined && port === undefined && timeout === undefined) return undefined;
+	return { log, host, port, timeout };
+}
+
+/** Drops a record with no keys: `env: {}` sets nothing, so it requests nothing. */
+function nonEmptyRecord(record: Record<string, string> | undefined): Record<string, string> | undefined {
+	if (!record) return undefined;
+	for (const _key in record) return record;
+	return undefined;
 }
 
 export interface BashToolOptions {}
@@ -300,62 +511,87 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawCommand = (args as Partial<BashToolInput>).command;
 		const command = typeof rawCommand === "string" ? rawCommand : "";
-		if (command === "") return "exec";
-		const decision = evaluateBashCommand(command, {
-			settings: engineSettingsFrom(this.session.settings),
-			cwd: this.session.cwd ?? process.cwd(),
-			home: this.session.home,
-			// Absent in headless/mock sessions — the engine keeps the legacy
-			// per-piece evaluation without a resolved shell.
-			shell: this.session.settings.getShellConfig?.().shell,
-		});
-		let result: ToolApprovalDecision;
-		switch (decision.policy) {
-			case "deny":
-				result = { tier: "exec", policy: "deny", reason: decision.reason ?? "Blocked by permission policy" };
-				break;
-			case "prompt":
-				// Critical prompts carry override without a policy so the gate
-				// resolves them as tool prompts with override (upstream
-				// `bash.allowCompoundCommands` parity).
-				if (decision.override) {
-					result = {
+		const patternRules = getBashApprovalPatternRules(cfgBashPatterns.get(this.session.settings));
+		const shell = cfgBashAllowCompoundCommands.get(this.session.settings)
+			? this.session.settings.getShellConfig().shell
+			: undefined;
+		const compoundSegments = shell && isPosixShell(shell) ? extractLiteralAndChainSegments(command) : null;
+		// Segment rules keep their ordered first-match semantics. Restrictions
+		// matching only the complete chain are aggregated separately: retain the
+		// first prompt, but keep scanning because any later deny takes precedence.
+		let patternRule: BashApprovalPatternRule | undefined;
+		if (compoundSegments) {
+			for (const rule of patternRules) {
+				if (
+					rule.approval !== "allow" &&
+					commandMatchesBashApprovalPattern(command, rule.match) &&
+					!compoundSegments.some(segment => commandSegmentMatchesBashApprovalPattern(segment.text, rule.match))
+				) {
+					if (rule.approval === "deny") {
+						patternRule = rule;
+						break;
+					}
+					patternRule ??= rule;
+				}
+			}
+		} else {
+			patternRule = findBashApprovalPatternRule(command, patternRules);
+		}
+		if (patternRule?.approval === "deny") {
+			return {
+				tier: "exec",
+				override: true,
+				policy: "deny",
+				reason: `Blocked by bash pattern: ${patternRule.match}`,
+			};
+		}
+		const criticalCommand = command !== "" && CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(command));
+		if (!compoundSegments && criticalCommand) {
+			return { tier: "exec", override: true, reason: "Critical pattern detected" };
+		}
+		if (compoundSegments) {
+			let promptRule: BashApprovalPatternRule | undefined = patternRule;
+			let hasUnmatchedSegment = false;
+			for (const segment of compoundSegments) {
+				const segmentRule = findBashApprovalPatternRule(segment.text, patternRules);
+				if (segmentRule?.approval === "deny") {
+					return {
 						tier: "exec",
 						override: true,
-						...(decision.reason ? { reason: decision.reason } : {}),
+						policy: "deny",
+						reason: `Blocked by bash pattern: ${segmentRule.match}`,
 					};
-					break;
 				}
-				// Rule-driven prompts on multi-piece commands surface the
-				// policy explicitly (whole-chain vetoes, segment prompts).
-				// Bare tier otherwise (plan ruling R4): singles and posture
-				// prompts stay policy-less so the gate applies the mode and
-				// user policy — prompting is the gate's job.
-				if (decision.source !== "posture" && (decision.pieces?.length ?? 0) > 1) {
-					result = {
-						tier: "exec",
-						policy: "prompt",
-						...(decision.reason ? { reason: decision.reason } : {}),
-					};
-					break;
+				if (segmentRule?.approval === "prompt") promptRule ??= segmentRule;
+				if (!segmentRule) hasUnmatchedSegment = true;
+			}
+			if (promptRule) {
+				return {
+					tier: "exec",
+					override: true,
+					policy: "prompt",
+					reason: `Prompt required by bash pattern: ${promptRule.match}`,
+				};
+			}
+			for (const segment of compoundSegments) {
+				const literalCommand = segment.argv.join(" ");
+				if (criticalCommand || CRITICAL_BASH_PATTERNS.some(pattern => pattern.test(literalCommand))) {
+					return { tier: "exec", override: true, reason: "Critical pattern detected" };
 				}
-				return "exec";
-			default:
-				result = { tier: "write", policy: "allow" };
+			}
+			// Unmatched segments retain the standalone tool-policy and mode fallback.
+			return hasUnmatchedSegment ? "exec" : { tier: "write", policy: "allow" };
 		}
-		// The gate wrapper records the engine's per-piece analysis in the audit
-		// log (spec §7); this approval function is the only place
-		// evaluateBashCommand runs for the gate, so attach the full engine
-		// decision non-enumerably — it must never leak into prompt rendering
-		// or JSON serialization of the approval decision.
-		if (typeof result !== "string") {
-			Object.defineProperty(result, "engineDecision", {
-				value: decision,
-				enumerable: false,
-				configurable: true,
-			});
+		if (patternRule?.approval === "allow") return { tier: "write", policy: "allow" };
+		if (patternRule?.approval === "prompt") {
+			return {
+				tier: "exec",
+				override: true,
+				policy: "prompt",
+				reason: `Prompt required by bash pattern: ${patternRule.match}`,
+			};
 		}
-		return result;
+		return "exec";
 	};
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const rawCommand = (args as Partial<BashToolInput>).command;
@@ -701,7 +937,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 	async execute(
 		_toolCallId: string,
-		{ command: rawCommand, timeout: rawTimeout, cwd, name, ready, env, async: asyncRequested, pty }: BashToolInput,
+		{
+			command: rawCommand,
+			timeout: rawTimeout,
+			cwd,
+			name: rawName,
+			ready: rawReady,
+			env: rawEnv,
+			async: rawAsync,
+			pty,
+		}: BashToolInput,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
@@ -720,12 +965,25 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				command = cd.rest;
 			}
 		}
+		// Mode selection runs on normalized fields: a caller that materializes
+		// every optional argument with empty or placeholder values still asked
+		// for a plain command. Only `async: true` is an async request, a blank
+		// `name` is no service name, and service-only fields with nothing in
+		// them are not a service request.
+		const name = blankToUndefined(rawName);
+		const ready = normalizeReady(rawReady);
+		const env = nonEmptyRecord(rawEnv);
+		const asyncRequested = rawAsync === true;
+		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
-			if (asyncRequested !== undefined || rawTimeout !== undefined)
+			if (asyncRequested || rawTimeout !== undefined)
 				throw new ToolError("Service mode does not accept async or timeout; use ready.timeout for readiness.");
 		} else if (ready !== undefined || env !== undefined) {
-			throw new ToolError("ready and env require a service name.");
+			// Nothing can honour ready/env without a service to attach them to;
+			// running the command the caller did ask for beats failing the call.
+			const ignored = [ready && "ready", env && "env"].filter(Boolean).join(" and ");
+			pendingNotices.push(`Ignored ${ignored}: service-only, and no service name was given.`);
 		}
 		if (asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
@@ -844,7 +1102,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const maxTimeout = cfgToolsMaxTimeout.get(this.session.settings);
 		const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec, maxTimeout);
 		const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
-		const pendingNotices: string[] = [];
 		if (timeoutSec !== undefined) {
 			const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec, maxTimeout);
 			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);

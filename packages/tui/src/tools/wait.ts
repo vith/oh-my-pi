@@ -69,7 +69,7 @@ export interface JobSnapshot {
 	agentUrlId?: string;
 }
 
-/** Outcome of cancelling one background job. `"failed"` is a real kill attempt that threw (fork: kept apart from benign `already_completed`). */
+/** Outcome of cancelling one background job; failed means a kill attempt threw. */
 export type CancelStatus = "cancelled" | "not_found" | "already_completed" | "failed";
 
 /** Cancellation outcome and its model-facing explanation. */

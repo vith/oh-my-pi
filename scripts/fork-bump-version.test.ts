@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { addonFilenames, deriveForkVersion, expectedSentinel, nativesCacheDir } from "./fork-bump-version";
+import { deriveForkVersion, nativesCacheDir } from "./fork-bump-version";
 
 const tempDirs: string[] = [];
 
@@ -39,12 +39,6 @@ describe("deriveForkVersion", () => {
 		).toBe("17.2.13+vith-fork.3.abc1234");
 	});
 
-	it("derives from a plain current version when no tag is reachable", () => {
-		expect(
-			deriveForkVersion({ tagVersion: undefined, commitsSince: 3, shortHash: "abc1234" }, "17.2.13", "vith-fork"),
-		).toBe("17.2.13+vith-fork.3.abc1234");
-	});
-
 	it("keeps a custom fork identifier in the first metadata segment", () => {
 		expect(
 			deriveForkVersion(
@@ -53,16 +47,6 @@ describe("deriveForkVersion", () => {
 				"stable",
 			),
 		).toBe("17.2.12+stable.14.0af9474");
-	});
-});
-
-describe("expectedSentinel", () => {
-	it("derives the sentinel export name from a fork version with build metadata", () => {
-		expect(expectedSentinel("17.2.13+vith-fork.55.ea3ca9cd6")).toBe("__piNativesV17_2_13_vith_fork_55_ea3ca9cd6");
-	});
-
-	it("derives the sentinel export name from a plain release version", () => {
-		expect(expectedSentinel("17.2.12")).toBe("__piNativesV17_2_12");
 	});
 });
 
@@ -83,15 +67,5 @@ describe("nativesCacheDir", () => {
 		expect(nativesCacheDir("17.2.13+vith-fork.55.ea3ca9cd6", {})).toBe(
 			path.join(os.homedir(), ".omp", "natives", "17.2.13+vith-fork.55.ea3ca9cd6"),
 		);
-	});
-});
-
-describe("addonFilenames", () => {
-	it("lists the default, modern, and baseline addon filenames for an x64 tag", () => {
-		expect(addonFilenames("linux-x64")).toEqual([
-			"pi_natives.linux-x64.node",
-			"pi_natives.linux-x64-modern.node",
-			"pi_natives.linux-x64-baseline.node",
-		]);
 	});
 });

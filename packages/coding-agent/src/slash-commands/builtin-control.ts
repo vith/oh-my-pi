@@ -1,5 +1,4 @@
 import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
-import { runModeCommand, runPermissionCommand } from "../tools/permissions/manage";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
@@ -80,58 +79,6 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runPauseScreen(runtime.ctx);
-		},
-	},
-	{
-		name: "mode",
-		description: "Show or switch the overall permission mode (allow, prompt, deny)",
-		acpDescription: "Show or switch the permission mode",
-		acpInputHint: "[allow|prompt|deny]",
-		subcommands: [
-			{ name: "allow", description: "Allow commands not covered by rules without prompting" },
-			{ name: "prompt", description: "Prompt for commands not covered by rules" },
-			{ name: "deny", description: "Deny commands not covered by rules" },
-		],
-		allowArgs: true,
-		handle: async (command, runtime) => {
-			await runtime.output(
-				await runModeCommand(command.args, {
-					cwd: runtime.cwd,
-					settings: runtime.settings,
-					sessionId: runtime.sessionManager.getSessionId(),
-				}),
-			);
-			return commandConsumed();
-		},
-	},
-	{
-		name: "permissions",
-		description:
-			"Inspect and manage permission rules (list, show, add, remove, edit, clear, test, log, status, migrate)",
-		acpDescription: "Manage permission rules",
-		acpInputHint: "<list|show|add|remove|edit|clear|test|log|status|migrate>",
-		subcommands: [
-			{ name: "list", description: "List merged permission rules by layer with audit match counts" },
-			{ name: "show", description: "Show a rule's details and last audit hits", usage: "<id>" },
-			{ name: "add", description: "Add a rule to the user layer", usage: "<yaml>" },
-			{ name: "remove", description: "Remove rule(s) from file-backed layers", usage: "[--project] <id> [<id>...]" },
-			{ name: "clear", description: "Clear file-backed permission rules", usage: "[--project]" },
-			{ name: "edit", description: "Replace a user-layer rule by id", usage: "<id> <yaml>" },
-			{ name: "test", description: "Dry-run a bash command against the permission engine", usage: '"<command>"' },
-			{ name: "log", description: "Show recent permission audit entries" },
-			{ name: "status", description: "Show posture, rule counts, and rule file paths" },
-			{ name: "migrate", description: "Plan the legacy settings migration", usage: "[--apply]" },
-		],
-		allowArgs: true,
-		handle: async (command, runtime) => {
-			await runtime.output(
-				await runPermissionCommand(command.args, {
-					cwd: runtime.cwd,
-					settings: runtime.settings,
-					sessionId: runtime.sessionManager.getSessionId(),
-				}),
-			);
-			return commandConsumed();
 		},
 	},
 	{

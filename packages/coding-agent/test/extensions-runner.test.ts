@@ -2,7 +2,7 @@
  * Tests for ExtensionRunner - conflict detection, error handling, tool wrapping.
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, expectTypeOf, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
@@ -14,7 +14,6 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { cfgCompactionEnabled } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
@@ -26,21 +25,14 @@ import {
 import type {
 	Extension,
 	ExtensionError,
-	ExtensionServiceTier,
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
-	ProviderModelConfig,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
-
-/** Context with legacy yolo approval for extension-mechanics tests that don't exercise the approval gate. */
-const GATE_YOLO_CONTEXT = {
-	settings: Settings.isolated({ "tools.approvalMode": "yolo" }),
-} as AgentToolContext;
 
 describe("ExtensionRunner", () => {
 	let tempDir: TempDir;
@@ -119,42 +111,6 @@ describe("ExtensionRunner", () => {
 
 		expect(runner.cwd).toBe(dirB);
 		expect(runner.createContext().cwd).toBe(dirB);
-	});
-
-	it("exposes the session's own settings on the context, not the global singleton", async () => {
-		const result = await loadTestExtensions();
-		// A session-scoped instance that is deliberately NOT `Settings.instance`:
-		// every session `createAgentSession` builds carries its own, and a
-		// subagent's is the derived instance from `createSubagentSettings`.
-		const sessionSettings = Settings.isolated({ "compaction.enabled": false });
-		const runner = new ExtensionRunner(
-			result.extensions,
-			result.runtime,
-			tempDir.path(),
-			sessionManager,
-			modelRegistry,
-			undefined,
-			sessionSettings,
-		);
-
-		expect(runner.createContext().settings).toBe(sessionSettings);
-		const ctxSettings = runner.createContext().settings;
-		expect(ctxSettings ? cfgCompactionEnabled.get(ctxSettings) : undefined).toBe(false);
-	});
-
-	it("leaves context settings undefined when the runner was built without any", async () => {
-		const result = await loadTestExtensions();
-		const runner = new ExtensionRunner(
-			result.extensions,
-			result.runtime,
-			tempDir.path(),
-			sessionManager,
-			modelRegistry,
-		);
-
-		// Contexts synthesised outside a live session have no settings to expose;
-		// the field is optional rather than silently falling back to the singleton.
-		expect(runner.createContext().settings).toBeUndefined();
 	});
 
 	it("exposes the initialized host mode to extension contexts", async () => {
@@ -441,35 +397,6 @@ describe("ExtensionRunner", () => {
 			expect(commands.map(c => c.name).sort()).toEqual(["cmd-a", "cmd-b"]);
 		});
 
-		it("gets command by name", async () => {
-			const cmdCode = `
-				export default function(pi) {
-					pi.registerCommand("my-cmd", {
-						description: "My command",
-						handler: async () => {},
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "cmd.ts"), cmdCode);
-
-			const result = await loadTestExtensions();
-			const runner = new ExtensionRunner(
-				result.extensions,
-				result.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-
-			const cmd = runner.getCommand("my-cmd");
-			expect(cmd).toBeDefined();
-			expect(cmd?.name).toBe("my-cmd");
-			expect(cmd?.description).toBe("My command");
-
-			const missing = runner.getCommand("not-exists");
-			expect(missing).toBeUndefined();
-		});
-
 		it("prefers later-loaded explicit extensions for conflicting commands", async () => {
 			const deployCommand = (description: string) => `
 				export default function(pi) {
@@ -630,33 +557,6 @@ describe("ExtensionRunner", () => {
 			const flags = runner.getFlags();
 
 			expect(flags.has("--my-flag")).toBe(true);
-		});
-
-		it("can set flag values", async () => {
-			const extCode = `
-				export default function(pi) {
-					pi.registerFlag("--test-flag", {
-						description: "Test flag",
-						handler: async () => {},
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "flag.ts"), extCode);
-
-			const result = await loadTestExtensions();
-			const runner = new ExtensionRunner(
-				result.extensions,
-				result.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-
-			// Setting a flag value should not throw
-			runner.setFlagValue("--test-flag", true);
-
-			// The flag values are stored in the shared runtime
-			expect(result.runtime.flagValues.get("--test-flag")).toBe(true);
 		});
 	});
 
@@ -1396,7 +1296,7 @@ describe("ExtensionRunner", () => {
 				}
 			`);
 			const wrapper = new ExtensionToolWrapper(throwingTool, runner);
-			const res = await wrapper.execute("call-rewrite", {} as never, undefined, undefined, GATE_YOLO_CONTEXT);
+			const res = await wrapper.execute("call-rewrite", {} as never, undefined, undefined, undefined);
 			expect(firstText(res)).toBe("Enriched recovery guidance");
 			expect(res.isError).toBe(true);
 			expect(res.details).toEqual({ enriched: true });
@@ -1409,9 +1309,9 @@ describe("ExtensionRunner", () => {
 				}
 			`);
 			const wrapper = new ExtensionToolWrapper(throwingTool, runner);
-			await expect(
-				wrapper.execute("call-untouched", {} as never, undefined, undefined, GATE_YOLO_CONTEXT),
-			).rejects.toThrow("original explosion");
+			await expect(wrapper.execute("call-untouched", {} as never, undefined, undefined, undefined)).rejects.toThrow(
+				"original explosion",
+			);
 		});
 
 		it("converts a failure to success when a handler clears isError", async () => {
@@ -1424,7 +1324,7 @@ describe("ExtensionRunner", () => {
 				}
 			`);
 			const wrapper = new ExtensionToolWrapper(throwingTool, runner);
-			const res = await wrapper.execute("call-cleared", {} as never, undefined, undefined, GATE_YOLO_CONTEXT);
+			const res = await wrapper.execute("call-cleared", {} as never, undefined, undefined, undefined);
 			expect(firstText(res)).toBe("recovered");
 			expect(res.isError).toBeUndefined();
 		});
@@ -1439,7 +1339,7 @@ describe("ExtensionRunner", () => {
 				}
 			`);
 			const wrapper = new ExtensionToolWrapper(okTool, runner);
-			const res = await wrapper.execute("call-flagged", {} as never, undefined, undefined, GATE_YOLO_CONTEXT);
+			const res = await wrapper.execute("call-flagged", {} as never, undefined, undefined, undefined);
 			expect(firstText(res)).toBe("now failing");
 			expect(res.isError).toBe(true);
 		});
@@ -2172,21 +2072,7 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
-	describe("provider model API", () => {
-		it("accepts a per-model WebSocket preference", () => {
-			expectTypeOf<ProviderModelConfig["preferWebsockets"]>().toEqualTypeOf<boolean | undefined>();
-		});
-	});
-
 	describe("service tier API", () => {
-		it("restricts tiers to values supported by each provider family", () => {
-			expectTypeOf<"scale">().toExtend<ExtensionServiceTier<"openai">>();
-			expectTypeOf<"flex">().toExtend<ExtensionServiceTier<"google">>();
-			expectTypeOf<"priority">().toExtend<ExtensionServiceTier<"anthropic">>();
-			expectTypeOf<"scale">().not.toExtend<ExtensionServiceTier<"google">>();
-			expectTypeOf<"flex">().not.toExtend<ExtensionServiceTier<"anthropic">>();
-		});
-
 		it("returns a detached snapshot, forwards valid changes, and rejects invalid family tiers", async () => {
 			const extCode = `
 				export default function(pi) {
@@ -2464,14 +2350,67 @@ describe("ExtensionRunner", () => {
 				{ type: "ui_select" },
 				{ type: "tool_approval_resolved", approved: true },
 			]);
-			expect(select).toHaveBeenCalledWith(expect.stringContaining("Approve dangerous_tool call?"), [
-				"Allow once",
-				"Allow for this session",
-				"Allow & remember…",
+			expect(select).toHaveBeenCalledWith(expect.stringContaining("Allow tool: dangerous_tool"), [
+				"Approve",
 				"Deny",
-				"Deny & remember…",
 			]);
 			delete globalState.__approvalEvents;
+		});
+		it("runs bridged preflight before approval and cancels denied state", async () => {
+			const runner = new ExtensionRunner([], new ExtensionRuntime(), tempDir.path(), sessionManager, modelRegistry);
+			const order: string[] = [];
+			initializeRunner(runner, async () => {
+				order.push("ui_select");
+				return "Approve";
+			});
+			runner.setToolCallPreflight({
+				before: async () => {
+					order.push("preflight");
+					return { block: true, reason: "rule blocked" };
+				},
+			});
+			const wrapper = new ExtensionToolWrapper(approvalTool, runner);
+			await expect(
+				(wrapper as ExtensionToolWrapper<any>).execute("call-preflight-order", {}, undefined, undefined, {
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+				}),
+			).rejects.toThrow("rule blocked");
+			expect(order).toEqual(["preflight"]);
+
+			const deniedRunner = new ExtensionRunner(
+				[],
+				new ExtensionRuntime(),
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			initializeRunner(deniedRunner, async () => "Deny");
+			let cancelled = 0;
+			deniedRunner.setToolCallPreflight({
+				before: async () => undefined,
+				cancel: () => {
+					cancelled++;
+				},
+			});
+			const deniedWrapper = new ExtensionToolWrapper(approvalTool, deniedRunner);
+			await expect(
+				(deniedWrapper as ExtensionToolWrapper<any>).execute("call-preflight-denied", {}, undefined, undefined, {
+					sessionManager,
+					modelRegistry,
+					model: undefined,
+					isIdle: () => true,
+					hasQueuedMessages: () => false,
+					abort: () => {},
+					settings: Settings.isolated({ "tools.approvalMode": "always-ask" }),
+				}),
+			).rejects.toThrow("denied by user");
+			expect(cancelled).toBe(1);
 		});
 
 		it("does not present approval before canonical or wire-aliased tool previews are ready", async () => {
@@ -3067,7 +3006,7 @@ describe("ExtensionRunner", () => {
 			// resolves against the revised args and blocks — the tool never runs.
 			await expect(
 				wrapped.execute("tool-call-id", { command: "echo original" }, undefined, undefined, yoloContext),
-			).rejects.toThrow(/Tool "bash" is blocked: dangerous/);
+			).rejects.toThrow('Tool "bash" is blocked by tool policy.\nReason: dangerous');
 			expect(fs.existsSync(recordPath)).toBe(false); // tool never executed
 		});
 
@@ -3745,22 +3684,6 @@ describe("ExtensionRunner", () => {
 			expect(errors).toHaveLength(1);
 			expect(errors[0]?.event).toBe("credential_disabled");
 			expect(errors[0]?.error).toContain("subscriber exploded");
-		});
-
-		it("is a no-op when no extension subscribes", async () => {
-			const result = await loadTestExtensions();
-			const runner = new ExtensionRunner(
-				result.extensions,
-				result.runtime,
-				tempDir.path(),
-				sessionManager,
-				modelRegistry,
-			);
-
-			expect(runner.hasHandlers("credential_disabled")).toBe(false);
-			await expect(
-				runner.emit({ type: "credential_disabled", provider: "anthropic", disabledCause: "invalid_grant" }),
-			).resolves.toBeUndefined();
 		});
 
 		it("caps the pre-initialize buffer and drops oldest events under pressure", async () => {

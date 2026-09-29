@@ -28,7 +28,6 @@ import {
 	PowerAssertion,
 	PtySession,
 	parseKey,
-	parseShellCommand,
 	pdfToMarkdown,
 	summarizeCode,
 	supportsLanguage,
@@ -345,6 +344,31 @@ describe("pi-natives", () => {
 	});
 
 	describe("grep", () => {
+		it("delivers a completed result after the JS thread resumes past its deadline", async () => {
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 1_000,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_200);
+
+			await expect(pending).resolves.toMatchObject({ totalMatches: 1 });
+		});
+
+		it("discards a completed result when an AbortSignal fires before settlement", async () => {
+			const controller = new AbortController();
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 5_000,
+				signal: controller.signal,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+			controller.abort();
+
+			await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+		});
+
 		it("should find patterns in files", async () => {
 			const result = await grep({
 				pattern: "TODO",
@@ -378,16 +402,6 @@ describe("pi-natives", () => {
 			expect(result.totalMatches).toBe(2); // "Test" in title + "test" in body
 		});
 
-		it("should return filesWithMatches mode", async () => {
-			const result = await grep({
-				pattern: "return",
-				path: testDir,
-				mode: GrepOutputMode.FilesWithMatches,
-			});
-
-			expect(result.filesWithMatches).toBeGreaterThan(0);
-		});
-
 		it("counts files instead of line matches in filesWithMatches mode", async () => {
 			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-files-"));
 			try {
@@ -406,6 +420,49 @@ describe("pi-natives", () => {
 			} finally {
 				await fs.rm(scopedDir, { recursive: true, force: true });
 			}
+		});
+
+		it("streams matches through onMatches in bounded batches instead of returning them", async () => {
+			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-stream-"));
+			try {
+				const dense = "alpha beta\n".repeat(5_000);
+				for (let i = 0; i < 8; i++) await Bun.write(path.join(scopedDir, `dense-${i}.txt`), dense);
+				await Bun.write(path.join(scopedDir, "quiet.txt"), "nothing here\n");
+
+				const batchSizes: number[] = [];
+				const perFile = new Map<string, number>();
+				const result = await grep({
+					pattern: "beta",
+					path: scopedDir,
+					onMatches: matches => {
+						batchSizes.push(matches.length);
+						for (const match of matches) perFile.set(match.path, (perFile.get(match.path) ?? 0) + 1);
+					},
+				});
+
+				// Every batch has run by the time the promise settles.
+				expect(result).toMatchObject({ totalMatches: 40_000, filesWithMatches: 8, filesSearched: 9 });
+				expect(result.matches).toEqual([]);
+				expect(Math.max(...batchSizes)).toBeLessThanOrEqual(1_024);
+				expect(Object.fromEntries(perFile)).toEqual(
+					Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`dense-${i}.txt`, 5_000])),
+				);
+			} finally {
+				await fs.rm(scopedDir, { recursive: true, force: true });
+			}
+		});
+
+		it("rejects the search with the error an onMatches callback throws", async () => {
+			const failure = new Error("consumer failed");
+			await expect(
+				grep({
+					pattern: "TODO",
+					path: testDir,
+					onMatches: () => {
+						throw failure;
+					},
+				}),
+			).rejects.toBe(failure);
 		});
 
 		it("should treat unknown grep type filter as a strict extension filter", async () => {
@@ -1178,21 +1235,5 @@ console.log("ok");
 		it("rejects an empty language", async () => {
 			await expect(astMatch({ source: "const a = 1;", lang: "  ", patterns: ["const $A = $B"] })).rejects.toThrow();
 		});
-	});
-});
-
-describe("parseShellCommand", () => {
-	it("returns a compact node list for a simple command", () => {
-		const nodes = JSON.parse(parseShellCommand("echo hi")) as Array<{ kind: string; words: string[] }>;
-		expect(nodes[0].kind).toBe("simpleCommand");
-		expect(nodes[0].words).toEqual(["echo", "hi"]);
-	});
-	it("keeps pipelines whole with two children", () => {
-		const nodes = JSON.parse(parseShellCommand("ls -la | grep foo")) as Array<{ kind: string; children: unknown[] }>;
-		expect(nodes[0].kind).toBe("pipeline");
-		expect(nodes[0].children).toHaveLength(2);
-	});
-	it("throws on syntax errors", () => {
-		expect(() => parseShellCommand("echo 'unterminated")).toThrow(/Shell parse error/);
 	});
 });

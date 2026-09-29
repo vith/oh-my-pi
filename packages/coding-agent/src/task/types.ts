@@ -3,11 +3,12 @@ export {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
-export type { SubagentProgressPayload } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+export type {
+	SubagentProgressPayload,
+	SubagentLifecyclePayload,
+} from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { type BaseType, type } from "@oh-my-pi/omptype";
-import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
-import type { NestedRepoPatch, StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -39,27 +40,6 @@ export interface SubagentEventPayload {
 	event: AgentSessionEvent;
 }
 
-/** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */
-export interface SubagentLifecyclePayload {
-	id: string;
-	agent: string;
-	agentSource: AgentSource;
-	description?: string;
-	status: "started" | "paused" | "completed" | "failed" | "aborted";
-	sessionFile?: string;
-	parentToolCallId?: string;
-	index: number;
-	/**
-	 * Spawn runs as a detached background job: the parent turn keeps working
-	 * while this agent runs. Sync task spawns (parent blocked on the call) and
-	 * eval `agent()` bridge spawns (rendered inside their eval cell) leave this
-	 * unset — surfaces like the subagent HUD only list detached spawns.
-	 */
-	detached?: boolean;
-}
-
-/** Display cap for a normalized one-line label (roster line, registry `displayName`, prompt field). */
-export const LABEL_MAX = 80;
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
@@ -69,6 +49,7 @@ export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -78,6 +59,7 @@ const taskItemSchemaIsolated = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -89,6 +71,7 @@ export const taskSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -99,6 +82,7 @@ const taskSchemaNoIsolation = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
+	solutionSpace: "string",
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -148,6 +132,7 @@ function createTaskSchema(options: {
 				"name?": "string",
 				agent,
 				task: "string",
+				solutionSpace: "string",
 				...effortField,
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
@@ -165,6 +150,7 @@ function createTaskSchema(options: {
 			"name?": "string",
 			agent,
 			task: "string",
+			solutionSpace: "string",
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
@@ -182,6 +168,7 @@ function createTaskSchema(options: {
 			"name?": "string",
 			agent,
 			task: "string",
+			solutionSpace: "string",
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
@@ -194,6 +181,7 @@ function createTaskSchema(options: {
 		"name?": "string",
 		agent,
 		task: "string",
+		solutionSpace: "string",
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
@@ -255,236 +243,4 @@ export interface AgentDefinition {
 	advisor?: boolean | string;
 	source: AgentSource;
 	filePath?: string;
-}
-
-/** Details extracted from a subagent `yield` tool call for final-result assembly and task rendering. */
-export interface YieldItem {
-	data?: unknown;
-	status?: "success" | "aborted";
-	error?: string;
-	/** A string label is terminal; a non-empty array of labels is incremental. */
-	type?: string | string[];
-	/** Resolve this yield's payload from the latest durable assistant text instead of `data`. */
-	useLastTurn?: boolean;
-	/** True when an incremental workpool yield completed every item in its batch. */
-	complete?: boolean;
-	/**
-	 * Set by the in-tool yield validator when it exhausted its retry budget and
-	 * accepted schema-invalid data anyway. The executor preserves that override
-	 * during post-mortem validation.
-	 */
-	schemaOverridden?: boolean;
-}
-
-/** Progress tracking for a single agent */
-export interface AgentProgress {
-	index: number;
-	id: string;
-	agent: string;
-	agentSource: AgentSource;
-	status: "pending" | "running" | "paused" | "completed" | "failed" | "aborted";
-	task: string;
-	assignment?: string;
-	description?: string;
-	lastIntent?: string;
-	currentTool?: string;
-	currentToolArgs?: string;
-	currentToolStartMs?: number;
-	recentTools: Array<{ tool: string; args: string; endMs: number }>;
-	recentOutput: string[];
-	toolCount: number;
-	/** Count of assistant requests (assistant message_end events) across the run. Drives the soft request budget guard. */
-	requests: number;
-	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
-	tokens: number;
-	/**
-	 * Current per-turn context size: latest assistant message's `usage.totalTokens`.
-	 * This is the number to compare against `contextWindow` — what compaction
-	 * decides on, what the user typically reads as "how full is the context".
-	 * Distinct from `tokens`, which is a lifetime billing-volume counter.
-	 */
-	contextTokens?: number;
-	/** Model's context window in tokens, when known. Lets the UI render `<curr>/<window>` gauges. */
-	contextWindow?: number;
-	/** Cumulative billing cost in USD, accumulated incrementally from message_end events. */
-	cost: number;
-	durationMs: number;
-	modelOverride?: string | string[];
-	/** Explicit pre-expansion model role alias selected for this run. */
-	modelRole?: string;
-	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Undefined when the model could not be resolved. */
-	resolvedModel?: string;
-	/** True when {@link resolvedModel} is the target of an active retry fallback (not the originally configured model). Lets observer-only UIs (collab guests, Agent Hub rows with no live session) flag the fallback and keep the provider. */
-	resolvedModelIsFallback?: boolean;
-	/** Provider/id including routing, with no added thinking suffix. */
-	resolvedModelIdentity?: string;
-	/** Explicit thinking metadata; never inferred from the model identity. */
-	resolvedThinkingLevel?: ConfiguredThinkingLevel;
-	/** Extension routing note (e.g. model-pools) explaining why {@link resolvedModel} was chosen. */
-	resolvedModelRoute?: string;
-	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
-	advisor?: boolean;
-	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
-	extractedToolData?: Record<string, unknown[]>;
-	/**
-	 * Auto-retry state when the subagent is sleeping between provider retries
-	 * (e.g. 429 rate-limit with retry-after). Cleared when the retry resolves
-	 * or fails. Surfacing this to the parent prevents the task tool from
-	 * looking indefinitely "in progress" when a child is actually blocked on
-	 * provider quota.
-	 */
-	retryState?: {
-		attempt: number;
-		maxAttempts: number;
-		delayMs: number;
-		errorMessage: string;
-		startedAtMs: number;
-	};
-	/**
-	 * Terminal retry failure surfaced once the subagent gave up retrying
-	 * (e.g. retry-after exceeded the cap, or all attempts exhausted). Carries
-	 * the final error so the parent UI can render "blocked: rate-limited"
-	 * instead of waiting for a status that never arrives.
-	 */
-	retryFailure?: {
-		attempt: number;
-		errorMessage: string;
-	};
-	/**
-	 * Snapshot of the most recent `task` tool call's in-flight `TaskToolDetails`,
-	 * captured from `tool_execution_update`. Lets the parent UI surface live
-	 * nested-subagent progress while this agent is still inside its own `task`
-	 * call. Cleared when the call ends — finalized data lives in
-	 * `extractedToolData.task` after that.
-	 */
-	inflightTaskDetails?: TaskToolDetails;
-}
-
-/** A successful terminal tool result that parked the current subagent turn. */
-export interface SubprocessPause {
-	toolName: string;
-	toolCallId: string;
-}
-
-/** Result from a single agent execution */
-export interface SingleResult {
-	index: number;
-	id: string;
-	agent: string;
-	agentSource: AgentSource;
-	task: string;
-	assignment?: string;
-	description?: string;
-	lastIntent?: string;
-	exitCode: number;
-	output: string;
-	stderr: string;
-	truncated: boolean;
-	/**
-	 * Parsed structured completion and validation metadata, when this invocation
-	 * selected an output schema or strict schema mode.
-	 */
-	structuredOutput?: StructuredSubagentOutput;
-	durationMs: number;
-	/** Cumulative input + output + cacheWrite tokens across all turns. Excludes cacheRead (re-reads cached context every turn, making cumulative sum misleading). */
-	tokens: number;
-	/** Count of assistant requests (assistant message_end events) across the run. */
-	requests: number;
-	/** Latest per-turn context size at task completion. See `AgentProgress.contextTokens`. */
-	contextTokens?: number;
-	/** Model's context window in tokens, when known. */
-	contextWindow?: number;
-	modelOverride?: string | string[];
-	/** Explicit pre-expansion model role alias selected for this run. */
-	modelRole?: string;
-	/** Resolved model display string in the form `<provider>/<id>`, optionally suffixed with `:<thinkingLevel>` when the level was set explicitly. Omitted from tool-result JSON when undefined to keep wire payloads small. */
-	resolvedModel?: string;
-	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
-	resolvedModelIsFallback?: boolean;
-	/** Retains the unambiguous identity from {@link AgentProgress.resolvedModelIdentity}. */
-	resolvedModelIdentity?: string;
-	/** Retains {@link AgentProgress.resolvedThinkingLevel} after settlement. */
-	resolvedThinkingLevel?: ConfiguredThinkingLevel;
-	/** Mirrors {@link AgentProgress.resolvedModelRoute} onto the settled result. */
-	resolvedModelRoute?: string;
-	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
-	advisor?: boolean;
-	error?: string;
-	aborted?: boolean;
-	abortReason?: string;
-	/** Terminal tool result that paused this turn without aborting the session. */
-	paused?: SubprocessPause;
-	/** Aggregated usage from the subprocess, accumulated incrementally from message_end events. */
-	usage?: Usage;
-	/** Output path for the task result */
-	outputPath?: string;
-	/**
-	 * Ran inside an isolation worktree. Such agents are parked without a
-	 * reviver once the worktree is torn down, so they are never resumable or
-	 * messageable after the run — summaries must not suggest otherwise.
-	 */
-	isolated?: boolean;
-	/** Patch path for isolated worktree output */
-	patchPath?: string;
-	/**
-	 * Whether `patchPath` holds a non-empty root-repo diff. `false` when the
-	 * agent's changes all live in nested repos (see `nestedPatchPaths`), so
-	 * summaries do not claim the root patch captured anything.
-	 */
-	hasRootChanges?: boolean;
-	/** Branch name for isolated branch-mode output */
-	branchName?: string;
-	/**
-	 * On-disk copies of `nestedPatchPaths`, one file per nested repo, written
-	 * before the isolation workspace is torn down. The workspace is the only
-	 * other copy of that work, so these paths are the durable record.
-	 */
-	nestedPatchPaths?: string[];
-	/**
-	 * Baseline commit SHA the task branch was created from. Passed to
-	 * `mergeTaskBranches` so cherry-pick uses the inclusive range
-	 * `branchBaseSha..branchName` and preserves every agent commit's message.
-	 */
-	branchBaseSha?: string;
-	/** Nested repo patches to apply after parent merge */
-	nestedPatches?: NestedRepoPatch[];
-	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
-	extractedToolData?: Record<string, unknown[]>;
-	/**
-	 * Terminal retry failure, when the subagent exited because the auto-retry
-	 * loop gave up (retry-after exceeded the cap, or all attempts exhausted).
-	 * Lets the parent task tool surface a "blocked: rate-limited" outcome
-	 * instead of a generic failure.
-	 */
-	retryFailure?: {
-		attempt: number;
-		errorMessage: string;
-	};
-	/** Output metadata for agent:// URL integration */
-	outputMeta?: { lineCount: number; charCount: number };
-}
-
-/** Durable transcript state for an idempotently keyed subagent follow-up. */
-export type DurableFollowUpState = "absent" | "appended" | "answered";
-
-/** Outcome of attempting to deliver an idempotently keyed subagent follow-up. */
-export interface DurableFollowUpResult {
-	delivery: "appended" | "already-appended" | "already-answered";
-	result?: SingleResult;
-}
-
-/** Tool details for TUI rendering */
-export interface TaskToolDetails {
-	projectAgentsDir: string | null;
-	results: SingleResult[];
-	totalDurationMs: number;
-	/** Aggregated usage across all subagents. */
-	usage?: Usage;
-	outputPaths?: string[];
-	progress?: AgentProgress[];
-	async?: {
-		state: "running" | "completed" | "failed";
-		jobId: string;
-		type: "task";
-	};
 }

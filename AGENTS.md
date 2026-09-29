@@ -255,25 +255,22 @@ For the bash tool specifically:
 - `ToolExecutionComponent.#buildRenderContext()` for bash must work even before a result exists — the renderer uses call args plus render context to show the command preview while streaming.
 - Verify both live streaming and rebuilt transcript paths after any bash preview change. A fix in one path does not fix the other.
 
-## Development Workflow
+## Fork Development Workflow
 
-This fork is developed exclusively in **git worktrees on feature branches**:
-
-- **NEVER commit directly on `integration`** — it is the merge target and the checkout the user runs omp from. Work happens in a separate worktree, not the main checkout.
-- Worktrees live under `.worktrees/<name>` in this checkout (e.g. `.worktrees/fork-build-version`). Create a dedicated worktree for each piece of work:
-  ```sh
-  git worktree add .worktrees/<name> -b feat/<name> integration
-  ```
-- **Reuse an existing feature's worktree and branch for follow-up work on that feature.** Fixing or extending something from `feat/permissions-engine` happens in the `feat/permissions-engine` worktree, not a fresh branch. If the worktree was removed, recreate it without a new branch: `git worktree add .worktrees/<name> <branch>`.
-- Every change lands on a `feat/*` branch (e.g. `feat/permissions-engine`) and is merged into `integration` — no squash, no deleting the feat branch afterwards.
-- **After completing feature work, merge it non-destructively into `integration`, then cut a new fork build from the `integration` checkout with `bun run release:fork`** (runs `scripts/fork-bump-version.ts`). The pipeline: derive the fork version (`<nearest upstream tag, verbatim>+vith-fork.<commits since tag>.<HEAD short hash>` — the core is the exact upstream release the fork is based on, never a fabricated patch bump; deterministic per commit), bump version files, regenerate lockfiles, run `bun run check`, commit the bump, rebuild the native addon, build the compiled `omp` binary, smoke-test it, and link it into PATH (`~/.bun/bin/omp`). It creates no tag and pushes nothing. Run it from a clean-enough `integration` checkout after the merge commit is in — the version derives from HEAD, so building from unmerged or uncommitted work produces a stale/dirty version.
-- Keep the main checkout pristine: the running omp binary is built from the `integration` checkout, so stray files or in-progress edits there can leak into builds the user runs.
+- Work in dedicated `.worktrees/<name>` checkouts on `feat/*` branches; NEVER develop directly on `integration`.
+- Reuse a feature's branch for follow-up work. Preserve feature branches after merging.
+- Upstream catch-ups MUST use a branch → PR → validation → merge workflow. By default, builds and the full validation gate run in CI; local no-emit checks and source-level tests are allowed. Only an explicit user instruction may substitute equivalent local builds/checks for a particular PR. Record that exception and its evidence; NEVER describe canceled or failed remote CI as successful.
+- PR jobs persist APT lists/archives at `/apt-cache`, and Bun package/transpiler caches plus Cargo downloads/artifacts under `/ci-cache`. Use `scripts/ci-prepare-workspace.sh` to preserve unchanged source mtimes; serialize jobs sharing its cached workspace. Cache APT downloads rather than relying on automated base-image rebuilds.
+- For a clean-base reconstruction, start from the upstream release tag and port only retained feature-specific changes. NEVER merge old feature branches wholesale: their ancestry may include intentionally dropped features.
+- Preserve retained behavior, not obsolete implementation. Prefer current upstream APIs over resurrected duplicates; redesign poor fork integrations when necessary.
+- The fork permissions rework is retired. Use upstream approval behavior; do not restore its engine, dialogs, commands, or rule migration.
+- Fork versions use `<upstream tag, verbatim>+vith-fork.<commits since tag>.<HEAD short hash>`. Keep upstream versions during catch-up; run `release:fork` only in CI when cutting a release.
 
 ## Commands
 
-- Commit frequently in small granular commits as work progresses, with conventional subjects and scope (e.g. `feat(coding-agent): ...`, `test(coding-agent): ...`, `docs: ...`). Never leave finished work uncommitted or one big commit at the end.
+- Commit coherent changes frequently with conventional subjects; never commit directly on `integration`.
 - Never use `tsc`/`npx tsc` — always `bun check`.
-- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a `cargo test --doc` pass, because nextest does not execute doctests. The doctest pass currently executes nothing (pi-natives is a `cdylib`, which rustdoc skips; pi-builtins' examples are `ignore`d vendored uutils docs) and exists so the first runnable doctest added to a lib crate is actually run.
+- Never run `cargo test` directly for Rust tests — use `bun run test:rs`. It runs `cargo nextest run` (config: `.config/nextest.toml`) followed by a separate rustdoc pass. Keep runnable workspace doctests enabled. The vendored `napi` examples require addon-side dependencies and a JS host, so exclude that crate only from doctests; retain its working unit tests.
 - Merge commits (maintainer merges of PRs) follow: `Merge PR #<number>: <conventional PR subject> (@<author>)` — e.g. `Merge PR #6386: feat(catalog): add native Meta Model API provider (@eggpeat)`.
 ## Rust Build Profiles
 

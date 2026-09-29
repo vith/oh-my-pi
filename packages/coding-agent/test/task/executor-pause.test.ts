@@ -82,7 +82,9 @@ function createPauseSession(
 	let disposeCount = 0;
 
 	const emit = (event: AgentSessionEvent): void => {
-		for (const listener of [...listeners]) listener(event);
+		// A listener may unsubscribe while handling the event.
+		const snapshot = listeners.slice();
+		for (const listener of snapshot) listener(event);
 	};
 	const requireSessionManager = (): SessionManager => {
 		if (!sessionManager) throw new Error("Expected mocked agent session to receive its SessionManager");
@@ -138,9 +140,13 @@ function createPauseSession(
 		},
 		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages.at(-1),
+		hasPendingAsyncWork: () => false,
 		abort: async () => {
 			abortCount += 1;
 		},
+		isAdvisorActive: () => false,
+		prepareForHeadlessAdvisorDrain: () => {},
+		waitForAdvisorCatchup: async () => {},
 		dispose: async () => {
 			disposeCount += 1;
 		},
@@ -324,6 +330,75 @@ describe("runSubprocess recoverable terminal pause", () => {
 		expect(result.paused).toEqual({ toolName, toolCallId: "pause-from-async-notice" });
 		expect(harness.prompts).toHaveLength(2);
 		expect(settleCalls).toBe(0);
+	});
+
+	it("lets a caller abort supersede a pause before lifecycle settlement", async () => {
+		const id = "CancelledDuringPause";
+		const toolName = "test_abort_pause_extension";
+		const controller = new AbortController();
+		subprocessToolRegistry.register(toolName, { terminalDisposition: () => "pause" });
+		const harness = createPauseSession(({ harness: session }) => {
+			session.recordAssistant([{ id: "pause-before-cancel", name: toolName }]);
+			session.recordToolResult("pause-before-cancel", toolName, false);
+			controller.abort("caller cancelled");
+		});
+		mockCreateAgentSession(harness);
+		registerRunning(id, harness.session, path.join(tempDir.path(), `${id}.jsonl`));
+
+		const result = await runSubprocess({ ...options(id), signal: controller.signal });
+
+		expect(result.paused).toBeUndefined();
+		expect(result.aborted).toBe(true);
+		expect(AgentRegistry.global().get(id)?.status).not.toBe("idle");
+	});
+
+	it("does not claim an unrecoverable one-shot helper can be resumed", async () => {
+		const id = "OneShotPause";
+		const toolName = "test_one_shot_pause_extension";
+		subprocessToolRegistry.register(toolName, { terminalDisposition: () => "pause" });
+		const harness = createPauseSession(({ harness: session }) => {
+			session.recordAssistant([{ id: "one-shot-call", name: toolName }]);
+			session.recordToolResult("one-shot-call", toolName, false);
+		});
+		mockCreateAgentSession(harness);
+		registerRunning(id, harness.session, path.join(tempDir.path(), `${id}.jsonl`));
+
+		const result = await runSubprocess({ ...options(id), keepAlive: false });
+
+		expect(result.paused).toBeUndefined();
+		expect(result.exitCode).toBe(1);
+		expect(result.error).toContain("does not retain its session");
+		expect(harness.disposeCalls()).toBe(1);
+	});
+
+	it("escapes a pending owner-job settle when an external operation pauses the run", async () => {
+		const id = "PausedWhileSettling";
+		const toolName = "test_pause_during_owner_settle";
+		let settleCalls = 0;
+		const neverSettles = Promise.withResolvers<void>();
+		subprocessToolRegistry.register(toolName, { terminalDisposition: () => "pause" });
+		const harness = createPauseSession(({ harness: session }) => {
+			session.recordAssistant([]);
+		});
+		Object.assign(harness.session, {
+			hasPendingAsyncWork: () => true,
+			settleAsyncWork: () => {
+				settleCalls++;
+				queueMicrotask(() => {
+					harness.recordAssistant([{ id: "pause-during-settle", name: toolName }]);
+					harness.recordToolResult("pause-during-settle", toolName, false);
+				});
+				return neverSettles.promise;
+			},
+		});
+		mockCreateAgentSession(harness);
+		registerRunning(id, harness.session, path.join(tempDir.path(), `${id}.jsonl`));
+
+		const result = await runSubprocess(options(id));
+
+		expect(result.paused).toEqual({ toolName, toolCallId: "pause-during-settle" });
+		expect(settleCalls).toBe(1);
+		expect(AgentRegistry.global().get(id)?.status).toBe("idle");
 	});
 
 	it("does not pause when a terminal-disposition tool result is an error", async () => {

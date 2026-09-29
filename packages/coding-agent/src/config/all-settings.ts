@@ -18,7 +18,6 @@ import * as hindsightSettings from "../hindsight/settings";
 import * as exportTtsrSettings from "../export/ttsr-settings";
 import * as editSettings from "../edit/settings";
 import * as toolsSettings from "../tools/settings";
-import * as permissionsSettings from "../tools/permissions/settings";
 import * as lspSettings from "../lsp/settings";
 import * as execSettings from "../exec/settings";
 import * as evalSettings from "../eval/settings";
@@ -40,11 +39,13 @@ import * as commandsSettings from "../commands/settings";
 import * as streamSettings from "../stream/settings";
 import * as commitSettings from "../commit/settings";
 import * as cliGcSettings from "../cli/gc-settings";
+import * as telemetrySettings from "../telemetry-settings";
 
 const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	configModelSettings,
 	modesSettings,
 	sessionSettings,
+	telemetrySettings,
 	advisorSettings,
 	sessionContextSettings,
 	memoryBackendSettings,
@@ -56,7 +57,6 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	exportTtsrSettings,
 	editSettings,
 	toolsSettings,
-	permissionsSettings,
 	lspSettings,
 	execSettings,
 	evalSettings,

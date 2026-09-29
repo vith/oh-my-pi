@@ -25,7 +25,7 @@ import {
 	type AgentActivityRow,
 	activityRowsFromProgress,
 } from "./agent-activity";
-import type { KeyId } from "../app-keybindings";
+import { formatKeyHint, formatKeyHints, type KeyId } from "../app-keybindings";
 import type { MessageRenderer } from "../chat/extension-types";
 import type { AgentLifecycleLike, IrcBusLike } from "./agent-hub-types";
 import { type AgentRecordLike, type AgentHubRegistry, type AgentStatus, MAIN_AGENT_ID } from "./agent-hub-types";
@@ -53,7 +53,6 @@ import {
 	formatMetrics,
 	formatRoleBadge,
 	modelBadge,
-	pendingApprovalCount,
 	type RosterRender,
 	sanitizeLine,
 	statusGlyph,
@@ -103,13 +102,23 @@ function activityGlyph(row: AgentActivityRow): string {
 	}
 }
 
+const ACTIVITY_CLOCK_FORMAT = new Intl.DateTimeFormat(undefined, {
+	hour: "2-digit",
+	minute: "2-digit",
+	second: "2-digit",
+	hour12: false,
+});
+const ACTIVITY_CLOCK_CACHE_LIMIT = 512;
+const activityClockCache = new Map<number, string>();
+
 function activityClock(timestamp: number): string {
-	return new Date(timestamp).toLocaleTimeString(undefined, {
-		hour: "2-digit",
-		minute: "2-digit",
-		second: "2-digit",
-		hour12: false,
-	});
+	let text = activityClockCache.get(timestamp);
+	if (text === undefined) {
+		text = ACTIVITY_CLOCK_FORMAT.format(timestamp);
+		if (activityClockCache.size >= ACTIVITY_CLOCK_CACHE_LIMIT) activityClockCache.clear();
+		activityClockCache.set(timestamp, text);
+	}
+	return text;
 }
 /** Result of one host-backed transcript read for the Agent Hub viewer. */
 export interface AgentHubRemoteTranscript {
@@ -214,7 +223,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	// Table state
 	#rows: TRecord[] = [];
-	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
+	#statusCounts: Record<AgentStatus | "paused", number> = { running: 0, idle: 0, paused: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
 	/** Stable roster order captured on first refresh: keyboard navigation must
 	 *  not jump as agents heartbeat. Existing agent generations keep their rank
@@ -609,8 +618,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			if (children) children.push(ref);
 			else this.#childrenByParent.set(parent, [ref]);
 		}
-		this.#statusCounts = { running: 0, idle: 0, parked: 0, aborted: 0 };
-		for (const ref of rosterRows) this.#statusCounts[ref.status]++;
+		this.#statusCounts = { running: 0, idle: 0, paused: 0, parked: 0, aborted: 0 };
+		for (const ref of rosterRows) {
+			const status = this.#observedById.get(ref.id)?.status === "paused" ? "paused" : ref.status;
+			this.#statusCounts[status]++;
+		}
 		this.#refreshAggregate();
 		this.#refreshActivityData(rosterRows);
 		this.#refreshActivityRows();
@@ -768,7 +780,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			row(
 				theme.fg(
 					"dim",
-					"1:agents  j/k:select  Enter:transcript  Space:follow  f:filter  s:scope  /:search  Esc:close",
+					`1:agents  ${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:transcript  ${formatKeyHint("space")}:follow  ${formatKeyHint("f")}:filter  ${formatKeyHint("s")}:scope  /:search  ${formatKeyHint("escape")}:close`,
 				),
 				width,
 			),
@@ -835,15 +847,18 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (showingNarrowDetails) {
 			return theme.fg(
 				"dim",
-				`${filter}1:agents  2:activity  Tab:roster  PgUp/PgDn:scroll  Enter:open  t:${nextView}  Esc:roster`,
+				`${filter}1:agents  2:activity  ${formatKeyHint("tab")}:roster  ${formatKeyHints(["pageUp", "pageDown"])}:scroll  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("escape")}:roster`,
 			);
 		}
 		if (availableWidth < 96) {
-			return theme.fg("dim", `${filter}j/k:select  Enter:open  t:${nextView}  Tab:details  r/x:manage  Esc:close`);
+			return theme.fg(
+				"dim",
+				`${filter}${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("tab")}:details  ${formatKeyHints(["r", "x"])}:manage  ${formatKeyHint("escape")}:close`,
+			);
 		}
 		return theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  j/k/wheel:select  PgUp/PgDn:details  Enter/click:open  t:${nextView}  r:revive  x:kill  Esc:close`,
+			`${filter}1:agents  2:activity  ${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  ${formatKeyHint("escape")}:close`,
 		);
 	}
 
@@ -1015,7 +1030,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	#statusSummary(): string {
 		const parts: string[] = [];
-		for (const status of ["running", "idle", "parked", "aborted"] as const) {
+		for (const status of ["running", "idle", "paused", "parked", "aborted"] as const) {
 			const count = this.#statusCounts[status];
 			if (count > 0) parts.push(`${statusGlyph(status)} ${statusText(status, `${count} ${status}`)}`);
 		}
@@ -1047,6 +1062,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	): string[] {
 		if (!ref) return [theme.fg("dim", "Select an agent to inspect"), ...Array.from({ length: rows - 1 }, () => "")];
 		const observed = this.#observableFor(ref.id);
+		const displayStatus = observed?.status === "paused" ? "paused" : ref.status;
 		const progress = observed?.progress;
 		const metrics = this.#metricsFor(ref, observed);
 		const children = this.#childrenByParent.get(ref.id) ?? [];
@@ -1062,16 +1078,14 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			add(theme.bold(theme.fg("accent", label)));
 		};
 
-		add(
-			`${statusGlyph(ref.status, pendingApprovalCount(ref))} ${theme.bold(sanitizeDisplaySingleLine(ref.displayName || ref.id))}`,
-		);
+		add(`${statusGlyph(displayStatus)} ${theme.bold(sanitizeDisplaySingleLine(ref.displayName || ref.id))}`);
 		if (ref.displayName && ref.displayName !== ref.id) add(theme.fg("dim", sanitizeDisplaySingleLine(ref.id)));
 		const lifecycleDetails = [
 			metrics ? formatMetricDuration(metrics) : undefined,
 			`active ${formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)))}`,
 		].filter(Boolean);
 		add(
-			`${statusText(ref.status, ref.status, pendingApprovalCount(ref))}${theme.fg("dim", `${theme.sep.dot}${lifecycleDetails.join(theme.sep.dot)}`)}`,
+			`${statusText(displayStatus, displayStatus)}${theme.fg("dim", `${theme.sep.dot}${lifecycleDetails.join(theme.sep.dot)}`)}`,
 		);
 		const modelDetails: string[] = [];
 		const modelRole = progress?.modelRole ?? ref.history?.modelRole;
@@ -1170,10 +1184,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			: "";
 		const id = sanitizeDisplaySingleLine(ref.id);
 		const styledId = selected ? theme.bold(theme.fg("accent", id)) : theme.bold(id);
-		const fields: string[] = [`${cursor} ${branch}${statusGlyph(ref.status, pendingApprovalCount(ref))} ${styledId}`];
-		if (ref.displayName && ref.displayName !== ref.id) {
-			fields.push(theme.fg("dim", sanitizeDisplaySingleLine(ref.displayName)));
-		}
+		const displayStatus = observed?.status === "paused" ? "paused" : ref.status;
+		const fields: string[] = [`${cursor} ${branch}${statusGlyph(displayStatus)} ${styledId}`];
+		if (displayStatus === "paused") fields.push(statusText(displayStatus, "paused"));
 		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			fields.push(theme.fg("dim", `↳ ${sanitizeDisplaySingleLine(ref.parentId)}`));
 		}

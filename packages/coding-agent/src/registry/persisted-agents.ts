@@ -35,7 +35,7 @@ interface PersistedAgentMetadata {
 	history?: AgentHistorySummary;
 	/** True when the file is only a SessionManager header (no session_init, no messages). */
 	incomplete?: boolean;
-	/** True when the prefix cannot describe a usable persisted transcript. */
+	/** True when its prefix cannot describe a usable persisted transcript. */
 	invalid?: boolean;
 }
 
@@ -379,18 +379,12 @@ async function readPersistedAgentMetadata(
 	// already degraded to an undefined file above.
 	if (statResult.error !== undefined) throw statResult.error;
 	const file = statResult.file;
-	// Fork: preserve the invalid signal the external-revival contract
-	// (registerPersistedSubagent) reads from metadata. `incomplete` keeps the
-	// upstream semantics — an ENOENT race must mark the record incomplete so
-	// the scan path skips registering it — and is independent of `invalid`,
-	// which only the external path consults.
-	const invalid = malformed || !hasSessionHeader;
 	return {
 		activity,
 		createdAt: createdAt ?? file?.birthtimeMs,
 		lastActivity: file?.mtimeMs,
 		incomplete: !hasSessionInit && !hasConversation,
-		invalid,
+		invalid: malformed || !hasSessionHeader,
 		history: {
 			...history,
 			...(hasOutput ? { outputPath } : {}),

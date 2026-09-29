@@ -861,9 +861,6 @@ describe("AgentLifecycleManager", () => {
 		const rootSessionFile = path.join(tempDir.path(), "main.jsonl");
 		const workerId = "Killed-Sub";
 		const workerSessionFile = path.join(tempDir.path(), "main", `${workerId}.jsonl`);
-		// A sibling that was never killed: it proves the rescan really walked the
-		// directory, so the killed row's `aborted` comes from its tombstone rather
-		// than from the scan having skipped the whole tree.
 		const survivorId = "Parked-Sub";
 		const survivorSessionFile = path.join(tempDir.path(), "main", `${survivorId}.jsonl`);
 		await Bun.write(rootSessionFile, persistedTranscript("main"));
@@ -948,6 +945,8 @@ describe("AgentLifecycleManager", () => {
 			dispose: async () => {
 				disposeCalls++;
 			},
+			setIrcWakeTurnAdmission: (_next: unknown) => {},
+			setIrcWakeTurnSettlement: (_next: unknown) => {},
 		} as unknown as AgentSession;
 		const ref = registry.register({
 			id: workerId,

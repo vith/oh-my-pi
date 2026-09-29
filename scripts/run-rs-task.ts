@@ -26,6 +26,8 @@ const VENDORED_FORK_EXCLUDES = [
 	"--exclude",
 	"brush-core",
 	"--exclude",
+	"brush-parser",
+	"--exclude",
 	"cfg_aliases",
 ] as const satisfies readonly string[];
 const TASK_COMMANDS = {
@@ -59,14 +61,10 @@ const TASK_COMMANDS = {
 			"--status-level=fail",
 			"--final-status-level=fail",
 		],
-		// nextest cannot run doctests (no stable libtest-json interface for
-		// them), so they need their own libtest pass. Today this pass executes
-		// nothing: pi-natives is a `cdylib`, which rustdoc refuses to collect
-		// doctests from, and pi-builtins' 16 examples are `ignore`d vendored
-		// uutils docs. It is kept as a guard so that the first runnable
-		// doctest added to a lib crate actually runs instead of silently
-		// never executing.
-		["cargo", "test", "--doc", "--workspace", ...VENDORED_FORK_EXCLUDES],
+		// nextest cannot run doctests, so retain a separate rustdoc pass.
+		// The vendored napi examples require addon-side dependencies and a JS
+		// host; exclude only those doctests, preserving napi's unit-test coverage.
+		["cargo", "test", "--doc", "--workspace", ...VENDORED_FORK_EXCLUDES, "--exclude", "napi"],
 	],
 } as const satisfies Record<string, readonly (readonly string[])[]>;
 

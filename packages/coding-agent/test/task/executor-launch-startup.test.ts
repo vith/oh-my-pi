@@ -63,17 +63,8 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 					isError: false,
 				} as AgentSessionEvent);
 			}
+			return true;
 		},
-		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
-		getLastAssistantMessage: () => undefined,
-		abort: async () => {},
-		dispose: async () => {},
-		setIrcWakeTurnObserver: () => {},
-		setIrcWakeTurnAdmission: (_next: unknown) => {},
-		setIrcWakeTurnSettlement: (_next: unknown) => {},
-		subscribeRunState: () => () => {},
 	} as unknown as AgentSession;
 	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
 		sessionCreationStarted.resolve();
