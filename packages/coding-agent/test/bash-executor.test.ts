@@ -540,6 +540,7 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
+				XDG_CONFIG_HOME: path.join(shellDir, ".config"),
 			},
 			prefix: undefined,
 		});
