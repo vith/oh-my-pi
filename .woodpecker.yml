@@ -65,8 +65,11 @@ steps:
         bun run ci:test:full
         cargo nextest run -p pi-natives --features wayland-pipewire -E 'test(desktop::linux::wayland)'
         bun run collab:web:build
+        # Stamp only disposable build inputs; keep the checked-in upstream versions.
+        fork_version="$(bun scripts/prepare-fork-build.ts)"
+        OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
         bun --cwd=packages/coding-agent run build
-        packages/coding-agent/dist/omp --version
+        test "$(packages/coding-agent/dist/omp --version)" = "omp/$fork_version"
         packages/coding-agent/dist/omp --smoke-test
     when:
       - event: [push, pull_request]
