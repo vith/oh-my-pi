@@ -9,6 +9,12 @@ the description from verified changes and evidence. Do not request a
 human-written sentence from the user or attribute assistant-written prose to
 them. Internal PRs still follow the fork's branch, review, CI, and merge rules.
 
+Fork CI temporarily skips test execution until its runtime is optimized. It
+retains lint, formatting and type checks, builds the web UI and native CLI, and
+verifies the compiled executable reports the derived fork version. A passing
+fork pipeline does not mean the test suites passed; report skipped tests
+explicitly in internal PRs.
+
 Pull requests are welcome. Keep them focused, understand the work you submit,
 and be prepared to explain and maintain it.
 
