@@ -29,6 +29,8 @@ const VENDORED_FORK_EXCLUDES = [
 	"brush-parser",
 	"--exclude",
 	"cfg_aliases",
+	"--exclude",
+	"napi",
 ] as const satisfies readonly string[];
 const TASK_COMMANDS = {
 	"check:rs": [
