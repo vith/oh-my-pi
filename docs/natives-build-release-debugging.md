@@ -283,6 +283,8 @@ Runtime x64 candidate order also includes the unsuffixed default filename after 
 
 `--reset` writes the null manifest stub (`embeddedAddon = null`) without validating addon availability, and deletes any existing `embedded-addons.*.tar.gz` archives from `native/`.
 
+Build tools must not import the native loader before generating the archive. Bun can cache the native directory's initial listing and then report `Could not resolve: "../native/embedded-addons.<tag>.tar.gz"` even after generation creates the file. Import build-time `VERSION` and `USER_AGENT` from the native-free `@oh-my-pi/pi-utils/version` module, not the utility barrel or directory helpers.
+
 ## Dev workflow vs shipped/compiled behavior
 
 ## Local development workflow
