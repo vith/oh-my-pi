@@ -8,7 +8,7 @@
 try {
 	delete process.env.MallocStackLogging;
 	delete process.env.MallocStackLoggingNoCompact;
-} catch { }
+} catch {}
 
 /**
  * CLI entry point — registers all commands explicitly and delegates to the
@@ -19,13 +19,7 @@ import type { MessagePort } from "node:worker_threads";
 import type { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import type * as Postmortem from "@oh-my-pi/pi-utils/postmortem";
-import {
-	APP_NAME,
-	getActiveProfile,
-	MIN_BUN_VERSION,
-	resolveProfileEnv,
-	setProfile,
-} from "@oh-my-pi/pi-utils/dirs";
+import { APP_NAME, getActiveProfile, MIN_BUN_VERSION, resolveProfileEnv, setProfile } from "@oh-my-pi/pi-utils/dirs";
 import { VERSION } from "@oh-my-pi/pi-utils/version";
 
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
@@ -52,7 +46,7 @@ if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 
 try {
 	process.title = APP_NAME;
-} catch { }
+} catch {}
 
 // `Bun.build`-API compiled Windows executables report `import.meta.main ===
 // false`: the standalone loader keys the entry module with native backslashes
@@ -403,7 +397,7 @@ async function runIpcSubprocessWorker<In, Out>(
 				parentProcess = natives.Process.fromPid(initialParentPid);
 				runningStatus = natives.ProcessStatus.Running;
 			}
-		} catch { }
+		} catch {}
 
 		// Note on container environments (Docker/Kubernetes): omp often runs as
 		// PID 1, so workers start with process.ppid === 1. Treating ppid <= 1 as
@@ -423,7 +417,7 @@ async function runIpcSubprocessWorker<In, Out>(
 			if (parentProcess && runningStatus !== undefined) {
 				try {
 					return parentProcess.status() === runningStatus;
-				} catch { }
+				} catch {}
 			}
 			try {
 				process.kill(initialParentPid, 0);
@@ -450,7 +444,7 @@ async function runIpcSubprocessWorker<In, Out>(
 			parentWatchdog.unref();
 		}
 	}
-	const keepalive = setInterval(() => { }, 2 ** 30);
+	const keepalive = setInterval(() => {}, 2 ** 30);
 	// Parent went away (crashed, SIGKILL, etc.) — commit suicide so we don't
 	// linger as an orphan. SIGKILL via `process.kill` keeps us symmetrical with
 	// the parent's hard-kill on shutdown: skip every JS/native finalizer.
@@ -513,8 +507,8 @@ export async function runCli(argv: string[]): Promise<void> {
 			});
 			process.stdout.write(
 				`Created ${result.aliasName} for profile ${result.profile} in ${result.configPath}\n` +
-				`Restart your shell or run: ${result.reloadedWith}\n` +
-				`Then use: ${result.aliasName} update, ${result.aliasName} --version, or ${result.aliasName}\n`,
+					`Restart your shell or run: ${result.reloadedWith}\n` +
+					`Then use: ${result.aliasName} update, ${result.aliasName} --version, or ${result.aliasName}\n`,
 			);
 			return;
 		}
