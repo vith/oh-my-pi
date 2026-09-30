@@ -1,6 +1,6 @@
-// Deep import: the pi-utils barrel loads the host native addon, which is
-// absent on cross-compiling release runners.
-import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
+// Keep build metadata native-free: loading the native directory before archive
+// generation makes Bun cache a directory listing that lacks the new archive.
+import { USER_AGENT } from "@oh-my-pi/pi-utils/version";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";

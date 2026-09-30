@@ -1,3 +1,11 @@
+import { version } from "../package.json" with { type: "json" };
+
+/** Current application release identity, including fork build metadata. */
+export const VERSION: string = version;
+
+/** Default User-Agent header string. Kept native-free for binary build tools. */
+export const USER_AGENT = `omp/${VERSION}`;
+
 const DIGITS = /^\d+$/;
 
 /**

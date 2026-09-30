@@ -16,10 +16,9 @@ import {
 	getProjectDir,
 	normalizePathForComparison,
 	setProjectDir,
-	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 import { $env, isBunTestRuntime, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
-import { compareVersions } from "@oh-my-pi/pi-utils/version";
+import { compareVersions, VERSION } from "@oh-my-pi/pi-utils/version";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";

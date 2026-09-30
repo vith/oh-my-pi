@@ -1810,7 +1810,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 	const { nowMs } = state;
 	const running = progress.status === "running";
 	const status: TspAgentProps["status"] =
-		progress.status === "completed" ? "done" : progress.status === "failed" ? "failed" : progress.status;
+		progress.status === "completed" ? "done" : progress.status === "paused" ? "parked" : progress.status;
 	const tool =
 		running && progress.currentTool
 			? {
