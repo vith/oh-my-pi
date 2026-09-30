@@ -216,7 +216,7 @@ export class StdoutStallWatchdog {
 		private readonly armBytes: number = MAX_STDOUT_BACKLOG_BYTES,
 		private readonly clearBytes: number = STDOUT_BACKLOG_CLEAR_BYTES,
 		private readonly stallMs: number = STDOUT_STALL_TIMEOUT_MS,
-	) { }
+	) {}
 
 	/** True while an episode is active and the backlog must be polled to completion. */
 	get armed(): boolean {
@@ -424,23 +424,23 @@ export function emergencyTerminalRestore(): void {
 			// This avoids writing escape sequences for non-TUI commands (grep, commit, etc.)
 			process.stdout.write(
 				"\x1b[?2026l" + // End synchronized output
-				"\x1b[?7h" + // Restore autowrap
-				"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
-				"\x1b[?2004l" + // Disable bracketed paste
-				"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
-				"\x1b[?2048l" + // Disable in-band resize notifications
-				"\x1b[?5522l" + // Disable enhanced paste notifications
-				"\x1b[<u" + // Pop kitty keyboard protocol
-				"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
-				"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
-				"\x1b[?1004l" + // Disable focus reporting
-				// Leave the alternate screen only when a fullscreen overlay
-				// actually holds it — on Windows, DECRST 1049 on the main
-				// buffer homes the cursor (unconditional CursorRestoreState
-				// with no prior save), corrupting the shell handoff on exit.
-				(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
-				"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
-				"\x1b[?25h", // Show cursor
+					"\x1b[?7h" + // Restore autowrap
+					"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
+					"\x1b[?2004l" + // Disable bracketed paste
+					"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
+					"\x1b[?2048l" + // Disable in-band resize notifications
+					"\x1b[?5522l" + // Disable enhanced paste notifications
+					"\x1b[<u" + // Pop kitty keyboard protocol
+					"\x1b[>4;0m" + // Disable modifyOtherKeys fallback
+					"\x1b[?1006l\x1b[?1003l\x1b[?1000l" + // Disable mouse tracking (fullscreen overlays)
+					"\x1b[?1004l" + // Disable focus reporting
+					// Leave the alternate screen only when a fullscreen overlay
+					// actually holds it — on Windows, DECRST 1049 on the main
+					// buffer homes the cursor (unconditional CursorRestoreState
+					// with no prior save), corrupting the shell handoff on exit.
+					(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
+					"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
+					"\x1b[?25h", // Show cursor
 			);
 			altScreenActive = false;
 			if (process.stdin.setRawMode) {
