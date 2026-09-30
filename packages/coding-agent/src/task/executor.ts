@@ -70,7 +70,7 @@ import {
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL, type CustomMessage } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE, type CustomMessage } from "../session/messages";
 import type { SessionEntry } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
