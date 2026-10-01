@@ -1,4 +1,10 @@
-import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentEvent,
+	AgentOptions,
+	AgentTelemetryConfig,
+	AgentTool,
+	AgentToolContext,
+} from "@oh-my-pi/pi-agent-core";
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -299,6 +305,8 @@ export interface ToolSession {
 	hasEditTool?: boolean;
 	/** Event bus for tool/extension communication */
 	eventBus?: EventBus;
+	/** UI-only updates from managed tools after their foreground call has returned. */
+	emitBackgroundToolUpdate?: (event: Extract<AgentEvent, { type: "tool_execution_update" }>) => void;
 	/**
 	 * Root-scoped bus for `task:subagent:*` observability frames. The root
 	 * session creates it; every spawned subagent session inherits it, so RPC

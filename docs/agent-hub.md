@@ -96,6 +96,7 @@ These restrictions also apply to collab guests controlling the host's Hub.
 Agent Hub is the human-facing live session view. Adjacent commands and internal URLs serve narrower purposes:
 
 - `/jobs` prints a snapshot of running and recently settled asynchronous tool jobs. It does not replace the per-agent transcript or control view.
+- `/jobs follow <job-id>` opens a read-only, live bash-output tail for the viewed session; omit the id when exactly one bash job is running. Scrolling pauses following, End resumes it, and Escape closes the pane without stopping the job.
 - `history://<id>` gives the coding agent a concise transcript for a live or parked subagent.
 - `agent://<id>` resolves a subagent's saved final output artifact; it is not the live transcript.
 - `write agent://<id>` steers or follows up with a normal subagent; `agent://all` broadcasts to visible live peers. Messaging a parked subagent revives it. `read history://` discovers registered agent transcripts.

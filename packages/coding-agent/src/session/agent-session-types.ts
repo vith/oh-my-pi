@@ -75,7 +75,12 @@ export type CommandMetadataChangedListener = () => void | Promise<void>;
 export type AsyncJobSnapshotItem = Pick<
 	AsyncJob,
 	"id" | "type" | "status" | "label" | "startTime" | "endTime" | "agentId"
->;
+> & {
+	/** Bounded bash capture, included only when explicitly requested. */
+	output?: string;
+	/** Epoch timestamp of the most recent actual output chunk. */
+	lastOutputAt?: number;
+};
 
 /** Snapshot of running, recent, and pending-delivery asynchronous jobs. */
 export interface AsyncJobSnapshot {

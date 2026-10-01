@@ -10,7 +10,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Loader, Markdown, type OverlayHandle, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
@@ -35,6 +35,7 @@ import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
+import { JobOutputOverlay } from "@oh-my-pi/pi-tui/overlays/job-output-overlay";
 import { moveDirectorySource } from "../move-directory-source";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
@@ -596,10 +597,74 @@ export class CommandController {
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
 	}
 
-	async handleJobsCommand(): Promise<void> {
-		const snapshot = this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
+	async handleJobsCommand(args = ""): Promise<void> {
+		const parts = args.trim().split(/\s+/).filter(Boolean);
+		if (parts.length > 0 && (parts[0] !== "follow" || parts.length > 2)) {
+			this.ctx.showWarning("Usage: /jobs [follow <job-id>]");
+			return;
+		}
+		const session = parts[0] === "follow" ? this.ctx.viewSession : this.ctx.session;
+		const snapshot = session.getAsyncJobSnapshot({
+			recentLimit: parts[0] === "follow" ? 100 : 5,
+			includeOutput: parts[0] === "follow",
+		});
 		if (!snapshot) {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
+			return;
+		}
+
+		if (parts[0] === "follow") {
+			const candidates = snapshot.running.filter(job => job.type === "bash");
+			const jobId = parts[1] ?? (candidates.length === 1 ? candidates[0].id : undefined);
+			if (!jobId) {
+				this.ctx.showWarning(
+					`Usage: /jobs follow <job-id>. Running bash jobs: ${candidates.map(job => job.id).join(", ") || "none"}.`,
+				);
+				return;
+			}
+			const job =
+				snapshot.running.find(item => item.id === jobId) ?? snapshot.recent.find(item => item.id === jobId);
+			if (!job) {
+				this.ctx.showWarning(
+					`Job ${sanitizeText(jobId)} is not available in the viewed session. Use /jobs to list jobs.`,
+				);
+				return;
+			}
+			if (job.type !== "bash") {
+				this.ctx.showWarning(
+					`Job ${sanitizeText(jobId)} is ${sanitizeText(job.type)}, not bash. Only bash output can be followed.`,
+				);
+				return;
+			}
+			const sessionId = session.sessionId;
+			const pane = new JobOutputOverlay({
+				tui: this.ctx.ui,
+				job,
+				observe: () => {
+					if (this.ctx.viewSession !== session || session.sessionId !== sessionId || session.isDisposed) {
+						return { state: "session-changed" };
+					}
+					const current = session.getAsyncJobSnapshot({ recentLimit: 100, includeOutput: true });
+					if (!current) return { state: "unavailable" };
+					return {
+						state: "available",
+						job:
+							current.running.find(item => item.id === jobId) ?? current.recent.find(item => item.id === jobId),
+					};
+				},
+				onClose: () => {
+					pane.dispose();
+					overlay.hide();
+					this.ctx.ui.requestRender();
+				},
+			});
+			let overlay: OverlayHandle;
+			try {
+				overlay = this.ctx.ui.showOverlay(pane, { width: "100%", maxHeight: "100%", margin: 0, fullscreen: true });
+			} catch (error) {
+				pane.dispose();
+				throw error;
+			}
 			return;
 		}
 

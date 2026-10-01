@@ -294,14 +294,18 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "jobs",
 		icon: "jobs",
-		description: "Show async background jobs status",
+		description: "Show background jobs or follow bash output with /jobs follow <job-id>",
 		acpDescription: "Show background jobs",
 		getTuiAutocompleteDescription: runtime => {
 			const snapshot = runtime.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
 			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) return "Jobs: none";
 			return `Jobs: ${snapshot.running.length} running, ${snapshot.recent.length} recent`;
 		},
-		handle: async (_command, runtime) => {
+		handle: async (command, runtime) => {
+			if (command.args.trim()) {
+				await runtime.output("Usage: /jobs. Live /jobs follow <job-id> requires interactive TUI mode.");
+				return commandConsumed();
+			}
 			const snapshot = runtime.session.getAsyncJobSnapshot({ recentLimit: 5 });
 			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) {
 				await runtime.output(
@@ -330,8 +334,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();
 		},
-		handleTui: async (_command, runtime) => {
-			await runtime.ctx.handleJobsCommand();
+		handleTui: async (command, runtime) => {
+			await runtime.ctx.handleJobsCommand(command.args);
 			runtime.ctx.editor.setText("");
 		},
 	},

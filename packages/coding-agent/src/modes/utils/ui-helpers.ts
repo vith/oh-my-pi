@@ -83,6 +83,7 @@ import {
 	cfgTerminalShowImages,
 } from "../settings";
 import { cfgReadToolResultPreview } from "../../tools/settings";
+import { cfgDisplayBashPreviewLines } from "../../exec/settings";
 
 interface RenderInitialMessagesOptions {
 	preserveExistingChat?: boolean;
@@ -614,6 +615,7 @@ export class UiHelpers {
 						{
 							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 							showImages: cfgTerminalShowImages.get(settings),
+							bashPreviewLines: () => cfgDisplayBashPreviewLines.get(this.ctx.settings),
 						},
 						tool,
 						this.ctx.ui,
@@ -709,18 +711,30 @@ export class UiHelpers {
 				// Match tool results to pending tool components
 				const component = this.ctx.pendingTools.get(message.toolCallId);
 				if (component) {
-					const asyncDetails = (message.details as { async?: { state?: string; jobId?: string } } | undefined)
+					// Bash progress outlives its persisted "backgrounded" result. An
+					// idle rebuild must restore the latest output (including a settled
+					// exit), not wait for a heartbeat that may never arrive again.
+					const cachedUpdate =
+						message.toolName === "bash"
+							? activeToolExecutionUpdates.find(event => event.toolCallId === message.toolCallId)
+							: undefined;
+					const latestResult = cachedUpdate?.partialResult ?? message;
+					const asyncDetails = (latestResult.details as { async?: { state?: string; jobId?: string } } | undefined)
 						?.async;
 					const isBackgroundTask =
-						message.toolName === "task" &&
+						(message.toolName === "task" || message.toolName === "bash") &&
 						asyncDetails?.state === "running" &&
 						(activeToolExecutionUpdates.some(event => event.toolCallId === message.toolCallId) ||
 							runningAsyncJobs.some(job => job.id === asyncDetails.jobId));
-					// A detached task's persisted result is only its "still running"
+					// A background call's persisted result is only its "still running"
 					// snapshot. Keep the card partial, parked, and in `pendingTools` so
 					// the snapshot replay and later live progress frames land on it
 					// instead of hitting the no-pending-component early return (#10447).
-					component.updateResult(message, isBackgroundTask, message.toolCallId);
+					component.updateResult(
+						cachedUpdate ? { ...latestResult, isError: asyncDetails?.state === "failed" } : message,
+						isBackgroundTask,
+						message.toolCallId,
+					);
 					if (isBackgroundTask) {
 						component.parkAsBackground();
 						backgroundTaskCallIds.add(message.toolCallId);

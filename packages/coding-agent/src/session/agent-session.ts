@@ -2732,7 +2732,7 @@ export class AgentSession implements SettingsScope {
 		this.#planInternalAbortPending = false;
 	}
 
-	getAsyncJobSnapshot(options?: { recentLimit?: number }): AsyncJobSnapshot | null {
+	getAsyncJobSnapshot(options?: { recentLimit?: number; includeOutput?: boolean }): AsyncJobSnapshot | null {
 		const manager = this.#asyncJobManager;
 		if (!manager) return null;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
@@ -2743,6 +2743,13 @@ export class AgentSession implements SettingsScope {
 			label: job.label,
 			startTime: job.startTime,
 			agentId: job.agentId,
+			...(options?.includeOutput && job.type === "bash"
+				? {
+						output: typeof job.latestDetails?.output === "string" ? job.latestDetails.output : undefined,
+						lastOutputAt:
+							typeof job.latestDetails?.lastOutputAt === "number" ? job.latestDetails.lastOutputAt : undefined,
+					}
+				: {}),
 		}));
 		const recent = manager.getRecentJobs(options?.recentLimit ?? 5, ownerFilter).map(job => ({
 			id: job.id,
@@ -2752,6 +2759,16 @@ export class AgentSession implements SettingsScope {
 			startTime: job.startTime,
 			endTime: job.endTime,
 			agentId: job.agentId,
+			...(options?.includeOutput && job.type === "bash"
+				? {
+						output:
+							job.resultText ??
+							job.errorText ??
+							(typeof job.latestDetails?.output === "string" ? job.latestDetails.output : undefined),
+						lastOutputAt:
+							typeof job.latestDetails?.lastOutputAt === "number" ? job.latestDetails.lastOutputAt : undefined,
+					}
+				: {}),
 		}));
 		const delivery = manager.getDeliveryState(ownerFilter);
 		return { running, recent, delivery };
@@ -5018,6 +5035,14 @@ export class AgentSession implements SettingsScope {
 	 */
 	activeToolExecutionUpdates(): readonly Extract<AgentSessionEvent, { type: "tool_execution_update" }>[] {
 		return [...this.#activeToolExecutionUpdates.values()];
+	}
+
+	/** Managed background output is display-only: it must not wake or feed the model. */
+	emitBackgroundToolUpdate(event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>): void {
+		if (this.#isDisposed) return;
+		void this.#emitSessionEvent(event, { detachExtensions: true }).catch(error => {
+			logger.warn("Background tool display update failed", { toolCallId: event.toolCallId, error: String(error) });
+		});
 	}
 
 	/**

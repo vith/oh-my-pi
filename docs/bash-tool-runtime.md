@@ -226,6 +226,12 @@ For PTY execution, live rendering is handled by custom UI overlay, not by `onUpd
 
 When `async.enabled` is true and the call passes `async: true`, `BashTool` starts a managed bash job immediately, returns a running result with a job id, and stores completion through the session job manager. Auto-backgrounding can also use this path after `bash.autoBackground.thresholdMs`; it is skipped for PTY and client-bridge terminal routes and falls back to foreground execution when the job manager is at capacity. A queued steering message can background a still-running auto-background candidate early.
 
+In the interactive TUI, background bash cards continue showing a byte-bounded output tail after the initiating turn ends. Updates are throttled; a quiet command still refreshes elapsed time and the age of its last output once per second. These display updates do not wake the model or change the existing completion-delivery behavior. Rebuilding the transcript restores the latest output and terminal status.
+
+Use `/jobs follow <job-id>` to open a read-only output pane for a bash job in the viewed session. `/jobs follow` selects the job automatically when exactly one bash job is running. The pane follows the newest output by default; arrow keys and Page Up/Page Down pause following, End resumes it, and Escape closes the pane without stopping the job. It retains the last observed output if the job disappears or the viewed session changes, with a notice explaining that following has stopped. This is a bounded tail, not a replacement for the full output available through `proc://<job-id>` or the final output artifact.
+
+`display.bashPreviewLines` controls the collapsed bash output preview (default: 10 lines), subject to the existing viewport cap. Set it through `/settings` → Bash → Bash Preview Lines, or configure a positive integer directly. Ctrl+O still expands tool output.
+
 ## Result shaping, metadata, and error mapping
 
 After execution:

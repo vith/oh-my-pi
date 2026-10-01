@@ -782,6 +782,7 @@ tui:
 | `images.blockImages`        | boolean | `false`          | Never send images to providers.                                           |
 | `tui.hyperlinks`            | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
 | `tui.mouse`                 | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on. |
+| `display.bashPreviewLines`  | number  | `10`             | Positive integer limiting collapsed bash output previews, still capped by viewport space. `/settings` offers 5, 10, 20, or 40 lines; Ctrl+O expands output. |
 | `display.pinnedAgents`      | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
 | `tui.resizeScrollback`      | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport. |
 

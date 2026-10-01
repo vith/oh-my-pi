@@ -2213,6 +2213,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session ? session.trackEvalExecution(execution, abortController) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			isDisposed: () => session?.isDisposed ?? false,
+			emitBackgroundToolUpdate: event => session?.emitBackgroundToolUpdate(event),
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,

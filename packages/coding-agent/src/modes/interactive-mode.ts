@@ -301,6 +301,7 @@ import type {
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { UiHelpers } from "./utils/ui-helpers";
+import { cfgDisplayBashPreviewLines } from "../exec/settings";
 
 import {
 	cfgAutocompleteMaxVisible,
@@ -393,6 +394,7 @@ const cfgLiveUiSettings = combine({
 	"compaction.enabled": cfgCompactionEnabled,
 	"compaction.methodOrder": cfgCompactionMethodOrder,
 	"display.hideToolActivity": cfgDisplayHideToolActivity,
+	"display.bashPreviewLines": cfgDisplayBashPreviewLines,
 	"terminal.showImages": cfgTerminalShowImages,
 	hideThinkingBlock: cfgHideThinkingBlock,
 	proseOnlyThinking: cfgProseOnlyThinking,
@@ -2949,6 +2951,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		}
 
+		if (any("display.bashPreviewLines")) {
+			rebuildChat = true;
+			resetDisplay = true;
+		}
 		// Field comparisons skip effects the keybinding toggles already applied.
 		const hideToolActivity = cfgDisplayHideToolActivity.get(this.settings);
 		if (any("display.hideToolActivity") && hideToolActivity !== this.hideToolActivity) {
@@ -6805,8 +6811,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleAdvisorStatusCommand();
 	}
 
-	handleJobsCommand(): Promise<void> {
-		return this.#commandController.handleJobsCommand();
+	handleJobsCommand(args?: string): Promise<void> {
+		return this.#commandController.handleJobsCommand(args);
 	}
 
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {

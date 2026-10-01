@@ -35,6 +35,10 @@ export interface BashToolDetails {
 	requestedTimeoutSeconds?: number;
 	timeoutDisabled?: boolean;
 	wallTimeMs?: number;
+	/** Epoch timestamps for live background activity, independent of output text. */
+	startTime?: number;
+	lastOutputAt?: number;
+	endTime?: number;
 	/** Exit code of a command that ran to completion but failed (non-zero). */
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
@@ -313,6 +317,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			let cachedRawOutput: string | undefined;
 			let cachedIsPartial: boolean | undefined;
 			let cachedPreviewWindow: number | undefined;
+			let cachedActivitySecond: number | undefined;
 			let cachedSnapshot: ToolCardSnapshot | undefined;
 
 			return framedToolCard(
@@ -330,6 +335,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 
 					const isPartial = options.isPartial === true;
 					const previewWindow = previewWindowRows();
+					const activitySecond = details?.async?.state === "running" ? Math.floor(Date.now() / 1_000) : undefined;
 
 					if (
 						cachedSnapshot !== undefined &&
@@ -338,7 +344,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						cachedExpanded === expanded &&
 						cachedRawOutput === rawOutput &&
 						cachedIsPartial === isPartial &&
-						cachedPreviewWindow === previewWindow
+						cachedPreviewWindow === previewWindow &&
+						cachedActivitySecond === activitySecond
 					) {
 						return cachedSnapshot;
 					}
@@ -367,7 +374,17 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					const wallTimeMs = details?.wallTimeMs;
 					const statsParts: string[] = [];
 					if (details?.async?.state === "running") {
+						const now = Date.now();
 						statsParts.push(`Backgrounded: ${details.async.jobId}`);
+						if (details.startTime !== undefined) {
+							statsParts.push(`Elapsed: ${formatWallTimeSeconds(Math.max(0, now - details.startTime))}s`);
+							statsParts.push(
+								details.lastOutputAt === undefined
+									? "No output yet"
+									: `Last output: ${formatWallTimeSeconds(Math.max(0, now - details.lastOutputAt))}s ago`,
+							);
+						}
+						statsParts.push(`/jobs follow ${details.async.jobId}`);
 					}
 					if (details?.service) {
 						const service = details.service;
@@ -450,6 +467,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					cachedRawOutput = rawOutput;
 					cachedIsPartial = isPartial;
 					cachedPreviewWindow = previewWindow;
+					cachedActivitySecond = activitySecond;
 					cachedSnapshot = snapshot;
 					return snapshot;
 				},
