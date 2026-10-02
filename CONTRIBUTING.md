@@ -4,7 +4,7 @@
 
 The contributor-authorship and submission requirements below apply to PRs sent
 to upstream `can1357/oh-my-pi`, not maintainer integration PRs within this fork.
-For internal fork PRs, including `git.n3t.work/vith/oh-my-pi`, the assistant writes
+For internal fork PRs in `github.com/vith/oh-my-pi-vith`, the assistant writes
 the description from verified changes and evidence. Do not request a
 human-written sentence from the user or attribute assistant-written prose to
 them. Internal PRs still follow the fork's branch, review, CI, and merge rules.
@@ -14,6 +14,44 @@ retains lint, formatting and type checks, builds the web UI and native CLI, and
 verifies the compiled executable reports the derived fork version. A passing
 fork pipeline does not mean the test suites passed; report skipped tests
 explicitly in internal PRs.
+
+## GitHub fork validation and catch-up
+
+The canonical branch is `integration`. Actions remain disabled during migration;
+activation requires independently audited retained refs and metadata, repository
+settings, and owner approval. Historical feature refs preserve their original
+objects. The existing `.woodpecker.yml` remains until the replacement gate is
+proved; old source automation must not mutate concurrently with GitHub catch-up.
+
+`fork-pr-dispatch.yml` reads PR metadata only and dispatches trusted
+`fork-ci.yml` at integration. Preparation pins the exact PR head and current
+integration base. Candidate compilation is isolated in an unprivileged ARM64
+Bun 1.4.2 container without model, signing or publishing credentials. The source
+gate retains frozen installation, TS/Rust checks, collab-web build, disposable
+fork-version preparation, one native PipeWire build, CLI build and exact compiled
+version verification. Source/dependency/Cargo caches are content-preserving and
+separate integration from individual PR trust scopes.
+
+The exact-head `fork-ci` status and human-approved `source-review` status are
+required before merging. The secret-free `source-review` environment shows the
+PR and pinned identities; head/base movement invalidates old evidence. A human
+merges through GitHub. No controller auto-approves or auto-merges source.
+
+`tools/catchup.py` discovers authentic stable `vMAJOR.MINOR.PATCH` upstream tags
+every six hours (or by explicit manual tag). Moved tags fail closed. A clean
+ordinary merge retains both pinned parents; conflicts create a draft from the
+exact upstream commit with actual conflict paths for human resolution. A fresh
+trusted writer validates the bounded receipt, bundle, authentic tag and parent
+identities before publishing only the intended tag/branch and explicitly
+dispatching CI. Existing migrated/human-edited branches are never overwritten;
+one blocked active catch-up stays visible. Closed unmerged proposals require
+explicit manual reconsideration.
+
+Source merge and signed package delivery are distinct. Until independently
+verified matching source/input/signature evidence exists, catch-up reports
+package delivery as pending rather than inferring publication from a source run.
+The package repository observes integration read-only; no cross-repository write
+credential or Oracle/model publication observer is used.
 
 Pull requests are welcome. Keep them focused, understand the work you submit,
 and be prepared to explain and maintain it.

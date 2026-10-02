@@ -1,0 +1,68 @@
+name: Deterministic human-reviewed upstream catchup
+on:
+  schedule:
+    - cron: '37 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Optional authentic stable vMAJOR.MINOR.PATCH tag
+        type: string
+        required: false
+permissions: {}
+concurrency:
+  group: deterministic-catchup
+  cancel-in-progress: false
+jobs:
+  discover:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      proposal: ${{ steps.discover.outputs.proposal }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: integration
+          persist-credentials: false
+      - id: discover
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          python3 tools/catchup.py discover --output "$RUNNER_TEMP/catchup" --tag "$REQUESTED_TAG" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -f "$RUNNER_TEMP/catchup/receipt.json" ]; then echo 'proposal=true' >> "$GITHUB_OUTPUT"; fi
+      - name: Observe independently signed package delivery
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/catchup.py delivery --output "$RUNNER_TEMP/delivery" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: steps.discover.outputs.proposal == 'true'
+        with:
+          name: catchup-proposal
+          path: |
+            ${{ runner.temp }}/catchup/receipt.json
+            ${{ runner.temp }}/catchup/candidate.bundle
+          retention-days: 7
+  writer:
+    needs: discover
+    if: needs.discover.outputs.proposal == 'true'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: integration
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: catchup-proposal
+          path: ${{ runner.temp }}/catchup
+      - name: Validate data and publish only intended refs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: python3 tools/catchup.py publish --output "$RUNNER_TEMP/catchup" --tag "$REQUESTED_TAG" | tee -a "$GITHUB_STEP_SUMMARY"

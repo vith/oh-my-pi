@@ -1,0 +1,116 @@
+name: fork-ci
+on:
+  push:
+    branches: [integration]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Numeric integration PR (empty for integration)
+        type: string
+        required: false
+permissions: {}
+concurrency:
+  group: source-gate-${{ inputs.pr_number || 'integration' }}
+  cancel-in-progress: true
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      head: ${{ steps.pin.outputs.head }}
+      base: ${{ steps.pin.outputs.base }}
+      number: ${{ steps.pin.outputs.number }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: integration
+          persist-credentials: false
+      - id: pin
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: python3 tools/source_gate.py prepare --number "$PR_NUMBER"
+  build:
+    needs: prepare
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: integration
+          persist-credentials: false
+          path: control
+      - name: Build trusted pinned container
+        run: docker build --platform linux/arm64 -f control/ci/fork-ci.Containerfile -t fork-ci control
+      - name: Fetch candidate without credentials
+        env:
+          HEAD_SHA: ${{ needs.prepare.outputs.head }}
+          PR_NUMBER: ${{ needs.prepare.outputs.number }}
+        run: |
+          set -eu
+          git -c core.hooksPath=/dev/null clone --no-checkout "https://github.com/$GITHUB_REPOSITORY.git" candidate
+          if [ -n "$PR_NUMBER" ]; then git -C candidate fetch origin "refs/pull/$PR_NUMBER/head"; fi
+          git -C candidate -c core.hooksPath=/dev/null checkout --detach "$HEAD_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$HEAD_SHA"
+          mkdir cache
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: cache
+          key: source-arm64-bun142-nightly20260812-${{ needs.prepare.outputs.number || 'integration' }}-${{ needs.prepare.outputs.head }}
+          restore-keys: source-arm64-bun142-nightly20260812-${{ needs.prepare.outputs.number || 'integration' }}-
+      - name: Unprivileged retained source gate
+        run: |
+          sudo chown -R 1000:1000 candidate cache
+          docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 -v "$PWD/candidate:/source" -v "$PWD/cache:/cache" -v "$PWD/control/ci/fork-gate.sh:/gate.sh:ro" fork-ci bash /gate.sh
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: cache
+          key: source-arm64-bun142-nightly20260812-${{ needs.prepare.outputs.number || 'integration' }}-${{ needs.prepare.outputs.head }}
+  status:
+    needs: [prepare, build]
+    if: always() && needs.prepare.result == 'success'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: integration
+          persist-credentials: false
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.number }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head }}
+          BASE_SHA: ${{ needs.prepare.outputs.base }}
+          STATE: ${{ needs.build.result == 'success' && 'success' || 'failure' }}
+        run: python3 tools/source_gate.py status --number "$PR_NUMBER" --head "$HEAD_SHA" --base "$BASE_SHA" --context fork-ci --state "$STATE"
+  review:
+    name: Approve PR ${{ needs.prepare.outputs.number }} head ${{ needs.prepare.outputs.head }} base ${{ needs.prepare.outputs.base }}
+    needs: [prepare, build, status]
+    if: needs.prepare.outputs.number != ''
+    runs-on: ubuntu-24.04-arm
+    environment:
+      name: source-review
+      url: https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.number }}
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: integration
+          persist-credentials: false
+      - name: Revalidate approved exact proposal
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.number }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head }}
+          BASE_SHA: ${{ needs.prepare.outputs.base }}
+        run: python3 tools/source_gate.py status --number "$PR_NUMBER" --head "$HEAD_SHA" --base "$BASE_SHA" --context source-review --state success
