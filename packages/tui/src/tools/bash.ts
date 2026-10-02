@@ -308,6 +308,21 @@ function stripBashNotices(
 			: stripTrailingNotice(withoutExit, formatWallTimeNotice(details.wallTimeMs));
 	return stripRawOutputArtifactNotice(withoutWall);
 }
+function appendBackgroundStats(parts: string[], details: BashToolDetails | undefined): void {
+	if (details?.async?.state !== "running") return;
+	const now = Date.now();
+	parts.push(`Backgrounded: ${details.async.jobId}`);
+	if (details.startTime !== undefined) {
+		parts.push(`Elapsed: ${formatWallTimeSeconds(Math.max(0, now - details.startTime))}s`);
+		parts.push(
+			details.lastOutputAt === undefined
+				? "No output yet"
+				: `Last output: ${formatWallTimeSeconds(Math.max(0, now - details.lastOutputAt))}s ago`,
+		);
+	}
+	parts.push(`/jobs follow ${details.async.jobId}`);
+}
+
 /** `Wall: 1.20s`, `Timeout: 30s`, … metadata parts shown under bash output. */
 function bashStatsParts(
 	details: BashToolDetails | undefined,
@@ -320,19 +335,7 @@ function bashStatsParts(
 	const requestedTimeoutSeconds = details?.requestedTimeoutSeconds;
 	const wallTimeMs = details?.wallTimeMs;
 	const statsParts: string[] = [];
-	if (details?.async?.state === "running") {
-		const now = Date.now();
-		statsParts.push(`Backgrounded: ${details.async.jobId}`);
-		if (details.startTime !== undefined) {
-			statsParts.push(`Elapsed: ${formatWallTimeSeconds(Math.max(0, now - details.startTime))}s`);
-			statsParts.push(
-				details.lastOutputAt === undefined
-					? "No output yet"
-					: `Last output: ${formatWallTimeSeconds(Math.max(0, now - details.lastOutputAt))}s ago`,
-			);
-		}
-		statsParts.push(`/jobs follow ${details.async.jobId}`);
-	}
+	appendBackgroundStats(statsParts, details);
 	if (details?.service) {
 		const service = details.service;
 		statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
@@ -390,6 +393,7 @@ function shellToolHead(
 /** The quiet final line's facts under shell output: service state and the full-output artifact. */
 function shellFootParts(details: BashToolDetails | undefined, artifactId: string | undefined): string[] {
 	const parts: string[] = [];
+	appendBackgroundStats(parts, details);
 	const service = details?.service;
 	if (service) {
 		parts.push(`Service ${service.name}`, service.state);

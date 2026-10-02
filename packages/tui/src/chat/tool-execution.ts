@@ -313,7 +313,7 @@ export class ToolExecutionComponent extends Container {
 	#toolActivityVisible = true;
 	#showImages: boolean;
 	#bashPreviewLines: number | (() => number) | undefined;
-	#bashPreviewLineLimit = BASH_DEFAULT_PREVIEW_LINES;
+	#bashPreviewLineLimit = DEFAULT_TERMINAL_PREVIEW_LINES;
 	#isPartial = true;
 	// A background task whose call already returned; later async job frames are
 	// partial updates, but the block is ready to retire as history.
@@ -1214,7 +1214,7 @@ export class ToolExecutionComponent extends Container {
 			this.#bashPreviewLineLimit =
 				typeof value === "number" && Number.isFinite(value)
 					? Math.max(1, Math.trunc(value))
-					: BASH_DEFAULT_PREVIEW_LINES;
+					: DEFAULT_TERMINAL_PREVIEW_LINES;
 		}
 		// `TERMINAL.imageProtocol` is resolved by an async capability probe during
 		// TUI startup, so a result rendered before it lands must re-shape once it
