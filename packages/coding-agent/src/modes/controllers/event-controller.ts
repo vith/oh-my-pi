@@ -69,6 +69,7 @@ import {
 	cfgTerminalShowProgress,
 } from "../settings";
 import { cfgCompaction } from "../../session/context-settings";
+import { cfgDisplayBashPreviewLines } from "../../exec/settings";
 import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
 import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
 
@@ -1472,6 +1473,7 @@ export class EventController {
 						{
 							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 							showImages: cfgTerminalShowImages.get(settings),
+							bashPreviewLines: () => cfgDisplayBashPreviewLines.get(this.ctx.settings),
 						},
 						tool,
 						this.ctx.ui,
@@ -1779,6 +1781,7 @@ export class EventController {
 				{
 					useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(renderToolName),
 					showImages: cfgTerminalShowImages.get(settings),
+					bashPreviewLines: () => cfgDisplayBashPreviewLines.get(this.ctx.settings),
 				},
 				tool,
 				this.ctx.ui,
@@ -1922,7 +1925,7 @@ export class EventController {
 		event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 	): void {
 		const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
-		const isBackgroundTask = event.toolName === "task" && asyncState === "running";
+		const isBackgroundTask = (event.toolName === "task" || event.toolName === "bash") && asyncState === "running";
 		component.updateResult({ ...event.result, isError: event.isError }, isBackgroundTask, event.toolCallId);
 		if (isBackgroundTask) {
 			component.parkAsBackground();

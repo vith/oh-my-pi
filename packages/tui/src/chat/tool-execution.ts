@@ -192,6 +192,8 @@ export interface ToolExecutionUi {
 
 export interface ToolExecutionOptions {
 	showImages?: boolean; // default: true (only used if terminal supports images)
+	/** Collapsed bash output lines; callbacks pick up live settings changes. Default: 10. */
+	bashPreviewLines?: number | (() => number);
 	/** Allow the name-keyed renderer registry only when the active tool is the built-in implementation. */
 	useBuiltInRenderer?: boolean;
 }
@@ -310,6 +312,8 @@ export class ToolExecutionComponent extends Container {
 	#presentationFrame: AnimationFrame = { tick: 0, now: 0 };
 	#toolActivityVisible = true;
 	#showImages: boolean;
+	#bashPreviewLines: number | (() => number) | undefined;
+	#bashPreviewLineLimit = DEFAULT_TERMINAL_PREVIEW_LINES;
 	#isPartial = true;
 	// A background task whose call already returned; later async job frames are
 	// partial updates, but the block is ready to retire as history.
@@ -427,6 +431,7 @@ export class ToolExecutionComponent extends Container {
 		this.#toolLabel = tool?.label ?? toolName;
 		this.#renderer = options.useBuiltInRenderer === false ? undefined : toolRenderers[toolName];
 		this.#showImages = options.showImages ?? true;
+		this.#bashPreviewLines = options.bashPreviewLines;
 		this.#tool = tool;
 		this.#ui = ui;
 		this.#args = args;
@@ -1204,11 +1209,18 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	#updateDisplay(): void {
+		if (this.#toolName === "bash") {
+			const value = typeof this.#bashPreviewLines === "function" ? this.#bashPreviewLines() : this.#bashPreviewLines;
+			this.#bashPreviewLineLimit =
+				typeof value === "number" && Number.isFinite(value)
+					? Math.max(1, Math.trunc(value))
+					: DEFAULT_TERMINAL_PREVIEW_LINES;
+		}
 		// `TERMINAL.imageProtocol` is resolved by an async capability probe during
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}`;
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#argsComplete ? "1" : "0"}|${this.#executionStarted ? "1" : "0"}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${this.#bashPreviewLineLimit}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
@@ -1251,6 +1263,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override render(width: number): readonly string[] {
+		if (this.#toolName === "bash") this.#updateDisplay();
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
 			return [];
 		}
@@ -1686,7 +1699,7 @@ export class ToolExecutionComponent extends Container {
 				context.output = output;
 			}
 			context.expanded = this.#expanded;
-			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
+			context.previewLines = this.#bashPreviewLineLimit;
 			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
 			const output = this.#getTextOutput().trimEnd();

@@ -117,6 +117,24 @@ export const cfgBashAutoBackgroundEnabled = register({
 	},
 });
 
+export const cfgDisplayBashPreviewLines = register({
+	id: "display.bashPreviewLines",
+	type: "number",
+	default: 10,
+	ui: {
+		tab: "shell",
+		group: "Bash",
+		label: "Bash Preview Lines",
+		description: "Output lines shown for collapsed bash commands, bounded by the viewport",
+		options: [
+			{ value: "5", label: "5 lines" },
+			{ value: "10", label: "10 lines" },
+			{ value: "20", label: "20 lines" },
+			{ value: "40", label: "40 lines" },
+		],
+	},
+});
+
 export const cfgBashPatterns = register({
 	id: "bash.patterns",
 	type: "array",

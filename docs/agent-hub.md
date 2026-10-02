@@ -112,6 +112,7 @@ Agent Hub is the human-facing live session view. Adjacent commands and internal 
 `/agents` is a separate agent-definition/settings hub, not the live roster. It manages discovered agents, enable/disable state, model overrides, prewalk, and advisor selection.
 
 - `/jobs` prints a snapshot of running and recently settled asynchronous tool jobs. It does not replace the per-agent transcript or control view.
+- `/jobs follow <job-id>` opens a read-only, live bash-output tail for the viewed session; omit the id when exactly one bash job is running. Scrolling pauses following, End resumes it, and Escape closes the pane without stopping the job.
 - `history://<id>` gives the coding agent a concise transcript for a live/parked subagent or a retained on-disk transcript.
 - `agent://<id>` resolves a subagent's saved final output artifact; it is not the live transcript.
 - `write agent://<id>` steers or follows up with a normal subagent; `agent://all` broadcasts to visible live peers. Messaging a parked subagent revives it. `read history://` lists registered agents and retained on-disk transcripts.

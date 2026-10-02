@@ -44,6 +44,10 @@ export interface BashToolDetails {
 	requestedTimeoutSeconds?: number;
 	timeoutDisabled?: boolean;
 	wallTimeMs?: number;
+	/** Epoch timestamps for live background activity, independent of output text. */
+	startTime?: number;
+	lastOutputAt?: number;
+	endTime?: number;
 	/** Exit code of a command that ran to completion but failed (non-zero). */
 	exitCode?: number;
 	/** True when the command was killed by its timeout deadline (not a failure). */
@@ -304,6 +308,21 @@ function stripBashNotices(
 			: stripTrailingNotice(withoutExit, formatWallTimeNotice(details.wallTimeMs));
 	return stripRawOutputArtifactNotice(withoutWall);
 }
+function appendBackgroundStats(parts: string[], details: BashToolDetails | undefined): void {
+	if (details?.async?.state !== "running") return;
+	const now = Date.now();
+	parts.push(`Backgrounded: ${details.async.jobId}`);
+	if (details.startTime !== undefined) {
+		parts.push(`Elapsed: ${formatWallTimeSeconds(Math.max(0, now - details.startTime))}s`);
+		parts.push(
+			details.lastOutputAt === undefined
+				? "No output yet"
+				: `Last output: ${formatWallTimeSeconds(Math.max(0, now - details.lastOutputAt))}s ago`,
+		);
+	}
+	parts.push(`/jobs follow ${details.async.jobId}`);
+}
+
 /** `Wall: 1.20s`, `Timeout: 30s`, … metadata parts shown under bash output. */
 function bashStatsParts(
 	details: BashToolDetails | undefined,
@@ -316,9 +335,7 @@ function bashStatsParts(
 	const requestedTimeoutSeconds = details?.requestedTimeoutSeconds;
 	const wallTimeMs = details?.wallTimeMs;
 	const statsParts: string[] = [];
-	if (details?.async?.state === "running") {
-		statsParts.push(`Backgrounded: ${details.async.jobId}`);
-	}
+	appendBackgroundStats(statsParts, details);
 	if (details?.service) {
 		const service = details.service;
 		statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
@@ -376,6 +393,7 @@ function shellToolHead(
 /** The quiet final line's facts under shell output: service state and the full-output artifact. */
 function shellFootParts(details: BashToolDetails | undefined, artifactId: string | undefined): string[] {
 	const parts: string[] = [];
+	appendBackgroundStats(parts, details);
 	const service = details?.service;
 	if (service) {
 		parts.push(`Service ${service.name}`, service.state);
@@ -474,6 +492,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			let cachedRawOutput: string | undefined;
 			let cachedIsPartial: boolean | undefined;
 			let cachedPreviewWindow: number | undefined;
+			let cachedActivitySecond: number | undefined;
 			let cachedSnapshot: ToolCardSnapshot | undefined;
 
 			return framedToolCard(
@@ -491,6 +510,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 
 					const isPartial = options.isPartial === true;
 					const previewWindow = previewWindowRows();
+					const activitySecond = details?.async?.state === "running" ? Math.floor(Date.now() / 1_000) : undefined;
 
 					if (
 						cachedSnapshot !== undefined &&
@@ -499,7 +519,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						cachedExpanded === expanded &&
 						cachedRawOutput === rawOutput &&
 						cachedIsPartial === isPartial &&
-						cachedPreviewWindow === previewWindow
+						cachedPreviewWindow === previewWindow &&
+						cachedActivitySecond === activitySecond
 					) {
 						return cachedSnapshot;
 					}
@@ -574,6 +595,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					cachedRawOutput = rawOutput;
 					cachedIsPartial = isPartial;
 					cachedPreviewWindow = previewWindow;
+					cachedActivitySecond = activitySecond;
 					cachedSnapshot = snapshot;
 					return snapshot;
 				},
