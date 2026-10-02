@@ -92,12 +92,13 @@ export class TranscriptScrollView implements Component {
 		this.#source = source;
 	}
 
-	/** Seat on the tail, then take one hop — what the opening Ctrl+Up/Down meant. */
-	open(delta: -1 | 1): void {
+	/** Seat on the tail, then apply the opening prompt hop or wheel step. */
+	open(delta: -1 | 1, mode: "prompt" | "wheel" = "prompt"): void {
 		this.#layout(this.#source.size().columns);
 		this.#view.scrollToBottom();
 		this.#seated = true;
-		this.hop(delta);
+		if (mode === "wheel") this.#scrollBy(delta * WHEEL_ROWS);
+		else this.hop(delta);
 	}
 
 	handleInput(data: string): void {
@@ -320,6 +321,10 @@ export class TranscriptScrollView implements Component {
 		this.#relayout();
 		const before = this.#view.getScrollOffset();
 		this.#view.scroll(rows);
+		if (this.#view.getMaxScrollOffset() === 0 || (rows > 0 && this.#atBottom())) {
+			this.#source.close(undefined);
+			return;
+		}
 		if (this.#view.getScrollOffset() !== before) this.#source.requestRender();
 	}
 

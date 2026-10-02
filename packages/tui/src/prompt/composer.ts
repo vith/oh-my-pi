@@ -784,10 +784,10 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/**
-	 * Enter transcript scroll mode seated one prompt hop from the live tail.
+	 * Enter transcript scroll mode one prompt hop or wheel step from the live tail.
 	 * No-op before a transcript is mounted or while the mode is open.
 	 */
-	openTranscriptScroll(delta: -1 | 1, copy: (text: string) => void): void {
+	openTranscriptScroll(delta: -1 | 1, copy: (text: string) => void, mode: "prompt" | "wheel" = "prompt"): void {
 		if (this.#transcriptScroll || !this.#runtimeMounted) return;
 		const roots = [...this.#runtimeChildren, this.#statusHost];
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
@@ -820,7 +820,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			onYield: () => this.#closeTranscriptScroll(),
 		});
 		this.#transcriptScroll = { view, handle };
-		view.open(delta);
+		view.open(delta, mode);
 		this.ui.requestRender();
 	}
 

@@ -767,9 +767,9 @@ export class InputController {
 	/**
 	 * Inline click-to-focus (`tui.mouse`): left-clicks on live subagent cards
 	 * and HUD rows focus that agent in one action, and pointer motion lights up
-	 * the hover band on the target under the cursor. Every SGR report is consumed
-	 * while inline tracking owns the terminal so button/wheel bytes never reach
-	 * the editor as typed input; clicks on chrome simply swallow.
+	 * the hover band on the target under the cursor. Wheel-up enters the existing
+	 * transcript scroll view; wheel-down at the live tail stays there. Reports
+	 * never reach the editor as typed input.
 	 */
 	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
 		if (!data.startsWith("\x1b[<")) return undefined;
@@ -777,7 +777,11 @@ export class InputController {
 		if (this.ctx.ui.hasOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
-		if (event.motion) this.#updateHoverHighlight(event.row);
+		if (event.wheel !== null) {
+			if (event.wheel < 0 && this.ctx.ui.getFocused() === this.ctx.editor) {
+				this.ctx.openTranscriptScroll(-1, "wheel");
+			}
+		} else if (event.motion) this.#updateHoverHighlight(event.row);
 		else if (event.leftClick) this.#focusClickedAgent(event.row);
 		return { consume: true };
 	}
