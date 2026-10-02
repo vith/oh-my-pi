@@ -21,4 +21,6 @@ bun run collab:web:build
 fork_version="$(bun scripts/prepare-fork-build.ts)"
 OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
 bun --cwd=packages/coding-agent run build
-test "$(packages/coding-agent/dist/omp --version)" = "omp/$fork_version"
+compiled_version="$(packages/coding-agent/dist/omp --version)"
+printf 'Compiled fork identity: %s\n' "$compiled_version"
+test "$compiled_version" = "omp/$fork_version"
