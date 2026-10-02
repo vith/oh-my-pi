@@ -1,7 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
+import { Composer, PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
+import { Text } from "@oh-my-pi/pi-tui";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { VirtualRenderScheduler } from "../../tui/test/virtual-render-scheduler";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { SpaceHoldGesture } from "@oh-my-pi/pi-tui/space-hold";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -15,12 +21,16 @@ const ESC = String.fromCharCode(27);
 // candidates below resolve it to the toggle sentinel.
 const EXPANDER_CLICK = `${ESC}[<0;5;3M`;
 
-function makeHarness() {
+beforeAll(async () => {
+	await initTheme();
+});
+
+function makeHarness(composer?: Composer) {
 	const listeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined> = [];
 	const focused: string[] = [];
 	let toggled = 0;
 	const ctx = {
-		ui: {
+		ui: composer?.ui ?? {
 			addInputListener: (fn: (data: string) => { consume?: boolean; data?: string } | undefined) => {
 				listeners.push(fn);
 			},
@@ -30,8 +40,10 @@ function makeHarness() {
 			addStartListener: () => {},
 			getFocused: () => undefined,
 		},
+		openTranscriptScroll: (delta: -1 | 1, mode?: "prompt" | "wheel") =>
+			composer?.openTranscriptScroll(delta, () => {}, mode),
 		handlesBtwBranchKey: () => false,
-		editor: {
+		editor: composer?.editor ?? {
 			getText: () => "",
 			setActionKeys: () => {},
 			setCustomKeyHandler: () => {},
@@ -41,6 +53,8 @@ function makeHarness() {
 		keybindings: KeybindingsManager.inMemory(),
 		settings,
 		dictationSpaceHold: () => undefined,
+		isBashMode: false,
+		isPythonMode: false,
 		session: {
 			extensionRunner: undefined,
 		},
@@ -97,5 +111,61 @@ describe("InputController click routing", () => {
 		h.click();
 		expect(h.toggled()).toBe(1);
 		expect(h.focused).toEqual([]);
+	});
+
+	it("scrolls captured wheel input through retained history and restores click-to-focus at the live tail", async () => {
+		const terminal = new VirtualTerminal(80, 20);
+		const scheduler = new VirtualRenderScheduler();
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: scheduler },
+			preferences: {
+				quiet: true,
+				spellingTypoDetection: false,
+				spellingAutocomplete: "off",
+				spellingAutocorrect: false,
+			},
+		});
+		composer.setHeaderExtras([], [new Text("HISTORY START", 0, 0)]);
+		const transcript = new TranscriptContainer();
+		for (let turn = 1; turn <= 4; turn++) {
+			transcript.addChild(new UserMessageComponent(`prompt ${turn}`));
+			transcript.addChild(new Text(Array.from({ length: 8 }, (_, row) => `answer ${turn}.${row}`).join("\n"), 0, 0));
+		}
+		composer.setRuntimeChildren([transcript, composer.editor]);
+		composer.ui.setInlineMouseTrackingProvider(() => cfgTuiMouse.get(settings));
+		composer.editor.setText("draft preserved");
+		const h = makeHarness(composer);
+		composer.start({ playWelcomeIntro: false });
+		const screen = () => terminal.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+		const press = async (data: string) => {
+			terminal.sendInput(data);
+			await scheduler.settle(terminal);
+		};
+		try {
+			await scheduler.settle(terminal);
+			expect(screen().some(row => row.includes("HISTORY START"))).toBe(false);
+			await press(`${ESC}[<64;5;3M`);
+			const firstStep = screen();
+			await press(`${ESC}[<64;5;3M`);
+			expect(screen()[3]).toBe(firstStep[0]);
+			for (let step = 0; step < 30; step++) await press(`${ESC}[<64;5;3M`);
+			expect(screen().some(row => row.includes("HISTORY START"))).toBe(true);
+			expect(composer.editor.getText()).toBe("draft preserved");
+			for (let step = 0; step < 30 && composer.isTranscriptScrollOpen(); step++) {
+				await press(`${ESC}[<65;5;3M`);
+			}
+			expect(composer.isTranscriptScrollOpen()).toBe(false);
+			expect(screen().some(row => row.includes("HISTORY START"))).toBe(false);
+			await press(`${ESC}[<0;5;${composer.ui.getMutableViewport().top + 3}M`);
+			expect(h.toggled()).toBe(1);
+			expect(composer.editor.getText()).toBe("draft preserved");
+			await press(`${ESC}[<64;5;3M`);
+			await press("x");
+			expect(composer.isTranscriptScrollOpen()).toBe(false);
+			expect(composer.editor.getText()).toBe("draft preservedx");
+		} finally {
+			composer.stop();
+		}
 	});
 });
