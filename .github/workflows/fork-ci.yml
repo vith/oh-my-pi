@@ -63,8 +63,8 @@ jobs:
       - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: cache
-          key: source-arm64-bun142-nightly20260812-${{ needs.prepare.outputs.number || 'integration' }}-${{ needs.prepare.outputs.head }}
-          restore-keys: source-arm64-bun142-nightly20260812-${{ needs.prepare.outputs.number || 'integration' }}-
+          key: source-arm64-bun142-nightly20260812-${{ hashFiles('control/ci/fork-ci.Containerfile', 'control/rust-toolchain.toml') }}-${{ needs.prepare.outputs.number || 'integration' }}-${{ needs.prepare.outputs.head }}
+          restore-keys: source-arm64-bun142-nightly20260812-${{ hashFiles('control/ci/fork-ci.Containerfile', 'control/rust-toolchain.toml') }}-${{ needs.prepare.outputs.number || 'integration' }}-
       - name: Unprivileged retained source gate
         run: |
           sudo chown -R 1000:1000 candidate cache
@@ -72,7 +72,7 @@ jobs:
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: cache
-          key: source-arm64-bun142-nightly20260812-${{ needs.prepare.outputs.number || 'integration' }}-${{ needs.prepare.outputs.head }}
+          key: source-arm64-bun142-nightly20260812-${{ hashFiles('control/ci/fork-ci.Containerfile', 'control/rust-toolchain.toml') }}-${{ needs.prepare.outputs.number || 'integration' }}-${{ needs.prepare.outputs.head }}
   status:
     needs: [prepare, build]
     if: always() && needs.prepare.result == 'success'
