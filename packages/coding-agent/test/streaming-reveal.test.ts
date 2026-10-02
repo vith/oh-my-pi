@@ -101,6 +101,40 @@ describe("streaming reveal", () => {
 		vi.useRealTimers();
 	});
 
+	it("ages the provider activity indicator through redraws and resets it on a stream update", () => {
+		vi.useFakeTimers();
+		const nowSpy = vi.spyOn(performance, "now");
+		let now = 1000;
+		nowSpy.mockImplementation(() => now);
+		const component = new AssistantMessageComponent(undefined, false);
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => false,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+		const message = makeMessage([{ type: "thinking", thinking: "" }]);
+		try {
+			controller.begin(component, message, false);
+			now = 6000;
+			controller.resyncVisibility();
+			const stale = Bun.stripANSI(component.render(120).join("\n"));
+			expect(stale).toContain("last update 5.0s ago");
+			expect(stale).not.toContain("toks/s");
+
+			controller.setTarget(message, false);
+			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 2);
+			expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("last update 0ms ago");
+
+			component.markTranscriptBlockFinalized();
+			expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("last update");
+		} finally {
+			controller.stop();
+			component.dispose();
+			nowSpy.mockRestore();
+		}
+	});
+
 	it("slices at grapheme boundaries without mutating the target message", () => {
 		const familyEmoji = "👨‍👩‍👧‍👦";
 		const target = makeMessage([{ type: "text", text: `${familyEmoji}B` }]);

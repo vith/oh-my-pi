@@ -5,7 +5,7 @@ import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { Markdown, type MarkdownTheme } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AssistantThinkingRenderer } from "./extension-types";
@@ -249,6 +249,8 @@ export class AssistantMessageComponent extends Container {
 	#thinkingDots: Text | undefined;
 	#thinkingDotsTimer: NodeJS.Timeout | undefined;
 	#thinkingDotsFrame = 0;
+	/** Provider-update time, not the time of a reveal tick or repaint. */
+	#streamUpdatedAt: number | undefined;
 	/** Previous cumulative provider token count + timestamp, for deriving this
 	 *  block's instantaneous streaming rate fed into {@link sharedSpeedTracker}.
 	 *  Undefined until the first thinking update of this block. */
@@ -487,28 +489,36 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Whether to render the animated "thinking" pulse in place of the suppressed
-	 * reasoning: only while this block is still streaming (not yet finalized — the
-	 * in-flight message always carries `stopReason: "stop"`, so finalization is the
-	 * only reliable live signal), thinking is hidden, no tool call has started, and
-	 * the active tail block is a thinking block (the model is reasoning right now).
-	 * Once text starts, a tool call streams, or the block is sealed, the pulse ends.
+	 * Show a pulse for hidden or summary-less reasoning, including the empty
+	 * block emitted at thinking_start. Text/tool starts and finalization end it.
+	 * The pulse is an animation, not evidence of incoming tokens; its update age
+	 * distinguishes provider activity from a silent stream.
 	 */
 	#shouldAnimateThinking(message: AssistantMessage): boolean {
-		if (!this.#hideThinkingBlock || this.#transcriptBlockFinalized) return false;
-		let tail: "text" | "thinking" | undefined;
+		if (this.#transcriptBlockFinalized) return false;
+		let tail: ThinkingContentBlock | undefined;
 		for (const content of message.content) {
 			if (content.type === "toolCall") return false;
-			if (content.type === "text" && canonicalizeMessage(content.text)) tail = "text";
-			else if (content.type === "thinking" && canonicalizeMessage(content.thinking)) tail = "thinking";
+			if (content.type === "text") tail = undefined;
+			else if (content.type === "thinking") tail = content;
 		}
-		return tail === "thinking";
+		return (
+			tail !== undefined &&
+			(this.#hideThinkingBlock || !resolveThinkingDisplay(tail, this.#proseOnlyThinking).visible)
+		);
 	}
 
 	#thinkingDotsLabel(): string {
 		const glyph = THINKING_DOTS_FRAMES[this.#thinkingDotsFrame % THINKING_DOTS_FRAMES.length] ?? "…";
 		const coloredGlyph = theme.fg("thinkingText", glyph);
-		const thinkingLabel = theme.fg("muted", " Thinking");
+		const updateAge =
+			this.#streamUpdatedAt === undefined
+				? ""
+				: theme.fg(
+						"dim",
+						` · last update ${formatDuration(Math.max(0, Math.floor((performance.now() - this.#streamUpdatedAt) / 1000)) * 1000)} ago`,
+					);
+		const thinkingLabel = theme.fg("muted", " Thinking") + updateAge;
 		const rate = Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed());
 		// The numeric badge ("<total> · <rate> toks/s") only renders while this block
 		// is genuinely streaming provider tokens. A block that has observed no token
@@ -935,14 +945,15 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#computeShapeKey(message: AssistantMessage): string {
-		const parts: string[] = [`htb:${this.#hideThinkingBlock ? 1 : 0}|pot:${this.#proseOnlyThinking ? 1 : 0}`];
+		const parts: string[] = [
+			`htb:${this.#hideThinkingBlock ? 1 : 0}|pot:${this.#proseOnlyThinking ? 1 : 0}|pulse:${this.#shouldAnimateThinking(message) ? 1 : 0}`,
+		];
 		for (const content of message.content) {
 			if (content.type === "text") {
 				parts.push(canonicalizeMessage(content.text) ? "T1" : "T0");
 			} else if (content.type === "thinking") {
 				if (this.#hideThinkingBlock) {
-					// Match the pulse's empty/nonempty transition without formatting hidden text.
-					parts.push(canonicalizeMessage(content.thinking) ? "KH" : "K0");
+					parts.push("KH");
 				} else {
 					parts.push(resolveThinkingDisplay(content, this.#proseOnlyThinking).visible ? "KV" : "K0");
 				}
@@ -1039,7 +1050,8 @@ export class AssistantMessageComponent extends Container {
 		return true;
 	}
 
-	updateContent(message: AssistantMessage, opts?: { transient?: boolean }): void {
+	updateContent(message: AssistantMessage, opts?: { transient?: boolean; streamUpdatedAt?: number }): void {
+		if (opts?.streamUpdatedAt !== undefined) this.#streamUpdatedAt = opts.streamUpdatedAt;
 		this.#blockVersion++;
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;

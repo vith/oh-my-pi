@@ -185,6 +185,58 @@ describe("AssistantMessageComponent streaming thinking pulse", () => {
 		expect(lines.some(line => line.includes("private reasoning"))).toBe(false);
 	});
 
+	it("shows summary-less reasoning even when thinking text is not hidden", () => {
+		const component = new AssistantMessageComponent(undefined, false);
+		try {
+			component.updateContent(streaming([{ type: "thinking", thinking: "" }]), { transient: true });
+			const plain = Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"));
+			expect(plain).toContain(THINKING_LABEL);
+			expect(plain).not.toContain("toks/s");
+
+			component.updateContent(streaming([{ type: "thinking", thinking: "Readable summary" }]), {
+				transient: true,
+			});
+			const summary = Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"));
+			expect(summary).toContain("Readable summary");
+			expect(summary).not.toContain(THINKING_LABEL);
+
+			component.updateContent(
+				streaming([
+					{ type: "thinking", thinking: "" },
+					{ type: "text", text: "Answer" },
+				]),
+				{ transient: true },
+			);
+			const answer = Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"));
+			expect(answer).toContain("Answer");
+			expect(answer).not.toContain(THINKING_LABEL);
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("shows provider throughput without readable reasoning and clears it at completion", () => {
+		resetThinkingSpeedTracker();
+		const component = new AssistantMessageComponent(undefined, true);
+		const nowSpy = spyOn(performance, "now");
+		let now = 1000;
+		nowSpy.mockImplementation(() => now);
+		try {
+			component.updateContent(streaming([{ type: "thinking", thinking: "" }], 10), { transient: true });
+			now = 2000;
+			component.updateContent(streaming([{ type: "thinking", thinking: "" }], 57), { transient: true });
+			expect(Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"))).toContain("57 · 47.0 toks/s");
+
+			component.markTranscriptBlockFinalized();
+			const settled = Bun.stripANSI(component.render(RENDER_WIDTH).join("\n"));
+			expect(settled).not.toContain(THINKING_LABEL);
+			expect(settled).not.toContain("toks/s");
+		} finally {
+			nowSpy.mockRestore();
+			component.dispose();
+		}
+	});
+
 	it("drops the pulse once visible text starts streaming", () => {
 		const lines = liveLines(
 			streaming([
