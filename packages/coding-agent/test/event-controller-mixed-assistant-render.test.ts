@@ -352,6 +352,23 @@ describe("EventController mixed assistant text/tool rendering", () => {
 			replay();
 			expect(Bun.stripANSI(rebuilt.chatContainer.render(120).join("\n"))).toContain("late-progress");
 
+			// Terminal history is immutable once acknowledged. A running bash
+			// card must remain repaintable under pressure, both live and rebuilt.
+			const pressureUpdate: Extract<AgentSessionEvent, { type: "tool_execution_update" }> = {
+				...late,
+				partialResult: {
+					...late.partialResult,
+					content: [{ type: "text", text: "progress after terminal history pressure" }],
+				},
+			};
+			for (const fixture of [live, rebuilt]) {
+				const history = fixture.chatContainer.peekFinalizedBatch(120, 0);
+				if (history) fixture.chatContainer.acknowledgeFinalizedBatch(history.id);
+				await fixture.controller.handleEvent(pressureUpdate);
+				const viewport = fixture.chatContainer.renderViewport(120, 30, { tick: 0, now: performance.now() });
+				expect(Bun.stripANSI(viewport.join("\n"))).toContain("progress after terminal history pressure");
+			}
+
 			const settled: Extract<AgentSessionEvent, { type: "tool_execution_update" }> = {
 				...late,
 				partialResult: {

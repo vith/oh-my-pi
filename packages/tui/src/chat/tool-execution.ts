@@ -315,8 +315,8 @@ export class ToolExecutionComponent extends Container {
 	#bashPreviewLines: number | (() => number) | undefined;
 	#bashPreviewLineLimit = DEFAULT_TERMINAL_PREVIEW_LINES;
 	#isPartial = true;
-	// A background task whose call already returned; later async job frames are
-	// partial updates, but the block is ready to retire as history.
+	// A background job whose call already returned. Bash stays live until its
+	// terminal result; detached task cards may retire without gating history.
 	#parkedBackground = false;
 	#resultVersion = 0;
 	// Post-finalize mutation counter (see FinalizableBlock.getTranscriptBlockVersion):
@@ -766,16 +766,16 @@ export class ToolExecutionComponent extends Container {
 
 	/**
 	 * Whether this block is ready to retire as immutable history. Partial
-	 * results, including detached background tasks, remain active and mutable
-	 * until they settle. Hidden blocks render no rows and cannot gate history.
+	 * foreground results and background bash remain active until they settle.
+	 * Hidden blocks render no rows and cannot gate history.
 	 */
 	isTranscriptBlockFinalized(): boolean {
 		if (!this.#toolActivityVisible) return true;
 		if (this.#sealed) return true;
 		if (this.#result === undefined) return false;
-		// A parked background task's call already returned; job frames that land
-		// while it is still live keep updating it, but it must not gate history.
-		if (this.#parkedBackground) return true;
+		// Detached task cards may retire, but running bash owns a live output
+		// tail that must not be frozen into immutable terminal history.
+		if (this.#parkedBackground && this.#toolName !== "bash") return true;
 		return !this.#isPartial;
 	}
 
