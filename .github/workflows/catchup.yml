@@ -9,6 +9,9 @@ on:
         type: string
         required: false
 permissions: {}
+defaults:
+  run:
+    shell: bash
 concurrency:
   group: deterministic-catchup
   cancel-in-progress: false
@@ -33,9 +36,14 @@ jobs:
           python3 tools/catchup.py discover --output "$RUNNER_TEMP/catchup" --tag "$REQUESTED_TAG" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ -f "$RUNNER_TEMP/catchup/receipt.json" ]; then echo 'proposal=true' >> "$GITHUB_OUTPUT"; fi
       - name: Observe independently signed package delivery
+        id: delivery
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 tools/catchup.py delivery --output "$RUNNER_TEMP/delivery" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Report failed package evidence without blocking source proposal
+        if: steps.delivery.outcome == 'failure'
+        run: echo 'Package evidence verification failed; source proposal is not package delivery proof. Inspect observer failure; no publication is claimed.' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: steps.discover.outputs.proposal == 'true'
         with:

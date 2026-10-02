@@ -9,6 +9,9 @@ on:
         type: string
         required: false
 permissions: {}
+defaults:
+  run:
+    shell: bash
 concurrency:
   group: source-gate-${{ inputs.pr_number || 'integration' }}
   cancel-in-progress: true
