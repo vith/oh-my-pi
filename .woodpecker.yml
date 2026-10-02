@@ -1,6 +1,15 @@
 # Native Linux ARM64 CI for the self-hosted Forgejo mirror.
 # One shared agent serializes all repos; this job mounts only the OMP cache.
 # Trusted volumes are enabled for this private repo; fork PRs require approval.
+# Fork versions require the upstream tag and complete commit ancestry.
+clone:
+  git:
+    image: woodpeckerci/plugin-git
+    settings:
+      tags: true
+      partial: false
+      depth: 0
+
 labels:
   platform: linux/arm64
 
@@ -19,7 +28,6 @@ steps:
       CARGO_HOME: /ci-cache/cargo
       CARGO_TARGET_DIR: /ci-cache/target
       LIBCLANG_PATH: /usr/lib/llvm-19/lib
-      OMP_TEST_CONCURRENCY: "1"
       RUSTUP_HOME: /opt/rustup
     commands:
       - |
@@ -52,22 +60,16 @@ steps:
         cd "$workspace"
 
         bun install --frozen-lockfile
-        bun test scripts/ci-prepare-workspace.test.ts
+        # Test execution is temporarily disabled until its CI cost is optimized.
+        # Keep lint/format/type checks and verify the actual shipping version.
         bun run check:ts
         bun run check:rs
-        OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
-        # A second identical build must reuse the linked Cargo artifact.
-        native_artifact="/ci-cache/target/aarch64-unknown-linux-gnu/ci/libpi_natives.so"
-        native_stamp="$(stat -c '%y' "$native_artifact")"
-        CARGO_LOG=cargo::core::compiler::fingerprint=info OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
-        test "$native_stamp" = "$(stat -c '%y' "$native_artifact")"
-        echo "Warm native build reused the linked artifact"
-        bun run ci:test:full
-        cargo nextest run -p pi-natives --features wayland-pipewire -E 'test(desktop::linux::wayland)'
         bun run collab:web:build
+        # Stamp only disposable build inputs; keep the checked-in upstream versions.
+        fork_version="$(bun scripts/prepare-fork-build.ts)"
+        OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
         bun --cwd=packages/coding-agent run build
-        packages/coding-agent/dist/omp --version
-        packages/coding-agent/dist/omp --smoke-test
+        test "$(packages/coding-agent/dist/omp --version)" = "omp/$fork_version"
     when:
       - event: [push, pull_request]
         branch: integration

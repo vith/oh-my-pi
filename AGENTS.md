@@ -35,7 +35,8 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 When authorized to create or edit a contributor-submitted PR, follow the checklist below. RoboOMP-managed PRs follow their dedicated workflow and enforced body format in `python/robomp/src/prompts/system_append.md` instead.
 
 - MUST read `CONTRIBUTING.md` and `.github/PULL_REQUEST_TEMPLATE.md` first. Preserve the template sections and checklist, including when shortening an existing description.
-- MUST obtain at least one sentence written by the contributor in their own words explaining what changed and why, as required by `CONTRIBUTING.md`. If it is missing, ask the contributor; NEVER generate a substitute. Preserve that sentence during edits.
+- Internal fork PRs (including `git.n3t.work/vith/oh-my-pi`) are maintainer integration work, not upstream contributions. The assistant MUST write their descriptions from verified changes and evidence; NEVER ask the user to supply a human-written sentence or claim assistant prose is user-authored.
+- ONLY for PRs submitted to upstream `can1357/oh-my-pi`: obtain the contributor-written sentence required by `CONTRIBUTING.md`. If missing, ask the contributor; NEVER generate a substitute. Preserve that sentence during edits.
 - For user-facing changes, MUST follow the [Changelog](#changelog) attribution rules. Internal issue fixes keep their issue links. For external contributions, add the PR link and contributor credit after GitHub assigns the number, then push the entry before marking the changelog checklist item complete.
 - MUST read back the published PR description after creating or editing it. Check only verified checklist items; explain skipped or inapplicable checks in `Testing`.
 

@@ -1,6 +1,6 @@
 ## What
 
-<!-- Brief description of the change. Include at least one sentence in your own words explaining what changed and why, as required by CONTRIBUTING.md. -->
+<!-- Brief description of the change. For upstream submissions only, include the contributor-written sentence required by CONTRIBUTING.md. For internal fork PRs, the assistant writes the description from verified changes; do not ask the user for a sentence. -->
 
 ## Why
 

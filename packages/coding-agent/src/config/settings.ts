@@ -22,6 +22,7 @@ import {
 	getProjectDir,
 	getProjectAgentDir,
 	isEnoent,
+	isRecord,
 	logger,
 	MAIN_CONFIG_FILENAMES,
 	procmgr,
@@ -37,6 +38,7 @@ import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import { replaceFileAtomically } from "../utils/atomic-file";
+import { isRegisteredSearchEngine } from "../web/search/provider";
 import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import {
 	type AnySetting,
@@ -363,10 +365,6 @@ function stringArrayFromUnknown(value: unknown): string[] {
 	if (typeof value === "string") return [value];
 	if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string");
 	return [];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 /**
@@ -1761,6 +1759,36 @@ export class Settings {
 	}
 
 	/**
+	 * Raw `modelPresets` entry for `name` from the highest-precedence layer that
+	 * defines it (runtime override → config overlay → project → global), whole —
+	 * same-name entries are NOT deep-merged across layers. A `null` entry on a
+	 * tombstoning layer (runtime, overlay) hides the preset; a `null` anywhere
+	 * else counts as unset. Falls back to the parent chain like the model-role
+	 * layer helpers.
+	 */
+	getOwnedModelPreset(
+		name: string,
+	): { entry: unknown; source: "runtime" | "overlay" | "project" | "global" } | undefined {
+		const layers = [
+			{ layer: this.#overrides, source: "runtime", tombstone: true },
+			{ layer: this.#configOverlay, source: "overlay", tombstone: true },
+			{ layer: projectLayerForMerge(this.#project), source: "project", tombstone: false },
+			{ layer: this.#global, source: "global", tombstone: false },
+		] as const;
+		for (const { layer, source, tombstone } of layers) {
+			const presets = getByPath(layer, ["modelPresets"]);
+			if (!isRecord(presets) || !Object.hasOwn(presets, name)) continue;
+			const entry = presets[name];
+			if (entry === null || entry === undefined) {
+				if (tombstone) return undefined;
+				continue;
+			}
+			return { entry, source };
+		}
+		return this.#parent?.getOwnedModelPreset(name);
+	}
+
+	/**
 	 * Get all model roles (helper for modelRoles record).
 	 */
 	getModelRoles(): ReadOnlyDict<string> {
@@ -3143,18 +3171,13 @@ export class Settings {
 					case "auto":
 						return [];
 					default:
-						return MODEL_PRIO.web.includes(`web/${provider}`) ? [`web/${provider}`] : [];
+						return isRegisteredSearchEngine(provider) ? [`web/${provider}`] : [];
 				}
 			};
 			const geminiModel =
 				typeof legacyGeminiModel === "string" && legacyGeminiModel.trim()
 					? legacyGeminiModel.trim()
 					: "gemini-2.5-flash";
-			const webDefaults = MODEL_PRIO.web.flatMap(selector => {
-				if (selector === "google/gemini-2.5-flash") return geminiSelectors(geminiModel);
-				if (selector === "google-antigravity/gemini-2.5-flash") return [];
-				return [selector];
-			});
 			const excludedWebProviders = new Set(
 				Array.isArray(legacyWebExclude)
 					? legacyWebExclude.filter(
@@ -3183,14 +3206,11 @@ export class Settings {
 			const orderedWebSelectors = orderedWebProviders.flatMap(value =>
 				typeof value === "string" ? webSelectors(value, geminiModel) : [],
 			);
-			const shouldMigrateWeb =
-				orderedWebSelectors.length > 0 ||
-				excludedWebProviders.size > 0 ||
-				(typeof legacyGeminiModel === "string" && legacyGeminiModel.trim().length > 0);
-			if (shouldMigrateWeb) {
+			// The Gemini model only shapes an ordered `gemini` entry; the defaults hold no chat models.
+			if (orderedWebSelectors.length > 0 || excludedWebProviders.size > 0) {
 				setRoleChain(
 					"web",
-					dedupe([...orderedWebSelectors, ...webDefaults]).filter(selector => !isWebSelectorExcluded(selector)),
+					dedupe([...orderedWebSelectors, ...MODEL_PRIO.web]).filter(selector => !isWebSelectorExcluded(selector)),
 				);
 			}
 
@@ -3199,17 +3219,17 @@ export class Settings {
 			const imageSelector = (provider: string): string | undefined => {
 				switch (provider) {
 					case "openai":
-						return "openai/gpt-image-1";
+						return "openai/gpt-image-2";
 					case "openai-codex":
-						return "openai-codex/gpt-image-1";
+						return "openai-codex/gpt-image-2";
 					case "antigravity":
 						return "google-antigravity/gemini-3-pro-image";
 					case "xai":
 						return "xai/grok-imagine-image";
 					case "openrouter":
-						return "openrouter/google/gemini-3-pro-image-preview";
+						return "openrouter/google/gemini-3-pro-image";
 					case "gemini":
-						return "google/gemini-3-pro-image-preview";
+						return "google/gemini-3-pro-image";
 					case "deepinfra":
 						return "deepinfra/black-forest-labs/FLUX-2-pro";
 					default:

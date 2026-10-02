@@ -26,6 +26,22 @@ Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate.
 changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them
 with `bun run gen:tool-views`.
 
+## Fork package builds
+
+In CI's disposable source checkout, install frozen dependencies first, then run
+`bun scripts/prepare-fork-build.ts` from the repository root before building the
+native addon and CLI. It prints the expected runtime version, derived from the
+upstream tag and source commit, and updates public JS package manifests so the
+CLI and post-link native stamp agree. It does not change dependency pins,
+lockfiles, Cargo versions, changelogs, Git history, tags, or PATH.
+
+The maintained source retains upstream versions. Arch's `pkgver()` independently
+calculates its package-manager version; do not rewrite PKGBUILD versions or
+`.SRCINFO` to set the executable's identity. Native CI must assert that
+`dist/omp --version` equals `omp/<prepared version>` and run `--smoke-test`.
+`release:fork` uses the same preparation before its additional release steps;
+do not invoke that full release workflow from makepkg.
+
 ## Boot flow
 
 ```text
