@@ -53,7 +53,7 @@ app.history.search: []
 
 ## Navigate conversation turns
 
-Press `Ctrl+Up` or `Ctrl+Down` to enter transcript scroll mode and hop between user prompts. The composer stays pinned at the bottom. Page keys and the mouse wheel scroll within the transcript; `Escape` returns to the live tail. Typing also returns to the live composer and inserts the typed text without submitting it.
+Press `Ctrl+Up` or `Ctrl+Down` to enter transcript scroll mode and hop between user prompts. With `tui.mouse` enabled, wheel-up also enters this view, moving by rows rather than jumping between prompts. The composer stays pinned at the bottom. Page keys and the mouse wheel scroll within the transcript; wheel-down to the live tail or `Escape` returns to the live screen. Typing also returns to the live composer and inserts the typed text without submitting it.
 
 Use `/recap` for an on-demand summary of the conversation, even when automatic idle recaps are disabled.
 

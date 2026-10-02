@@ -502,8 +502,8 @@ export interface InteractiveModeContext {
 	showHookConfirm(title: string, message: string): Promise<boolean>;
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: AgentHubOpenOptions): void;
-	/** Scroll the conversation one prompt hop from the tail. */
-	openTranscriptScroll(delta: -1 | 1): void;
+	/** Scroll the conversation one prompt hop or wheel step from the tail. */
+	openTranscriptScroll(delta: -1 | 1, mode?: "prompt" | "wheel"): void;
 	/** Run a manual recap of the active session. */
 	handleRecapCommand(): Promise<void>;
 	resetObserverRegistry(): void;
