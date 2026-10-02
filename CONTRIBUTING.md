@@ -43,7 +43,14 @@ ordinary merge retains both pinned parents; conflicts create a draft from the
 exact upstream commit with actual conflict paths for human resolution. A fresh
 trusted writer validates the bounded receipt, bundle, authentic tag and parent
 identities before publishing only the intended tag/branch and explicitly
-dispatching CI. Existing migrated/human-edited branches are never overwritten;
+dispatching CI. Stable scheduled discovery uses published non-draft,
+non-prerelease upstream releases, not arbitrary similarly named tags. Exact
+bot-owned candidates have bounded bot-authored ownership receipts; missing,
+failed or stale-base statuses are dispatched again. An unedited clean bot
+candidate can refresh for a changed integration base only with an exact
+force-with-lease and verified original parents. New heads invalidate old
+validation/approval. Refresh conflicts become human-required drafts.
+Existing migrated/human-edited branches are never overwritten;
 one blocked active catch-up stays visible. Closed unmerged proposals require
 explicit manual reconsideration.
 

@@ -11,8 +11,11 @@ def api(path, data=None):
     request = urllib.request.Request('https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY'] + path,
         data=None if data is None else json.dumps(data).encode(),
         headers={'Authorization': 'Bearer ' + os.environ['GITHUB_TOKEN'], 'Accept': 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28'})
-    with urllib.request.urlopen(request) as response:
-        return json.load(response)
+    with urllib.request.urlopen(request, timeout=60) as response:
+        content = response.read(8 * 1024 * 1024 + 1)
+        if len(content) > 8 * 1024 * 1024:
+            raise ValueError('API response exceeds bound')
+        return json.loads(content)
 
 
 def identity(number):
@@ -45,14 +48,14 @@ def main():
                 output.write(f'{key}={value}\n')
         if args.number:
             for context in ['fork-ci', 'source-review']:
-                api('/statuses/' + pinned['head'], {'state': 'pending', 'context': context, 'description': 'Pinned current head/base; awaiting validation and human approval'})
+                api('/statuses/' + pinned['head'], {'state': 'pending', 'context': context, 'description': 'Pinned integration base ' + pinned['base']})
     else:
         if pinned['head'] != args.head or pinned['base'] != args.base:
             raise ValueError('head/base changed; old evidence unusable')
         if not args.number:
             return
         api('/statuses/' + args.head, {'state': args.state, 'context': args.context,
-            'description': 'Exact head and current integration base verified',
+            'description': 'Pinned integration base ' + pinned['base'],
             'target_url': os.environ['GITHUB_SERVER_URL'] + '/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID']})
 
 
