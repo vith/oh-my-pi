@@ -424,13 +424,13 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					config.showHeader === false
 						? undefined
 						: renderStatusLine(
-							{
-								icon: options.spinnerFrame !== undefined ? "running" : "pending",
-								spinnerFrame: options.spinnerFrame,
-								title: config.resolveTitle(args, options),
-							},
-							uiTheme,
-						);
+								{
+									icon: options.spinnerFrame !== undefined ? "running" : "pending",
+									spinnerFrame: options.spinnerFrame,
+									title: config.resolveTitle(args, options),
+								},
+								uiTheme,
+							);
 				return {
 					header,
 					phase: options.spinnerFrame !== undefined ? "running" : "pending",
@@ -460,17 +460,17 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				config.showHeader === false
 					? undefined
 					: renderStatusLine(
-						success
-							? {
-								iconOverride: uiTheme.styledSymbol("tool.bash", "accent"),
-								title: config.resolveTitle(args, options),
-							}
-							: {
-								icon: isPartial ? "pending" : isTimeout ? "warning" : "error",
-								title: config.resolveTitle(args, options),
-							},
-						uiTheme,
-					);
+							success
+								? {
+										iconOverride: uiTheme.styledSymbol("tool.bash", "accent"),
+										title: config.resolveTitle(args, options),
+									}
+								: {
+										icon: isPartial ? "pending" : isTimeout ? "warning" : "error",
+										title: config.resolveTitle(args, options),
+									},
+							uiTheme,
+						);
 			// Per-instance cache for the expensive inner lines computation. Mirrors
 			// the eval-renderer pattern (`eval-render.ts:709-752`): without this,
 			// every TUI repaint (one per keystroke when a long transcript is on
@@ -534,9 +534,9 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					const timeoutLine =
 						statsParts.length > 0
 							? uiTheme.fg(
-								"dim",
-								`${uiTheme.format.bracketLeft}${statsParts.join(" | ")}${uiTheme.format.bracketRight}`,
-							)
+									"dim",
+									`${uiTheme.format.bracketLeft}${statsParts.join(" | ")}${uiTheme.format.bracketRight}`,
+								)
 							: undefined;
 					let warningLine: string | undefined;
 					if (details?.meta?.artifactError || (details?.meta?.truncation && !showingFullOutput)) {
@@ -642,7 +642,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			const meta = details?.meta;
 			const body: NativeChild[] = compact([
 				output.trim().length > 0 &&
-				keyed(ansi(output, { follow: isPartial, role: "omp.tool.bash.output" }), "output"),
+					keyed(ansi(output, { follow: isPartial, role: "omp.tool.bash.output" }), "output"),
 				footnoteText(shellFootParts(details, stripped.artifactId), {
 					...meta,
 					truncation: showingFullOutput ? undefined : meta?.truncation,
