@@ -32,6 +32,7 @@ describe("ModelRegistry runtime discovery", () => {
 	let originalOllamaHost: string | undefined;
 	let originalOllamaContextLength: string | undefined;
 	let originalAnthropicApiKey: string | undefined;
+	let originalLlamaCppBaseUrl: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -43,6 +44,9 @@ describe("ModelRegistry runtime discovery", () => {
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
 		delete Bun.env.ANTHROPIC_API_KEY;
+		// The developer's shell or ~/.omp/agent/.env must not redirect llama.cpp discovery probes.
+		originalLlamaCppBaseUrl = Bun.env.LLAMA_CPP_BASE_URL;
+		delete Bun.env.LLAMA_CPP_BASE_URL;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -74,6 +78,11 @@ describe("ModelRegistry runtime discovery", () => {
 			delete Bun.env.ANTHROPIC_API_KEY;
 		} else {
 			Bun.env.ANTHROPIC_API_KEY = originalAnthropicApiKey;
+		}
+		if (originalLlamaCppBaseUrl === undefined) {
+			delete Bun.env.LLAMA_CPP_BASE_URL;
+		} else {
+			Bun.env.LLAMA_CPP_BASE_URL = originalLlamaCppBaseUrl;
 		}
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
@@ -300,6 +309,31 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(newModelListCalls).toBe(1);
 		expect(registry.find("gateway", "new-model")).toBeDefined();
 		expect(registry.find("gateway", "old-model")).toBeUndefined();
+	});
+
+	test("refreshIfStale rebuilds only after models config changes on disk", async () => {
+		const gateway = (ids: string[]) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				auth: "none",
+				models: ids.map(id => ({ id, reasoning: false, input: ["text"] })),
+			},
+		});
+		writeRawModelsJson(gateway(["first-model"]));
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+		expect(await registry.refreshIfStale()).toBe(false);
+
+		const previousMtime = fs.statSync(modelsJsonPath).mtimeMs;
+		writeRawModelsJson(gateway(["first-model", "added-model"]));
+		const changedTime = new Date(previousMtime + 1_000);
+		fs.utimesSync(modelsJsonPath, changedTime, changedTime);
+
+		expect(registry.find("gateway", "added-model")).toBeUndefined();
+		expect(await registry.refreshIfStale()).toBe(true);
+		expect(registry.find("gateway", "added-model")).toBeDefined();
+		expect(await registry.refreshIfStale()).toBe(false);
 	});
 
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {

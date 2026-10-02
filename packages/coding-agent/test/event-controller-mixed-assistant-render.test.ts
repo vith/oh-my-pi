@@ -288,6 +288,108 @@ describe("EventController mixed assistant text/tool rendering", () => {
 		expect(toolCall.name).toBe("xd://github");
 	});
 
+	it("keeps returned background bash cards live across transcript rebuilds and settles their failed exit", async () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "background-bash-card",
+			name: "bash",
+			arguments: { command: "sleep 1" },
+		};
+		const result = {
+			content: [{ type: "text" as const, text: "background-start" }],
+			details: { async: { state: "running", jobId: "bg_1", type: "bash" }, startTime: Date.now() },
+		};
+		const late: Extract<AgentSessionEvent, { type: "tool_execution_update" }> = {
+			type: "tool_execution_update",
+			toolCallId: toolCall.id,
+			toolName: "bash",
+			args: toolCall.arguments,
+			partialResult: {
+				content: [{ type: "text", text: "late-progress\nstill-running" }],
+				details: result.details,
+			},
+		};
+		const live = createFixture();
+		const rebuilt = createFixture();
+		try {
+			await live.controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId: toolCall.id,
+				toolName: "bash",
+				args: toolCall.arguments,
+			});
+			await live.controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: toolCall.id,
+				toolName: "bash",
+				result,
+				isError: false,
+			});
+			await live.controller.handleEvent(late);
+			expect(Bun.stripANSI(live.chatContainer.render(120).join("\n"))).toContain("late-progress");
+
+			rebuilt.ctx.eventController = rebuilt.controller;
+			rebuilt.ctx.session.activeToolExecutionUpdates = () => [late];
+			const helpers = new UiHelpers(rebuilt.ctx);
+			rebuilt.ctx.addMessageToChat = (message, options) => helpers.addMessageToChat(message, options);
+			const replay = () =>
+				helpers.renderSessionContext({
+					messages: [
+						assistantMessage([toolCall]),
+						{
+							role: "toolResult",
+							toolCallId: toolCall.id,
+							toolName: "bash",
+							...result,
+							isError: false,
+							timestamp: 2,
+						},
+					],
+					models: {},
+					injectedTtsrRules: [],
+					mode: "none",
+				});
+			replay();
+			expect(Bun.stripANSI(rebuilt.chatContainer.render(120).join("\n"))).toContain("late-progress");
+
+			// Terminal history is immutable once acknowledged. A running bash
+			// card must remain repaintable under pressure, both live and rebuilt.
+			const pressureUpdate: Extract<AgentSessionEvent, { type: "tool_execution_update" }> = {
+				...late,
+				partialResult: {
+					...late.partialResult,
+					content: [{ type: "text", text: "progress after terminal history pressure" }],
+				},
+			};
+			for (const fixture of [live, rebuilt]) {
+				const history = fixture.chatContainer.peekFinalizedBatch(120, 0);
+				if (history) fixture.chatContainer.acknowledgeFinalizedBatch(history.id);
+				await fixture.controller.handleEvent(pressureUpdate);
+				const viewport = fixture.chatContainer.renderViewport(120, 30, { tick: 0, now: performance.now() });
+				expect(Bun.stripANSI(viewport.join("\n"))).toContain("progress after terminal history pressure");
+			}
+
+			const settled: Extract<AgentSessionEvent, { type: "tool_execution_update" }> = {
+				...late,
+				partialResult: {
+					content: [{ type: "text", text: "terminal-output\nCommand exited with code 3" }],
+					details: { async: { state: "failed", jobId: "bg_1", type: "bash" }, exitCode: 3 },
+				},
+			};
+			await rebuilt.controller.handleEvent(settled);
+			expect(Bun.stripANSI(rebuilt.chatContainer.render(120).join("\n"))).toContain("terminal-output");
+			rebuilt.ctx.session.activeToolExecutionUpdates = () => [settled];
+			replay();
+			const final = Bun.stripANSI(rebuilt.chatContainer.render(120).join("\n"));
+			expect(final).toContain("terminal-output");
+			expect(final).toContain("Exit: 3");
+			expect(final).not.toContain("Backgrounded:");
+		} finally {
+			live.chatContainer.dispose();
+			rebuilt.chatContainer.dispose();
+		}
+	}, 30_000);
+
 	it("keeps assistant text streaming while hiding bash failures and grouped read activity", async () => {
 		const { controller, chatContainer } = createFixture(true);
 		const bashCall: ToolCall = {

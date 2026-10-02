@@ -10,7 +10,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Loader, Markdown, type OverlayHandle, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
@@ -35,13 +35,16 @@ import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
+import { JobOutputOverlay } from "@oh-my-pi/pi-tui/overlays/job-output-overlay";
 import { moveDirectorySource } from "../move-directory-source";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { ContextUsageView } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { JobsPanel } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
-import { buildHotkeysMarkdown } from "@oh-my-pi/pi-tui/hotkeys-markdown";
+import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
+import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
@@ -460,7 +463,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.showSessionInfo(info);
+		this.ctx.showSessionInfo(info, this.ctx.session.getContextUsage());
 	}
 
 	static readonly #advisorStatusGlyph: Record<string, string> = {
@@ -596,10 +599,74 @@ export class CommandController {
 		this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
 	}
 
-	async handleJobsCommand(): Promise<void> {
-		const snapshot = this.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
+	async handleJobsCommand(args = ""): Promise<void> {
+		const parts = args.trim().split(/\s+/).filter(Boolean);
+		if (parts.length > 0 && (parts[0] !== "follow" || parts.length > 2)) {
+			this.ctx.showWarning("Usage: /jobs [follow <job-id>]");
+			return;
+		}
+		const session = parts[0] === "follow" ? this.ctx.viewSession : this.ctx.session;
+		const snapshot = session.getAsyncJobSnapshot({
+			recentLimit: parts[0] === "follow" ? 100 : 5,
+			includeOutput: parts[0] === "follow",
+		});
 		if (!snapshot) {
 			this.ctx.showWarning("Async background jobs are unavailable in this session.");
+			return;
+		}
+
+		if (parts[0] === "follow") {
+			const candidates = snapshot.running.filter(job => job.type === "bash");
+			const jobId = parts[1] ?? (candidates.length === 1 ? candidates[0].id : undefined);
+			if (!jobId) {
+				this.ctx.showWarning(
+					`Usage: /jobs follow <job-id>. Running bash jobs: ${candidates.map(job => job.id).join(", ") || "none"}.`,
+				);
+				return;
+			}
+			const job =
+				snapshot.running.find(item => item.id === jobId) ?? snapshot.recent.find(item => item.id === jobId);
+			if (!job) {
+				this.ctx.showWarning(
+					`Job ${sanitizeText(jobId)} is not available in the viewed session. Use /jobs to list jobs.`,
+				);
+				return;
+			}
+			if (job.type !== "bash") {
+				this.ctx.showWarning(
+					`Job ${sanitizeText(jobId)} is ${sanitizeText(job.type)}, not bash. Only bash output can be followed.`,
+				);
+				return;
+			}
+			const sessionId = session.sessionId;
+			const pane = new JobOutputOverlay({
+				tui: this.ctx.ui,
+				job,
+				observe: () => {
+					if (this.ctx.viewSession !== session || session.sessionId !== sessionId || session.isDisposed) {
+						return { state: "session-changed" };
+					}
+					const current = session.getAsyncJobSnapshot({ recentLimit: 100, includeOutput: true });
+					if (!current) return { state: "unavailable" };
+					return {
+						state: "available",
+						job:
+							current.running.find(item => item.id === jobId) ?? current.recent.find(item => item.id === jobId),
+					};
+				},
+				onClose: () => {
+					pane.dispose();
+					overlay.hide();
+					this.ctx.ui.requestRender();
+				},
+			});
+			let overlay: OverlayHandle;
+			try {
+				overlay = this.ctx.ui.showOverlay(pane, { width: "100%", maxHeight: "100%", margin: 0, fullscreen: true });
+			} catch (error) {
+				pane.dispose();
+				throw error;
+			}
 			return;
 		}
 
@@ -610,7 +677,7 @@ export class CommandController {
 
 		if (snapshot.running.length === 0 && snapshot.recent.length === 0) {
 			info += `\n${theme.fg("dim", "No async jobs yet.")}\n`;
-			this.ctx.presentCommandOutput([new Spacer(1), new Text(info, 1, 0)]);
+			this.ctx.presentCommandOutput(new JobsPanel(snapshot, now, [new Spacer(1), new Text(info, 1, 0)]));
 			return;
 		}
 
@@ -630,7 +697,7 @@ export class CommandController {
 			}
 		}
 
-		this.ctx.presentCommandOutput([new Spacer(1), new Text(info.trimEnd(), 1, 0)]);
+		this.ctx.presentCommandOutput(new JobsPanel(snapshot, now, [new Spacer(1), new Text(info.trimEnd(), 1, 0)]));
 	}
 
 	async handleUsageCommand(reports?: UsageReport[] | null): Promise<void> {
@@ -687,8 +754,20 @@ export class CommandController {
 	}
 
 	handleHotkeysCommand(): void {
-		const hotkeys = buildHotkeysMarkdown({ keybindings: this.ctx.keybindings });
-		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", hotkeys);
+		const bindings = { keybindings: this.ctx.keybindings };
+		if (isNativeRendering()) {
+			// A native terminal gets a dismissable sheet with keycaps instead of a transcript table.
+			const sheet = new HotkeysSheetComponent(bindings, () => {
+				handle.hide();
+				this.ctx.ui.setFocus(this.ctx.editorContainer.children[0] ?? this.ctx.editor);
+				this.ctx.ui.requestRender();
+			});
+			const handle = this.ctx.ui.showOverlay(sheet, { anchor: "center", width: "90%", maxHeight: "90%" });
+			this.ctx.ui.setFocus(sheet);
+			this.ctx.ui.requestRender();
+			return;
+		}
+		showMarkdownPanel(this.ctx, "Keyboard Shortcuts", buildHotkeysMarkdown(bindings));
 	}
 
 	handleToolsCommand(): void {
@@ -705,14 +784,7 @@ export class CommandController {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		const output = renderContextUsage(breakdown, theme);
-		const block = new TranscriptBlock();
-		block.addChild(new DynamicBorder());
-		block.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));
-		block.addChild(new Spacer(1));
-		block.addChild(new Text(output, 1, 0));
-		block.addChild(new DynamicBorder());
-		this.ctx.presentCommandOutput(block);
+		this.ctx.presentCommandOutput(new ContextUsageView(breakdown, theme));
 	}
 
 	async handleMemoryCommand(text: string): Promise<void> {
@@ -1611,6 +1683,16 @@ export class CommandController {
 			text => theme.fg("muted", text),
 			label,
 			getSymbolTheme().spinnerFrames,
+		);
+		const compactionStartMs = Date.now();
+		compactingLoader.setWorkingRow(
+			() => ({
+				label: isAuto ? "Auto-compacting context…" : "Compacting context…",
+				startedAt: compactionStartMs,
+				variant: { kind: "compaction" },
+				interruptKey: this.ctx.maintenanceInterruptKey(),
+			}),
+			() => this.ctx.interruptFromPointer(),
 		);
 		this.ctx.statusContainer.addChild(compactingLoader);
 		this.ctx.ui.requestRender();

@@ -12,8 +12,8 @@ import {
 	getAgentDir,
 	setAgentDir,
 	setProfile,
-	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
+import { VERSION } from "@oh-my-pi/pi-utils/version";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { runCli } from "../src/cli";
 import * as profileAliasCli from "../src/cli/profile-alias";

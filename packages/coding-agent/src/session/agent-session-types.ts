@@ -75,7 +75,12 @@ export type CommandMetadataChangedListener = () => void | Promise<void>;
 export type AsyncJobSnapshotItem = Pick<
 	AsyncJob,
 	"id" | "type" | "status" | "label" | "startTime" | "endTime" | "agentId"
->;
+> & {
+	/** Bounded bash capture, included only when explicitly requested. */
+	output?: string;
+	/** Epoch timestamp of the most recent actual output chunk. */
+	lastOutputAt?: number;
+};
 
 /** Snapshot of running, recent, and pending-delivery asynchronous jobs. */
 export interface AsyncJobSnapshot {
@@ -384,6 +389,17 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 	/** Delegator's open-endedness description (task tool `solutionSpace`); replaces the prompt as `auto` thinking classification input. */
 	solutionSpace?: string;
+	/**
+	 * Called synchronously once this prompt is admitted: idle, at the start of
+	 * #promptWithMessage's own turn setup (before preflight, image
+	 * normalization, or provider dispatch); while streaming, once the message
+	 * is pushed onto its steer/follow-up/aside queue (after image
+	 * normalization and vision-description preprocessing for that prompt); or
+	 * is routed to an extension command, before its handler runs. Admission is
+	 * not proof that a model call will occur. A prompt dropped, cancelled, or
+	 * failed before admission still only settles through the returned promise.
+	 */
+	onPromptAdmitted?: () => void;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled

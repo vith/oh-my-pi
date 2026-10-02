@@ -22,7 +22,6 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
@@ -32,13 +31,6 @@ function taskResult(asyncState: "running" | "completed" | "failed" | undefined, 
 		results: [],
 		totalDurationMs: 5,
 		...(asyncState ? { async: { state: asyncState, jobId: "Job1", type: "task" as const } } : {}),
-	};
-	return { content: [{ type: "text" as const, text }], details };
-}
-
-function bashResult(text: string) {
-	const details: BashToolDetails = {
-		async: { state: "running", jobId: "bash-1", type: "bash" },
 	};
 	return { content: [{ type: "text" as const, text }], details };
 }
@@ -210,29 +202,6 @@ describe("EventController async update finalization", () => {
 			});
 		}
 	}
-
-	it("finalizes a backgrounded Bash block without tracking later job updates", async () => {
-		const { controller, pendingTools } = createFixture();
-		await controller.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "tc-bash",
-			toolName: "bash",
-			args: { command: "sleep 30" },
-		});
-		const component = pendingTools.get("tc-bash")!;
-		sealed.push(component);
-
-		await controller.handleEvent({
-			type: "tool_execution_end",
-			toolCallId: "tc-bash",
-			toolName: "bash",
-			result: bashResult(formatBackgroundNotice("bash-1")),
-			isError: false,
-		});
-
-		expect(pendingTools.has("tc-bash")).toBe(false);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
-	});
 
 	it("settles an early wait result while another reported job remains running", async () => {
 		const { controller, pendingTools, chatContainer } = createFixture();
