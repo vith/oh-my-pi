@@ -10,8 +10,6 @@ import * as path from "node:path";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui";
-import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	InteractiveMode,
 	layoutPinnedHud,
@@ -370,15 +368,6 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("BackgroundSpawn: detached work");
 		expect(out).toContain("SyncSpawn: inline task work");
 		expect(out).toContain("EvalSpawn: eval cell work");
-		const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, 120), [
-			"SyncSpawn",
-			"EvalSpawn",
-			"BackgroundSpawn",
-		]);
-		hud.render(120);
-		expect(hud.getClickAgentAtRow(2)).toBe("SyncSpawn");
-		expect(hud.getClickAgentAtRow(3)).toBe("EvalSpawn");
-		expect(hud.getClickAgentAtRow(4)).toBe("BackgroundSpawn");
 	});
 	it("threads the detached flag from lifecycle and progress payloads", () => {
 		const eventBus = new EventBus();
@@ -702,10 +691,7 @@ describe("subagent HUD lines", () => {
 				}),
 			];
 			for (const columns of [60, 120]) {
-				const hud = new SubagentHudComponent(
-					renderSubagentHudLines(sessions, columns, false, true),
-					sessions.map(session => session.id),
-				);
+				const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, columns, false, true));
 				const rows = hud.render(columns).map(row => Bun.stripANSI(row));
 				for (const row of rows) {
 					expect(Bun.stringWidth(row)).toBeLessThanOrEqual(columns);
@@ -716,24 +702,6 @@ describe("subagent HUD lines", () => {
 					expect(row).toMatch(/bash|read/);
 				}
 			}
-		});
-
-		it("routes clicks on a preview row to its agent and keeps later rows and the expander aligned", () => {
-			const sessions = ["Alpha", "Beta", "Gamma", "Delta"].map(id =>
-				makeSession({ id, progress: makeProgress({ id, currentTool: "read", currentToolArgs: `${id}.ts` }) }),
-			);
-			const layout = layoutPinnedHud(sessions.length, false);
-			const hud = new SubagentHudComponent(
-				renderSubagentHudLines(sessions, 120, false, true),
-				sessions.map(session => session.id),
-				layout.toggleRow,
-			);
-			const rows = hud.render(120).map(row => Bun.stripANSI(row));
-			const rowOf = (text: string) => rows.findIndex(row => row.includes(text));
-			expect(hud.getClickAgentAtRow(rowOf("Alpha.ts"))).toBe("Alpha");
-			expect(hud.getClickAgentAtRow(rowOf("Beta"))).toBe("Beta");
-			expect(hud.getClickAgentAtRow(rowOf("Gamma.ts"))).toBe("Gamma");
-			expect(hud.getClickAgentAtRow(rowOf("more — expand"))).toBe(PINNED_HUD_TOGGLE_ID);
 		});
 
 		it("labels a call with its own intent, never an earlier call's", () => {
@@ -781,9 +749,7 @@ describe("subagent HUD lines", () => {
 				makeSession({ id: `Worker${"W".repeat(80)}`, description: "Every available column ".repeat(10) }),
 			];
 			for (const columns of [40, 60]) {
-				const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, columns, false, true), [
-					sessions[0]!.id,
-				]);
+				const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, columns, false, true));
 				// No wrapping: exactly the blank row, the header and one agent row.
 				expect(hud.render(columns)).toHaveLength(3);
 			}
@@ -801,86 +767,6 @@ describe("subagent HUD lines", () => {
 				nextSubagentPreviewTickMs([thinking, midCall("Fresh", now - 4_500), midCall("Long", now - 30_000)], now),
 			).toBe(501);
 		});
-	});
-});
-
-describe("SubagentHudComponent click rows", () => {
-	beforeAll(async () => {
-		await initTheme();
-	});
-
-	it("maps item rows to session ids and chrome rows nowhere", () => {
-		const lines = renderSubagentHudLines([makeSession({ id: "Alpha" }), makeSession({ id: "Beta" })], 120);
-		const hud = new SubagentHudComponent(lines, ["Alpha", "Beta"]);
-
-		const rendered = hud.render(120);
-		expect(rendered).toHaveLength(lines.length);
-		expect(Bun.stripANSI(rendered[2] ?? "")).toContain("Alpha");
-		expect(Bun.stripANSI(rendered[3] ?? "")).toContain("Beta");
-
-		expect(hud.getClickAgentAtRow(0)).toBeUndefined();
-		expect(hud.getClickAgentAtRow(1)).toBeUndefined();
-		expect(hud.getClickAgentAtRow(2)).toBe("Alpha");
-		expect(hud.getClickAgentAtRow(3)).toBe("Beta");
-		expect(hud.getClickAgentAtRow(4)).toBeUndefined();
-		expect(hud.getClickAgentAtRow(-1)).toBeUndefined();
-	});
-
-	it("resolves the expander row to the toggle sentinel", () => {
-		const hud = new SubagentHudComponent(["", "Subagents", "row", "toggle"], ["Only"], 3);
-		hud.render(120);
-		expect(hud.getClickAgentAtRow(3)).toBe(PINNED_HUD_TOGGLE_ID);
-		expect(hud.getClickAgentAtRow(2)).toBe("Only");
-	});
-
-	it("maps wrapped continuation rows to the agent that started them", () => {
-		const long = ` ${"x".repeat(200)}`;
-		const hud = new SubagentHudComponent(["", "Subagents", long, "short"], ["Long", "Short"]);
-		const rendered = hud.render(40);
-		expect(rendered.length).toBeGreaterThan(4);
-		const shortRow = rendered.findIndex(line => Bun.stripANSI(line).includes("short"));
-		expect(shortRow).toBeGreaterThan(3);
-		expect(hud.getClickAgentAtRow(2)).toBe("Long");
-		expect(hud.getClickAgentAtRow(3)).toBe("Long");
-		expect(hud.getClickAgentAtRow(shortRow)).toBe("Short");
-		expect(hud.getClickAgentAtRow(shortRow + 1)).toBeUndefined();
-	});
-
-	it("maps clicks after wrapping and resizing while leaving clicks before rendering unmapped", () => {
-		const hud = new SubagentHudComponent(["", "Subagents", ` ${"x".repeat(100)}`, "short"], ["Long", "Short"]);
-		expect(hud.getClickAgentAtRow(2)).toBeUndefined();
-
-		const narrowRows = hud.render(40);
-		const narrowShortRow = narrowRows.findIndex(line => Bun.stripANSI(line).includes("short"));
-		expect(narrowShortRow).toBeGreaterThan(3);
-		expect(hud.getClickAgentAtRow(narrowShortRow - 1)).toBe("Long");
-		expect(hud.getClickAgentAtRow(narrowShortRow)).toBe("Short");
-
-		const wideRows = hud.render(120);
-		expect(wideRows.length).toBeLessThan(narrowRows.length);
-		const wideShortRow = wideRows.findIndex(line => Bun.stripANSI(line).includes("short"));
-		expect(hud.getClickAgentAtRow(wideShortRow)).toBe("Short");
-		expect(hud.getClickAgentAtRow(wideShortRow + 1)).toBeUndefined();
-	});
-
-	it("remaps clicks when runtime character width changes", () => {
-		setHangulCompatibilityJamoWidth(1);
-		try {
-			const hud = new SubagentHudComponent(["", "Subagents", ` ${"ㅁ".repeat(25)}`, "next"], ["Jamo", "Next"]);
-			const narrowRows = hud.render(40);
-			const narrowNextRow = narrowRows.findIndex(line => Bun.stripANSI(line).includes("next"));
-			expect(hud.getClickAgentAtRow(narrowNextRow)).toBe("Next");
-
-			setHangulCompatibilityJamoWidth(2);
-			expect(hud.getClickAgentAtRow(narrowNextRow)).toBe("Next");
-			const wideRows = hud.render(40);
-			const wideNextRow = wideRows.findIndex(line => Bun.stripANSI(line).includes("next"));
-			expect(wideNextRow).toBeGreaterThan(narrowNextRow);
-			expect(hud.getClickAgentAtRow(wideNextRow - 1)).toBe("Jamo");
-			expect(hud.getClickAgentAtRow(wideNextRow)).toBe("Next");
-		} finally {
-			resetHangulCompatibilityJamoWidthForTests();
-		}
 	});
 });
 
@@ -979,22 +865,6 @@ describe("InteractiveMode subagent observer UI sync", () => {
 		expect(hud).toContain("3 more — expand");
 		expect(mountHud.mock.calls.length + updateHud.mock.calls.length).toBe(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
-	});
-
-	it("applies the setting over a clicked expand override", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
-		for (let index = 0; index < 5; index++) {
-			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, makeLifecycle(`Override${index}`, index, `job ${index}`));
-		}
-		await Promise.resolve();
-		const hudText = () => Bun.stripANSI(mode.subagentContainer.render(120).join("\n"));
-
-		mode.togglePinnedHudExpanded();
-		expect(hudText()).toContain("Override4");
-
-		mode.applyPinnedAgentsSetting();
-		expect(hudText()).not.toContain("Override4");
-		expect(hudText()).toContain("more — expand");
 	});
 
 	it("advances a quiet call's elapsed marker by repainting the same HUD in place", async () => {

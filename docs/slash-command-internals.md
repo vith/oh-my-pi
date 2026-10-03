@@ -198,7 +198,7 @@ The Extensions dashboard also loads `slash-commands` capability and displays act
 
 The unified built-in registry is checked before `AgentSession.prompt(...)` in TUI and ACP/RPC modes. A built-in can consume input or return residual prompt text. TUI-only built-ins are omitted from ACP availability and dispatch; ACP-visible built-ins are the entries with a text-mode `handle`.
 
-Built-in parsing splits at the first whitespace or colon, so `/model:opus` is a built-in invocation. Extension/custom/file parsing instead splits only at the first literal space, preserving names such as `plugin:command`. In the TUI, a built-in with arguments falls through when its spec does not declare `allowArgs`; the ACP dispatcher leaves argument validation to the handler.
+Built-in parsing splits at the first whitespace or colon, so `/model:opus` is a built-in invocation. Extension/custom/file parsing instead splits only at the first literal space, preserving names such as `plugin:command`. In the TUI, a known built-in that does not accept arguments consumes unsupported arguments and shows local usage instead of sending the command as chat. Built-ins that declare `allowArgs` validate their arguments in the handler. Unknown names continue to the other slash-command dispatchers; the ACP dispatcher leaves argument validation to the handler.
 
 After that boundary, `AgentSession.prompt(...)` processes slash input in this order when `expandPromptTemplates !== false`:
 

@@ -94,7 +94,7 @@ const PAINT_END = `${ENABLE_AUTOWRAP}${SYNC_OUTPUT_END}`;
 const PAINT_BEGIN_NO_SYNC = `${HIDE_CURSOR}${DISABLE_AUTOWRAP}`;
 const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
 // Mouse reporting is scoped to fullscreen overlays that opt into pointer
-// interaction, plus the opt-in normal-buffer click capture (`tui.mouse`).
+// interaction; the normal buffer never captures mouse input.
 // 1000h = button click tracking, 1003h = any-motion tracking for hover
 // targets, and 1006h = SGR extended coordinates past column/row 223.
 // Selection-first surfaces leave these modes disabled so the terminal retains
@@ -102,7 +102,7 @@ const PAINT_END_NO_SYNC = ENABLE_AUTOWRAP;
 const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
 
-type MouseTrackingState = "off" | "inline" | "full";
+type MouseTrackingState = "off" | "full";
 
 /**
  * `PI_TUI_RESIZE_IN_PLACE=1|true` forces in-place resize (no alt-buffer borrow).
@@ -954,8 +954,6 @@ export class TUI extends Container {
 	// against the next one.
 	#altActive = false;
 	#mouseTracking: MouseTrackingState = "off";
-	/** Product-owned probe for opt-in normal-buffer click capture (`tui.mouse`). Read every frame. */
-	#inlineMouseProvider: (() => boolean) | undefined;
 	#altPreviousLines: string[] = [];
 	#altPreparedRows: PreparedLine[] = [];
 	#altEnterWidth = 0;
@@ -1279,16 +1277,6 @@ export class TUI extends Container {
 		return { top: this.#providerViewportTop - this.#providerViewportPadTop, length: this.#providerWindow.length };
 	}
 
-	/**
-	 * Probe for opt-in normal-buffer click capture. The provider is read every
-	 * frame; while it returns true (and no fullscreen overlay owns the
-	 * display) the terminal reports button clicks as SGR events for inline
-	 * click targets. Native text selection becomes Shift+drag while on.
-	 */
-	setInlineMouseTrackingProvider(provider: (() => boolean) | undefined): void {
-		this.#inlineMouseProvider = provider;
-	}
-
 	/** Transition mouse reporting, emitting only the sequences a change needs. */
 	#setMouseTracking(state: MouseTrackingState): void {
 		if (state === this.#mouseTracking) return;
@@ -1298,8 +1286,6 @@ export class TUI extends Container {
 			if (!wasOff) this.terminal.write(MOUSE_TRACKING_OFF);
 			return;
 		}
-		// Inline and fullscreen reporting are the same bytes: moving between
-		// live modes needs no emission, only entering from off does.
 		if (wasOff) this.terminal.write(MOUSE_TRACKING_ON);
 	}
 
@@ -2580,7 +2566,7 @@ export class TUI extends Container {
 		const dismissingToast = isDesktopNotificationLive();
 		TERMINAL.closeNotification();
 		// The first click dismisses a live toast without activating controls
-		// underneath. Existing inline mouse routing resumes on subsequent input.
+		// underneath. Subsequent input is routed normally.
 		if (dismissingToast && !this.#altActive && routeSgrMouseInput(data, () => true)) return;
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every
@@ -3330,18 +3316,7 @@ export class TUI extends Container {
 		// modal there; the normal screen and all accounting stay untouched.
 		const topOverlay = this.#getTopmostVisibleOverlay();
 		const wantAlt = topOverlay?.options?.fullscreen === true;
-		const wantMouse: MouseTrackingState =
-			topOverlay === undefined
-				? this.#inlineMouseProvider?.() === true || isDesktopNotificationLive()
-					? "inline"
-					: "off"
-				: wantAlt
-					? topOverlay.options?.mouseTracking !== false
-						? "full"
-						: "off"
-					: isDesktopNotificationLive()
-						? "inline"
-						: "off";
+		const wantMouse: MouseTrackingState = wantAlt && topOverlay?.options?.mouseTracking !== false ? "full" : "off";
 		if (wantAlt && !this.#altActive) {
 			// Enhanced keyboard modes can be buffer-local: re-push the active
 			// modified-key reporting sequence on the freshly entered alternate
@@ -3361,16 +3336,10 @@ export class TUI extends Container {
 			this.#altEnterWidth = width;
 			this.#altEnterHeight = height;
 		} else if (!wantAlt && this.#altActive) {
-			// Leaving reporting on when the normal buffer wants it restores
-			// inline capture the same frame the overlay closes: no later paint
-			// is needed, so an idle session never sits untrackable.
-			const mouseExit = wantMouse === "off" && this.#mouseTracking !== "off" ? MOUSE_TRACKING_OFF : "";
-			// A fullscreen overlay that disabled reporting leaves tracking off:
-			// restore it in the fused exit or later frames see matching states
-			// and inline click/hover stays dead until the setting toggles.
-			const mouseEnter = wantMouse !== "off" && this.#mouseTracking === "off" ? MOUSE_TRACKING_ON : "";
+			// Release fullscreen reporting before restoring the normal buffer.
+			const mouseExit = this.#mouseTracking !== "off" ? MOUSE_TRACKING_OFF : "";
 			const enhancementExit = this.#keyboardEnhancementExit();
-			const exitSequence = `${mouseExit}${mouseEnter}${enhancementExit}\x1b[?1049l`;
+			const exitSequence = `${mouseExit}${enhancementExit}\x1b[?1049l`;
 			// Session replacement finishes while its fullscreen selector still
 			// covers the old normal buffer. Fuse the restore into the destructive
 			// repaint so no stale frame can become visible between writes.

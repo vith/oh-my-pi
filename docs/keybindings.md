@@ -51,9 +51,11 @@ app.history.search: []
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
 
-## Navigate conversation turns
+## Scroll the conversation
 
-Press `Ctrl+Up` or `Ctrl+Down` to enter transcript scroll mode and hop between user prompts. With `tui.mouse` enabled, wheel-up also enters this view, moving by rows rather than jumping between prompts. The composer stays pinned at the bottom. Page keys and the mouse wheel scroll within the transcript; wheel-down to the live tail or `Escape` returns to the live screen. Typing also returns to the live composer and inserts the typed text without submitting it.
+Use your terminal's normal scrolling and scrollback controls in the main session. omp does not capture the main-session mouse wheel or open a separate transcript scroll mode.
+
+To scroll a bash job's output independently, open its fullscreen view with `/jobs follow <job-id>`. The mouse wheel, arrow keys, and Page Up/Page Down scroll that view; `End` resumes following new output, and `Escape` returns to the main session.
 
 Use `/recap` for an on-demand summary of the conversation, even when automatic idle recaps are disabled.
 

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import * as desktopNotify from "@oh-my-pi/pi-tui/desktop-notify";
 import { type Component, TUI } from "@oh-my-pi/pi-tui";
 import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
 
@@ -65,127 +66,81 @@ class StaticOverlay implements Component {
 	}
 }
 
-function makeInlineTui(enabled: { current: boolean }): { terminal: MinimalTerminal; tui: TUI } {
+function makeTui(): { terminal: MinimalTerminal; tui: TUI } {
 	const terminal = new MinimalTerminal();
-	const tui = new TUI(terminal);
-	tui.setInlineMouseTrackingProvider(() => enabled.current);
-	return { terminal, tui };
+	return { terminal, tui: new TUI(terminal) };
 }
 
-describe("inline mouse tracking", () => {
-	it("enables capture on the normal buffer and releases it on stop", () => {
-		const enabled = { current: true };
-		const { terminal, tui } = makeInlineTui(enabled);
+describe("fullscreen-only mouse tracking", () => {
+	it("never captures the normal buffer while a desktop notification is live", () => {
+		const live = spyOn(desktopNotify, "isDesktopNotificationLive").mockReturnValue(true);
+		const { terminal, tui } = makeTui();
 		try {
 			tui.start();
 			tui.renderNow();
-			expect(terminal.output.includes(TRACKING_ON)).toBe(true);
-
-			tui.stop();
-			const offAt = terminal.output.lastIndexOf(TRACKING_OFF);
-			expect(offAt).toBeGreaterThan(-1);
-			expect(offAt).toBeGreaterThan(terminal.output.lastIndexOf(TRACKING_ON));
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("yields to any visible overlay and restores after it closes", () => {
-		const enabled = { current: true };
-		const { terminal, tui } = makeInlineTui(enabled);
-		try {
-			tui.start();
-			tui.renderNow();
-			expect(terminal.output.includes(TRACKING_ON)).toBe(true);
-
+			expect(terminal.output).not.toContain(TRACKING_ON);
 			const overlay = tui.showOverlay(new StaticOverlay(), {});
 			tui.renderNow();
-			const offAt = terminal.output.lastIndexOf(TRACKING_OFF);
-			expect(offAt).toBeGreaterThan(-1);
-			expect(offAt).toBeGreaterThan(terminal.output.lastIndexOf(TRACKING_ON));
-
 			overlay.hide();
 			tui.renderNow();
-			expect(terminal.output.lastIndexOf(TRACKING_ON)).toBeGreaterThan(offAt);
+			expect(terminal.output).not.toContain(TRACKING_ON);
 		} finally {
 			tui.stop();
+			live.mockRestore();
 		}
 	});
 
-	it("restores inline capture after a mouse-disabled fullscreen overlay closes", () => {
-		const enabled = { current: true };
-		const { terminal, tui } = makeInlineTui(enabled);
+	it("releases fullscreen capture on exit even while a notification is live", () => {
+		const live = spyOn(desktopNotify, "isDesktopNotificationLive").mockReturnValue(false);
+		const { terminal, tui } = makeTui();
 		try {
 			tui.start();
 			tui.renderNow();
-			expect(terminal.output.includes(TRACKING_ON)).toBe(true);
-
-			const overlay = tui.showOverlay(new StaticOverlay(), { fullscreen: true, mouseTracking: false });
+			expect(terminal.output).not.toContain(TRACKING_ON);
+			const overlay = tui.showOverlay(new StaticOverlay(), { fullscreen: true });
 			tui.renderNow();
-			const offAt = terminal.output.lastIndexOf(TRACKING_OFF);
-			expect(offAt).toBeGreaterThan(-1);
-			expect(offAt).toBeGreaterThan(terminal.output.lastIndexOf(TRACKING_ON));
-
+			expect(terminal.output).toContain(TRACKING_ON);
+			live.mockReturnValue(true);
 			overlay.hide();
 			tui.renderNow();
-			expect(terminal.output.lastIndexOf(TRACKING_ON)).toBeGreaterThan(offAt);
+			expect(terminal.output.lastIndexOf(TRACKING_OFF)).toBeGreaterThan(terminal.output.lastIndexOf(TRACKING_ON));
+			const afterExit = terminal.output;
+			live.mockReturnValue(false);
+			tui.renderNow();
+			live.mockReturnValue(true);
+			tui.renderNow();
+			expect(terminal.output.slice(afterExit.length)).not.toContain(TRACKING_ON);
+		} finally {
+			tui.stop();
+			live.mockRestore();
+		}
+	});
+
+	it("keeps a mouse-disabled fullscreen overlay uncaptured", () => {
+		const { terminal, tui } = makeTui();
+		try {
+			tui.start();
+			const overlay = tui.showOverlay(new StaticOverlay(), { fullscreen: true, mouseTracking: false });
+			tui.renderNow();
+			overlay.hide();
+			tui.renderNow();
+			expect(terminal.output).not.toContain(TRACKING_ON);
 		} finally {
 			tui.stop();
 		}
 	});
 
-	it("releases capture on stop even with a pending alt exit", () => {
-		const enabled = { current: true };
-		const { terminal, tui } = makeInlineTui(enabled);
+	it("releases capture during a destructive fullscreen exit and stop", () => {
+		const { terminal, tui } = makeTui();
 		try {
 			tui.start();
 			const overlay = tui.showOverlay(new StaticOverlay(), { fullscreen: true });
 			tui.renderNow();
-
-			// Destructive repaint + overlay close fuses the alt exit without an
-			// OFF write so capture would continue; quitting first must still
-			// release the terminal.
 			tui.requestRender(true, { clearScrollback: true });
 			overlay.hide();
 			tui.renderNow();
 			tui.stop();
-
-			expect(terminal.output.includes(TRACKING_OFF)).toBe(true);
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("leaves tracking off when stopping after a fused restore exit", () => {
-		const enabled = { current: true };
-		const { terminal, tui } = makeInlineTui(enabled);
-		try {
-			tui.start();
-			const overlay = tui.showOverlay(new StaticOverlay(), { fullscreen: true, mouseTracking: false });
-			tui.renderNow();
-
-			// Destructive repaint + overlay close fuses the alt exit including
-			// the inline restore; quitting first must still leave the final
-			// OFF after any re-enable or the shell keeps reporting.
-			tui.requestRender(true, { clearScrollback: true });
-			overlay.hide();
-			tui.renderNow();
-			tui.stop();
-
-			expect(terminal.output.includes(TRACKING_OFF)).toBe(true);
 			expect(terminal.output.lastIndexOf(TRACKING_OFF)).toBeGreaterThan(terminal.output.lastIndexOf(TRACKING_ON));
-		} finally {
-			tui.stop();
-		}
-	});
-
-	it("stays off by default", () => {
-		const enabled = { current: false };
-		const { terminal, tui } = makeInlineTui(enabled);
-		try {
-			tui.start();
-			tui.renderNow();
-			expect(terminal.output.includes(TRACKING_ON)).toBe(false);
 		} finally {
 			tui.stop();
 		}
@@ -194,8 +149,7 @@ describe("inline mouse tracking", () => {
 
 describe("mutable viewport geometry", () => {
 	it("exposes the painted window and hides it behind the alt screen", () => {
-		const enabled = { current: true };
-		const { tui } = makeInlineTui(enabled);
+		const { tui } = makeTui();
 		try {
 			tui.start();
 			tui.addChild({ render: () => ["line"] });
