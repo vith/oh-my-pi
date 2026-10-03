@@ -13,7 +13,7 @@ import urllib.request
 
 FINGERPRINT = 'C557EA3489AC5820B7C019A9D9CFD8271E0C3DD3'
 REPOSITORY = 'vith/arch-packages'
-ORIGIN = 'https://arch.packages.n3t.work'
+ORIGIN = 'https://github.com/vith/arch-packages/releases/latest/download'
 
 
 def fetch(url, path, maximum=1024 * 1024 * 1024):
