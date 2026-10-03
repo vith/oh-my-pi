@@ -130,20 +130,32 @@ describe("native transcript redesign", () => {
 			content: [{ type: "thinking", thinking: "" }],
 		};
 		try {
-			component.updateContent(message, { transient: true, streamUpdatedAt: 1000 });
+			component.updateContent(message, {
+				transient: true,
+				streamUpdatedAt: 1000,
+				streamUpdateNumber: 1,
+				streamUpdateType: "thinking_start",
+			});
 			await harness.render();
 			expect(harness.find(node => node.k === "elapsed")?.p).toMatchObject({ age: 5000 });
 			expect(harness.find(node => node.k === "spinner")?.p).toMatchObject({ style: "starburst" });
 			expect(harness.find(node => node.k === "rate")).toBeUndefined();
+			expect(harness.find(node => /#1:.*reasoning.*started/.test(JSON.stringify(node.p ?? {})))).toBeDefined();
 
 			now = 7000;
 			component.invalidate();
 			await harness.render();
 			expect(harness.find(node => node.k === "elapsed")?.p).toMatchObject({ age: 6000 });
 
-			component.updateContent(message, { transient: true, streamUpdatedAt: now });
+			component.updateContent(message, {
+				transient: true,
+				streamUpdatedAt: now,
+				streamUpdateNumber: 2,
+				streamUpdateType: "thinking_end",
+			});
 			await harness.render();
 			expect(harness.find(node => node.k === "elapsed")?.p).toMatchObject({ age: 0 });
+			expect(harness.find(node => /#2:.*reasoning.*completed/.test(JSON.stringify(node.p ?? {})))).toBeDefined();
 
 			component.updateContent({
 				...message,

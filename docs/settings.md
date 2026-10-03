@@ -498,7 +498,9 @@ thinkingBudgets:
 
 #### Reasoning stream status
 
-The interactive chat shows a thinking pulse while reasoning is hidden or the provider has started a reasoning block without readable summary text. This is **reasoning stream status**, not encrypted-token telemetry. Its **last update** age measures time since the latest assistant-stream update, not time since the UI repainted. Neither the animation nor the reasoning-start event proves that the provider is still generating tokens: during a silent interval, this indicator cannot distinguish ongoing inference from a stalled request. The indicator disappears when answer text or a tool call starts, or when the message finishes.
+The interactive chat shows a thinking pulse while reasoning is hidden or the provider has started a reasoning block without readable summary text. This is **reasoning stream status**, not encrypted-token telemetry. The pulse shows a numbered stream update, its event kind, and its age—for example, `stream update #7: reasoning item completed · 0ms ago`. A reasoning event can contain no readable text; its number and description explain why the age reset even when no summary appeared.
+
+The number counts UI-handled assistant-stream updates, not tokens or network packets. Updates can be coalesced before reaching the UI. The age measures time since the latest handled stream event; reveal ticks and repaints neither reset it nor advance the update number. Neither the animation nor a reasoning-start or completion event proves that the provider is still generating tokens: during a silent interval, this indicator cannot distinguish ongoing inference from a stalled request. The indicator disappears when answer text or a tool call starts, or when the message finishes.
 
 The thinking token count and speed badge appear only when the provider supplies increasing token usage during the stream. Codex supplies its encrypted reasoning payload when the reasoning item completes and token usage at response completion, so there is no live encrypted-reasoning tok/s measurement during its silent thinking interval.
 

@@ -119,15 +119,15 @@ describe("streaming reveal", () => {
 			now = 6000;
 			controller.resyncVisibility();
 			const stale = Bun.stripANSI(component.render(120).join("\n"));
-			expect(stale).toContain("last update 5.0s ago");
+			expect(stale).toContain("5.0s ago");
 			expect(stale).not.toContain("toks/s");
 
 			controller.setTarget(message, false);
 			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 2);
-			expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("last update 0ms ago");
+			expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("0ms ago");
 
 			component.markTranscriptBlockFinalized();
-			expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("last update");
+			expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("ago");
 		} finally {
 			controller.stop();
 			component.dispose();
