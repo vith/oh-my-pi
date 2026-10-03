@@ -88,7 +88,7 @@ def ownership(pr):
 def needs_dispatch(pr, base):
     statuses = api('/commits/' + pr['head']['sha'] + '/status')['statuses']
     latest = {row['context']: row for row in reversed(statuses)}
-    return any(context not in latest or latest[context]['state'] in ('failure', 'error') or latest[context].get('description') != 'Pinned integration base ' + base for context in ['fork-ci', 'source-review'])
+    return any(context not in latest or latest[context]['state'] in ('failure', 'error') or latest[context].get('description') != 'Pinned integration base ' + base for context in ['source-review'])
 
 
 def save_receipt(out, receipt):

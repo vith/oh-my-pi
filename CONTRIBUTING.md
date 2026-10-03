@@ -9,31 +9,25 @@ the description from verified changes and evidence. Do not request a
 human-written sentence from the user or attribute assistant-written prose to
 them. Internal PRs still follow the fork's branch, review, CI, and merge rules.
 
-Fork CI temporarily skips test execution until its runtime is optimized. It
-retains lint, formatting and type checks, builds the web UI and native CLI, and
-verifies the compiled executable reports the derived fork version. A passing
-fork pipeline does not mean the test suites passed; report skipped tests
-explicitly in internal PRs.
+Source merges require human review. Compilation and runtime verification run
+through the hosted x86_64 OMP package build in `vith/arch-packages`; there is no
+separate ARM source build. Source test suites remain disabled and must not be
+reported as passed.
 
 ## GitHub fork validation and catch-up
 
-The canonical branch is `integration`. Actions remain disabled during migration;
-activation requires independently audited retained refs and metadata, repository
-settings, and owner approval. Historical feature refs preserve their original
-objects. The existing `.woodpecker.yml` remains until the replacement gate is
-proved; old source automation must not mutate concurrently with GitHub catch-up.
+The canonical branch is `integration`. Historical feature refs preserve their
+original objects. The existing `.woodpecker.yml` remains until replacement
+package delivery is proved; old source automation must not mutate concurrently
+with GitHub catch-up. Repository Actions policy permits only the pinned actions
+used by the migration workflows, prohibiting inherited build/publish actions.
 
-`fork-pr-dispatch.yml` reads PR metadata only and dispatches trusted
-`fork-ci.yml` at integration. Preparation pins the exact PR head and current
-integration base. Candidate compilation is isolated in an unprivileged ARM64
-Bun 1.4.2 container without model, signing or publishing credentials. The source
-gate retains frozen installation, TS/Rust checks, collab-web build, disposable
-fork-version preparation, one native PipeWire build, CLI build and exact compiled
-version verification. Source/dependency/Cargo caches are content-preserving and
-separate integration from individual PR trust scopes.
+`fork-pr-dispatch.yml` reads PR metadata only and dispatches the human review
+workflow `fork-ci.yml` at integration. Preparation pins the exact PR head and
+current integration base. This workflow does not execute candidate code.
 
-The exact-head `fork-ci` status and human-approved `source-review` status are
-required before merging. The secret-free `source-review` environment shows the
+The human-approved `source-review` status is required before merging.
+The secret-free `source-review` environment shows the
 PR and pinned identities; head/base movement invalidates old evidence. A human
 merges through GitHub. No controller auto-approves or auto-merges source.
 
