@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Trusted integration control only; never import or execute candidate code."""
+"""Bind human source approval to an exact PR head and integration base."""
 import argparse
 import json
 import os
@@ -34,20 +34,18 @@ def main():
     parser.add_argument('--number', default='')
     parser.add_argument('--head')
     parser.add_argument('--base')
-    parser.add_argument('--context', choices=['fork-ci', 'source-review'])
+    parser.add_argument('--context', choices=['source-review'])
     parser.add_argument('--state', choices=['pending', 'success', 'failure'])
     args = parser.parse_args()
-    if args.number and not re.fullmatch(r'[1-9][0-9]{0,8}', args.number):
+    if not re.fullmatch(r'[1-9][0-9]{0,8}', args.number):
         raise ValueError('invalid numeric PR number')
     pinned = identity(args.number)
     if args.mode == 'prepare':
-        if not args.number and pinned['head'] != os.environ['GITHUB_SHA']:
-            raise ValueError('integration push superseded')
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             for key, value in pinned.items():
                 output.write(f'{key}={value}\n')
         if args.number:
-            for context in ['fork-ci', 'source-review']:
+            for context in ['source-review']:
                 api('/statuses/' + pinned['head'], {'state': 'pending', 'context': context, 'description': 'Pinned integration base ' + pinned['base']})
     else:
         if pinned['head'] != args.head or pinned['base'] != args.base:

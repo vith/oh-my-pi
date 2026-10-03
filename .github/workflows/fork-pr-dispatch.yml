@@ -1,4 +1,4 @@
-name: Dispatch trusted fork PR validation
+name: Request human source review
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, edited]
@@ -10,7 +10,7 @@ permissions:
 jobs:
   dispatch:
     if: github.event.pull_request.base.ref == 'integration'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     steps:
       - name: Dispatch by numeric metadata only (no checkout)
         env:
