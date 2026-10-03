@@ -7793,6 +7793,19 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	// Input handling
+	openTranscriptScroll(delta: -1 | 1, mode: "prompt" | "wheel" | "page" = "page"): void {
+		this.composer.openTranscriptScroll(
+			delta,
+			text => {
+				copyToClipboard(text).then(
+					() => this.showStatus("Copied selection to clipboard"),
+					(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
+				);
+			},
+			mode,
+		);
+	}
+
 	handleCtrlC(): void {
 		this.#inputController.handleCtrlC();
 	}

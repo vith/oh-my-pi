@@ -7,6 +7,7 @@ import { isInsideTerminalMultiplexer } from "../terminal-multiplexer";
 import { ProcessTerminal, type Terminal } from "../terminal";
 import {
 	type Component,
+	type OverlayHandle,
 	Container,
 	type ResizeScrollbackMode,
 	type TerminalFramePlan,
@@ -19,6 +20,7 @@ import { sliceWithWidth, visibleWidth } from "../utils";
 import type { NativeChild, NativeSurface, NativeSurfaceProvider } from "../native/node";
 import { sameItems } from "../native/memo";
 import { postmortem } from "@oh-my-pi/pi-utils";
+import { TranscriptScrollView } from "./transcript-scroll";
 import { CustomEditor } from "./custom-editor";
 import type { WordCompletionMethod } from "./word-completion";
 import { type AnimationFrame, TranscriptContainer } from "../chrome/transcript-container";
@@ -215,6 +217,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	// rediscovered from whatever chrome is expanded when the height changes.
 	#transientChrome: ReadonlySet<Component> = new Set();
 	#transientChromeFloor: number | undefined;
+	#transcriptScroll: { view: TranscriptScrollView; handle: OverlayHandle } | undefined;
 	#lastInterruptAt = 0;
 	/** Last described surface; its arrays are reused while their children are unchanged. */
 	#nativeSurface: NativeSurface = { main: [], dock: [] };
@@ -606,6 +609,64 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		return reflowed;
 	}
 
+	/**
+	 * Enter transcript scroll mode one prompt hop, wheel step, or page from the live tail.
+	 * No-op before a transcript is mounted or while the mode is open.
+	 */
+	openTranscriptScroll(
+		delta: -1 | 1,
+		copy: (text: string) => void,
+		mode: "prompt" | "wheel" | "page" = "prompt",
+	): void {
+		if (this.#transcriptScroll || !this.#runtimeMounted || (mode === "page" && delta > 0)) return;
+		const roots = [...this.#runtimeChildren, this.#statusHost];
+		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
+		if (transcriptIndex < 0) return;
+		const transcript = roots[transcriptIndex] as TranscriptContainer;
+		const pinned = roots
+			.slice(transcriptIndex + 1)
+			.filter(root => root === this.#statusHost || containsComponent(root, this.editor));
+		const view = new TranscriptScrollView({
+			renderBody: width => [
+				...this.#header.render(width),
+				...this.#renderRoots(roots.slice(0, transcriptIndex), width),
+				...transcript.render(width),
+			],
+			renderChrome: width => this.#renderRoots(pinned, width),
+			size: () => ({ columns: this.ui.terminal.columns, rows: this.ui.terminal.rows }),
+			requestRender: () => this.ui.requestRender(),
+			copy,
+			close: passthrough => {
+				this.#closeTranscriptScroll();
+				if (passthrough !== undefined) this.editor.handleInput(passthrough);
+			},
+		});
+		const handle = this.ui.showOverlay(view, {
+			fullscreen: true,
+			anchor: "top-left",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+			onYield: () => this.#closeTranscriptScroll(),
+		});
+		this.#transcriptScroll = { view, handle };
+		view.open(delta, mode);
+		this.ui.requestRender();
+	}
+
+	isTranscriptScrollOpen(): boolean {
+		return this.#transcriptScroll !== undefined;
+	}
+
+	#closeTranscriptScroll(): void {
+		const scroll = this.#transcriptScroll;
+		if (!scroll) return;
+		this.#transcriptScroll = undefined;
+		scroll.handle.hide();
+		scroll.view.dispose();
+		this.ui.requestRender();
+	}
+
 	/** Live editor whose draft survives startup and session adoption. */
 	get editor(): CustomEditor {
 		return this.#editor;
@@ -811,4 +872,10 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		this.#stopped = true;
 		this.#exit(code);
 	}
+}
+
+/** Whether `target` is `root` or mounted anywhere beneath it. */
+function containsComponent(root: Component, target: Component): boolean {
+	if (root === target) return true;
+	return root instanceof Container && root.children.some(child => containsComponent(child, target));
 }
