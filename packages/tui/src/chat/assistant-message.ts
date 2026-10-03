@@ -1,4 +1,4 @@
-import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
@@ -37,6 +37,22 @@ import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
  */
 const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
+
+const STREAM_UPDATE_LABELS: Record<AssistantMessageEvent["type"], string> = {
+	start: "stream started",
+	thinking_start: "reasoning item started",
+	thinking_delta: "reasoning text delta",
+	thinking_end: "reasoning item completed",
+	text_start: "answer text started",
+	text_delta: "answer text delta",
+	text_end: "answer text completed",
+	toolcall_start: "tool call started",
+	toolcall_delta: "tool arguments delta",
+	toolcall_end: "tool call completed",
+	image_end: "image completed",
+	done: "response completed",
+	error: "stream error",
+};
 
 /** The native head of a finished thinking block: "Thought for 12s", or "Thought" when it was never seen streaming. */
 function thoughtLabel(clock: { start: number; end?: number } | undefined): string {
@@ -303,6 +319,8 @@ export class AssistantMessageComponent extends Container {
 	#thinkingDotsFrame = 0;
 	/** Provider-update time, not the time of a reveal tick or repaint. */
 	#streamUpdatedAt: number | undefined;
+	#streamUpdateNumber: number | undefined;
+	#streamUpdateType: AssistantMessageEvent["type"] | undefined;
 	/** Previous cumulative provider token count + timestamp, for deriving this
 	 *  block's instantaneous streaming rate fed into {@link sharedSpeedTracker}.
 	 *  Undefined until the first thinking update of this block. */
@@ -593,6 +611,13 @@ export class AssistantMessageComponent extends Container {
 		return tailIndex;
 	}
 
+	#streamUpdateLabel(): string {
+		const number = this.#streamUpdateNumber === undefined ? "" : ` #${this.#streamUpdateNumber}`;
+		const event =
+			this.#streamUpdateType === undefined ? "snapshot received" : STREAM_UPDATE_LABELS[this.#streamUpdateType];
+		return `stream update${number}: ${event}`;
+	}
+
 	#thinkingDotsLabel(): string {
 		const glyph = THINKING_DOTS_FRAMES[this.#thinkingDotsFrame % THINKING_DOTS_FRAMES.length] ?? "…";
 		const coloredGlyph = theme.fg("thinkingText", glyph);
@@ -601,7 +626,7 @@ export class AssistantMessageComponent extends Container {
 				? ""
 				: theme.fg(
 						"dim",
-						` · last update ${formatDuration(Math.max(0, Math.floor((performance.now() - this.#streamUpdatedAt) / 1000)) * 1000)} ago`,
+						` · ${this.#streamUpdateLabel()} · ${formatDuration(Math.max(0, Math.floor((performance.now() - this.#streamUpdatedAt) / 1000)) * 1000)} ago`,
 					);
 		const thinkingLabel = theme.fg("muted", " Thinking") + updateAge;
 		const rate = Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed());
@@ -821,7 +846,7 @@ export class AssistantMessageComponent extends Container {
 												),
 											]
 										: [
-												text([span("last update", "dim")]),
+												text([span(this.#streamUpdateLabel(), "dim")]),
 												elapsed(performance.now() - this.#streamUpdatedAt),
 												text([span("ago", "dim")]),
 											]),
@@ -1536,8 +1561,20 @@ export class AssistantMessageComponent extends Container {
 		return true;
 	}
 
-	updateContent(message: AssistantMessage, opts?: { transient?: boolean; streamUpdatedAt?: number }): void {
-		if (opts?.streamUpdatedAt !== undefined) this.#streamUpdatedAt = opts.streamUpdatedAt;
+	updateContent(
+		message: AssistantMessage,
+		opts?: {
+			transient?: boolean;
+			streamUpdatedAt?: number;
+			streamUpdateNumber?: number;
+			streamUpdateType?: AssistantMessageEvent["type"];
+		},
+	): void {
+		if (opts?.streamUpdatedAt !== undefined) {
+			this.#streamUpdatedAt = opts.streamUpdatedAt;
+			this.#streamUpdateNumber = opts.streamUpdateNumber;
+			this.#streamUpdateType = opts.streamUpdateType;
+		}
 		this.#blockVersion++;
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;
