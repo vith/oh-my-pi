@@ -291,6 +291,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		description: "Share this session live via a relay",
 		inlineHint: "[start|view|list|stop|status] [relayUrl]",
 		subcommands: [
+			{ name: "start", description: "Start full-control sharing", usage: "[relayUrl]" },
 			{ name: "view", description: "Share a read-only link (guests can watch, not prompt)" },
 			{ name: "list", description: "List active local Collab hosts (no links; use `omp collab link`)" },
 			{ name: "status", description: "Show link + participants" },
