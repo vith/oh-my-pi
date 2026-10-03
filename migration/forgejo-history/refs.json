@@ -1,0 +1,148 @@
+{
+  "refs/heads/feat/arm-pr-ci": {
+    "commit": "574a559ff74196be413503dcf2a6b6fcc2990611",
+    "object": "574a559ff74196be413503dcf2a6b6fcc2990611",
+    "parents": [
+      "1c2d5e7cfcefcc6233a6646dc7fe5a450d22f0ae"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/bash-output-visibility": {
+    "commit": "d4695ef50a8f31531b1b5318166c697869af3f7a",
+    "object": "d4695ef50a8f31531b1b5318166c697869af3f7a",
+    "parents": [
+      "70367c97ecc2244efdbb365c5155c43279967c34"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/catchup-v18.3.2": {
+    "commit": "f4c841bbcac727d594ad5a9fa4e79e4e549afc85",
+    "object": "f4c841bbcac727d594ad5a9fa4e79e4e549afc85",
+    "parents": [
+      "fd744935bbe4d1d195ff024cf8e77d18bbdd8a59"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/catchup-v18.4.4": {
+    "commit": "02a39e17b803a723cffc6f331d3c1509226e2ebb",
+    "object": "02a39e17b803a723cffc6f331d3c1509226e2ebb",
+    "parents": [
+      "4abd9ce14c5c86fe66b9698a1f1ff20418389645"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/catchup-v18.4.5": {
+    "commit": "86d40b5a32da034155c543e3d71e50dbe91a99de",
+    "object": "86d40b5a32da034155c543e3d71e50dbe91a99de",
+    "parents": [
+      "6e513da7bc033691ae9d0c96c4433872436a9af0"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/catchup-v18.4.8": {
+    "commit": "89cb3dc14e116fdda28febc1c8cc10f6f9dcb06f",
+    "object": "89cb3dc14e116fdda28febc1c8cc10f6f9dcb06f",
+    "parents": [
+      "76206e587d0c887517141f9543c78e741007e42d"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/catchup-v18.4.9": {
+    "commit": "e351b93b077581e15fbd356c223bf88517c2a620",
+    "object": "e351b93b077581e15fbd356c223bf88517c2a620",
+    "parents": [
+      "82ffdde90f9e04d01678f544bba6276901093796",
+      "d3a32f6c9e2db84a54741464099422b8f2b2ad51"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/clean-v18.4.2": {
+    "commit": "a1b2928e7bfacc396165e0e24e96be8acfd39ead",
+    "object": "a1b2928e7bfacc396165e0e24e96be8acfd39ead",
+    "parents": [
+      "64a5b008f7afb585764c7ddb95a52ad3728f5b81"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/fork-version-truth": {
+    "commit": "5712dbf40be4665c0ea0f2f6c66dc6345da3c2f9",
+    "object": "5712dbf40be4665c0ea0f2f6c66dc6345da3c2f9",
+    "parents": [
+      "48a8ebca08c839c411fc88da7233b59914293248"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/transcript-prompt-hops": {
+    "commit": "4e04e7d3a7c3ca02d290fa0aae12843c0e42fec8",
+    "object": "4e04e7d3a7c3ca02d290fa0aae12843c0e42fec8",
+    "parents": [
+      "05fd2904e1a7631f027460c9aa660c1c0e21f9e5"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/feat/wayland-package-contract": {
+    "commit": "636f1839a158b2695ce9d022cad8f51bc1b2f7c1",
+    "object": "636f1839a158b2695ce9d022cad8f51bc1b2f7c1",
+    "parents": [
+      "82ffdde90f9e04d01678f544bba6276901093796"
+    ],
+    "type": "commit"
+  },
+  "refs/heads/integration": {
+    "commit": "1c657a066e44b7d7b17a577c421f60f7160ffbc5",
+    "object": "1c657a066e44b7d7b17a577c421f60f7160ffbc5",
+    "parents": [
+      "dc016552309da58678910b5bd6970e4ba7145624",
+      "d4695ef50a8f31531b1b5318166c697869af3f7a"
+    ],
+    "type": "commit"
+  },
+  "refs/tags/v18.4.2": {
+    "commit": "4620bb8338e0ecace7ea237da9d5088d16068617",
+    "object": "4620bb8338e0ecace7ea237da9d5088d16068617",
+    "parents": [
+      "5a6e431aa0ca0b49f28eeb7c1f8558b86c06d25a"
+    ],
+    "type": "commit"
+  },
+  "refs/tags/v18.4.3": {
+    "commit": "fc671eba383f2a7208500836673b485c0dc7073d",
+    "object": "fc671eba383f2a7208500836673b485c0dc7073d",
+    "parents": [
+      "33f887a0c3970f17bd8147df25b73fd88a889353"
+    ],
+    "type": "commit"
+  },
+  "refs/tags/v18.4.4": {
+    "commit": "8ac1309bd8adaddc891eeb389c545345073875be",
+    "object": "8ac1309bd8adaddc891eeb389c545345073875be",
+    "parents": [
+      "e4c42cd89412fce3b52171a066b9562247423eb3"
+    ],
+    "type": "commit"
+  },
+  "refs/tags/v18.4.5": {
+    "commit": "79808c3bf8f8cd9826decc63e3e18b13035f64f8",
+    "object": "79808c3bf8f8cd9826decc63e3e18b13035f64f8",
+    "parents": [
+      "7057eb9cdda91791fc4fbce4a60f33139bda3b8b"
+    ],
+    "type": "commit"
+  },
+  "refs/tags/v18.4.8": {
+    "commit": "717f97f4d22b3d65c4a4eef6a744255d46f4d1a6",
+    "object": "717f97f4d22b3d65c4a4eef6a744255d46f4d1a6",
+    "parents": [
+      "deafe115fdacb098b290fadface27ee910a56686"
+    ],
+    "type": "commit"
+  },
+  "refs/tags/v18.4.9": {
+    "commit": "d3a32f6c9e2db84a54741464099422b8f2b2ad51",
+    "object": "d3a32f6c9e2db84a54741464099422b8f2b2ad51",
+    "parents": [
+      "2d3fa5daf69a83f5084e8736efe81ce55ad0ac4f"
+    ],
+    "type": "commit"
+  }
+}

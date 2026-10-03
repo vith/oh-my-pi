@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/vith/oh-my-pi-vith",
+  "mapping": {
+    "refs/heads/feat/arm-pr-ci": {
+      "original_object": "574a559ff74196be413503dcf2a6b6fcc2990611",
+      "github_ref": "refs/heads/feat/arm-pr-ci",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/bash-output-visibility": {
+      "original_object": "d4695ef50a8f31531b1b5318166c697869af3f7a",
+      "github_ref": "refs/heads/feat/bash-output-visibility",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/catchup-v18.3.2": {
+      "original_object": "f4c841bbcac727d594ad5a9fa4e79e4e549afc85",
+      "github_ref": "refs/heads/feat/catchup-v18.3.2",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/catchup-v18.4.4": {
+      "original_object": "02a39e17b803a723cffc6f331d3c1509226e2ebb",
+      "github_ref": "refs/heads/feat/catchup-v18.4.4",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/catchup-v18.4.5": {
+      "original_object": "86d40b5a32da034155c543e3d71e50dbe91a99de",
+      "github_ref": "refs/heads/feat/catchup-v18.4.5",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/catchup-v18.4.8": {
+      "original_object": "89cb3dc14e116fdda28febc1c8cc10f6f9dcb06f",
+      "github_ref": "refs/heads/feat/catchup-v18.4.8",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/catchup-v18.4.9": {
+      "original_object": "e351b93b077581e15fbd356c223bf88517c2a620",
+      "github_ref": "refs/heads/feat/catchup-v18.4.9",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/clean-v18.4.2": {
+      "original_object": "a1b2928e7bfacc396165e0e24e96be8acfd39ead",
+      "github_ref": "refs/heads/feat/clean-v18.4.2",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/fork-version-truth": {
+      "original_object": "5712dbf40be4665c0ea0f2f6c66dc6345da3c2f9",
+      "github_ref": "refs/heads/feat/fork-version-truth",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/transcript-prompt-hops": {
+      "original_object": "4e04e7d3a7c3ca02d290fa0aae12843c0e42fec8",
+      "github_ref": "refs/heads/feat/transcript-prompt-hops",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/feat/wayland-package-contract": {
+      "original_object": "636f1839a158b2695ce9d022cad8f51bc1b2f7c1",
+      "github_ref": "refs/heads/feat/wayland-package-contract",
+      "object_preserved_exactly": true
+    },
+    "refs/heads/integration": {
+      "original_object": "1c657a066e44b7d7b17a577c421f60f7160ffbc5",
+      "github_ref": "refs/heads/archive/forgejo/integration",
+      "object_preserved_exactly": true
+    },
+    "refs/tags/v18.4.2": {
+      "original_object": "4620bb8338e0ecace7ea237da9d5088d16068617",
+      "github_ref": "refs/tags/v18.4.2",
+      "object_preserved_exactly": true
+    },
+    "refs/tags/v18.4.3": {
+      "original_object": "fc671eba383f2a7208500836673b485c0dc7073d",
+      "github_ref": "refs/tags/v18.4.3",
+      "object_preserved_exactly": true
+    },
+    "refs/tags/v18.4.4": {
+      "original_object": "8ac1309bd8adaddc891eeb389c545345073875be",
+      "github_ref": "refs/tags/v18.4.4",
+      "object_preserved_exactly": true
+    },
+    "refs/tags/v18.4.5": {
+      "original_object": "79808c3bf8f8cd9826decc63e3e18b13035f64f8",
+      "github_ref": "refs/tags/v18.4.5",
+      "object_preserved_exactly": true
+    },
+    "refs/tags/v18.4.8": {
+      "original_object": "717f97f4d22b3d65c4a4eef6a744255d46f4d1a6",
+      "github_ref": "refs/tags/v18.4.8",
+      "object_preserved_exactly": true
+    },
+    "refs/tags/v18.4.9": {
+      "original_object": "d3a32f6c9e2db84a54741464099422b8f2b2ad51",
+      "github_ref": "refs/tags/v18.4.9",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/1/head": {
+      "original_object": "f4c841bbcac727d594ad5a9fa4e79e4e549afc85",
+      "github_ref": "refs/heads/archive/forgejo/pr-1",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/2/head": {
+      "original_object": "574a559ff74196be413503dcf2a6b6fcc2990611",
+      "github_ref": "refs/heads/archive/forgejo/pr-2",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/3/head": {
+      "original_object": "4e04e7d3a7c3ca02d290fa0aae12843c0e42fec8",
+      "github_ref": "refs/heads/archive/forgejo/pr-3",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/4/head": {
+      "original_object": "a1b2928e7bfacc396165e0e24e96be8acfd39ead",
+      "github_ref": "refs/heads/archive/forgejo/pr-4",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/5/head": {
+      "original_object": "5712dbf40be4665c0ea0f2f6c66dc6345da3c2f9",
+      "github_ref": "refs/heads/archive/forgejo/pr-5",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/6/head": {
+      "original_object": "0284d519a71519dbbcf76e874ce404771adfc4e3",
+      "github_ref": "refs/heads/archive/forgejo/pr-6",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/7/head": {
+      "original_object": "02a39e17b803a723cffc6f331d3c1509226e2ebb",
+      "github_ref": "refs/heads/archive/forgejo/pr-7",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/8/head": {
+      "original_object": "86d40b5a32da034155c543e3d71e50dbe91a99de",
+      "github_ref": "refs/heads/archive/forgejo/pr-8",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/9/head": {
+      "original_object": "89cb3dc14e116fdda28febc1c8cc10f6f9dcb06f",
+      "github_ref": "refs/heads/archive/forgejo/pr-9",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/10/head": {
+      "original_object": "636f1839a158b2695ce9d022cad8f51bc1b2f7c1",
+      "github_ref": "refs/heads/archive/forgejo/pr-10",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/11/head": {
+      "original_object": "e351b93b077581e15fbd356c223bf88517c2a620",
+      "github_ref": "refs/heads/archive/forgejo/pr-11",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/12/head": {
+      "original_object": "70367c97ecc2244efdbb365c5155c43279967c34",
+      "github_ref": "refs/heads/archive/forgejo/pr-12",
+      "object_preserved_exactly": true
+    },
+    "refs/pull/13/head": {
+      "original_object": "d4695ef50a8f31531b1b5318166c697869af3f7a",
+      "github_ref": "refs/heads/archive/forgejo/pr-13",
+      "object_preserved_exactly": true
+    }
+  },
+  "canonical_integration": {
+    "ref": "refs/heads/integration",
+    "original_ancestor": "1c657a066e44b7d7b17a577c421f60f7160ffbc5",
+    "retains_original_ancestry": true
+  },
+  "native_metadata_limit": "GitHub imported PR author/timestamp/review identity cannot be synthesized; attributed records are retained in this archive."
+}
