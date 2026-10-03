@@ -17,6 +17,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   discover:
+    if: github.event_name == 'workflow_dispatch' || vars.CATCHUP_SCHEDULE_ENABLED == 'true'
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read

@@ -38,7 +38,11 @@ PR and pinned identities; head/base movement invalidates old evidence. A human
 merges through GitHub. No controller auto-approves or auto-merges source.
 
 `tools/catchup.py` discovers authentic stable `vMAJOR.MINOR.PATCH` upstream tags
-every six hours (or by explicit manual tag). Moved tags fail closed. A clean
+every six hours (or by explicit manual tag). Scheduled discovery fails closed
+unless repository variable `CATCHUP_SCHEDULE_ENABLED` is exactly `true`. It remains
+`false` during migration until the maintainer verifies the old Oracle mutator is
+quiescent; explicit manual dispatch remains available for controlled proof.
+Moved tags fail closed. A clean
 ordinary merge retains both pinned parents; conflicts create a draft from the
 exact upstream commit with actual conflict paths for human resolution. A fresh
 trusted writer validates the bounded receipt, bundle, authentic tag and parent
