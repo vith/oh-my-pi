@@ -1,4 +1,4 @@
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
 import { type Component, getSegmenter } from "@oh-my-pi/pi-tui";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { formatThinkingForDisplay, hasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
@@ -261,6 +261,8 @@ export class StreamingRevealController {
 	#targetDirty = false;
 	/** Updated only at the provider-snapshot boundary, never by reveal/repaint ticks. */
 	#streamUpdatedAt = 0;
+	#streamUpdateNumber = 0;
+	#streamUpdateType: AssistantMessageEvent["type"] | undefined;
 	// Immutable deep clone of the leading content snapped at the tool-call
 	// boundary. Kept independent of the live message so an in-place provider
 	// rewrite of a previously emitted block (e.g. OpenAI Responses replacing
@@ -301,6 +303,8 @@ export class StreamingRevealController {
 		this.#component = component;
 		this.#target = message;
 		this.#streamUpdatedAt = performance.now();
+		this.#streamUpdateNumber = 0;
+		this.#streamUpdateType = "start";
 		this.#revealed = 0;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
@@ -310,6 +314,8 @@ export class StreamingRevealController {
 			component.updateContent(this.#build(message, total), {
 				transient: true,
 				streamUpdatedAt: this.#streamUpdatedAt,
+				streamUpdateNumber: this.#streamUpdateNumber,
+				streamUpdateType: this.#streamUpdateType,
 			});
 			return;
 		}
@@ -321,6 +327,8 @@ export class StreamingRevealController {
 			component.updateContent(this.#build(message, this.#revealed), {
 				transient: true,
 				streamUpdatedAt: this.#streamUpdatedAt,
+				streamUpdateNumber: this.#streamUpdateNumber,
+				streamUpdateType: this.#streamUpdateType,
 			});
 			this.#snapToolBoundary(message.content);
 			return;
@@ -329,9 +337,11 @@ export class StreamingRevealController {
 		this.#syncTimer(total);
 	}
 
-	setTarget(message: AssistantMessage, hasToolCalls: boolean): void {
+	setTarget(message: AssistantMessage, hasToolCalls: boolean, eventType?: AssistantMessageEvent["type"]): void {
 		this.#target = message;
 		this.#streamUpdatedAt = performance.now();
+		this.#streamUpdateNumber++;
+		this.#streamUpdateType = eventType;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
 		this.#smoothStreaming = this.#getSmoothStreaming();
@@ -344,6 +354,8 @@ export class StreamingRevealController {
 			this.#component.updateContent(this.#build(message, total), {
 				transient: true,
 				streamUpdatedAt: this.#streamUpdatedAt,
+				streamUpdateNumber: this.#streamUpdateNumber,
+				streamUpdateType: this.#streamUpdateType,
 			});
 			return;
 		}
@@ -370,6 +382,8 @@ export class StreamingRevealController {
 			this.#component.updateContent(this.#build(message, this.#revealed), {
 				transient: true,
 				streamUpdatedAt: this.#streamUpdatedAt,
+				streamUpdateNumber: this.#streamUpdateNumber,
+				streamUpdateType: this.#streamUpdateType,
 			});
 			this.#snapToolBoundary(message.content);
 			return;
@@ -452,6 +466,8 @@ export class StreamingRevealController {
 		this.#component.updateContent(this.#build(this.#target, this.#revealed), {
 			transient: true,
 			streamUpdatedAt: this.#streamUpdatedAt,
+			streamUpdateNumber: this.#streamUpdateNumber,
+			streamUpdateType: this.#streamUpdateType,
 		});
 	}
 
@@ -499,6 +515,8 @@ export class StreamingRevealController {
 		component.updateContent(this.#build(target, this.#revealed), {
 			transient: true,
 			streamUpdatedAt: this.#streamUpdatedAt,
+			streamUpdateNumber: this.#streamUpdateNumber,
+			streamUpdateType: this.#streamUpdateType,
 		});
 		this.#requestRender(component);
 		if (this.#revealed >= total) {
