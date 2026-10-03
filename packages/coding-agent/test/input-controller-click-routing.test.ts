@@ -32,12 +32,13 @@ function makeHarness(composer: Composer): void {
 			extensionRunner: undefined,
 		},
 		focusedAgentId: undefined,
+		openTranscriptScroll: (delta: -1 | 1) => composer.openTranscriptScroll(delta, () => {}, "page"),
 	} as unknown as InteractiveModeContext;
 	const controller = new InputController(ctx);
 	controller.setupKeyHandlers();
 }
 
-describe("main transcript terminal-owned scrolling", () => {
+describe("main transcript scrolling", () => {
 	beforeEach(async () => {
 		AgentRegistry.resetGlobalForTests();
 		await Settings.init({ inMemory: true });
@@ -48,7 +49,7 @@ describe("main transcript terminal-owned scrolling", () => {
 		resetSettingsForTest();
 	});
 
-	it("leaves the main transcript and draft unchanged for wheel and Ctrl-arrow input", async () => {
+	it("pages the transcript from the live prompt while preserving the draft and leaving wheel input alone", async () => {
 		const terminal = new VirtualTerminal(80, 20);
 		const scheduler = new VirtualRenderScheduler();
 		const composer = new Composer({
@@ -80,6 +81,27 @@ describe("main transcript terminal-owned scrolling", () => {
 			await scheduler.settle(terminal);
 			expect(screen().some(row => row.includes("HISTORY START"))).toBe(false);
 			const before = screen();
+			// The first Page Up must leave the live tail without a preceding wheel event.
+			await press(`${ESC}[5~`);
+			expect(composer.ui.hasOverlay()).toBe(true);
+			expect(screen().some(row => row.includes("answer 2.0"))).toBe(true);
+			expect(screen().some(row => row.includes("answer 4.7"))).toBe(false);
+			expect(composer.editor.getText()).toBe("draft preserved");
+			await press(`${ESC}[5~`);
+			expect(screen().some(row => row.includes("HISTORY START"))).toBe(true);
+			for (let page = 0; page < 10 && composer.ui.hasOverlay(); page++) await press(`${ESC}[6~`);
+			expect(composer.ui.hasOverlay()).toBe(false);
+			expect(screen()).toEqual(before);
+			// Empty drafts used to swallow the page keys too.
+			composer.editor.setText("");
+			await press(`${ESC}[5~`);
+			expect(screen().some(row => row.includes("answer 2.0"))).toBe(true);
+			await press("x");
+			expect(composer.ui.hasOverlay()).toBe(false);
+			expect(composer.editor.getText()).toBe("x");
+			composer.editor.setText("draft preserved");
+			await scheduler.settle(terminal);
+
 			for (const input of [`${ESC}[<64;5;3M`, `${ESC}[<65;5;3M`, `${ESC}[1;5A`, `${ESC}[1;5B`]) {
 				await press(input);
 				expect(composer.ui.hasOverlay()).toBe(false);

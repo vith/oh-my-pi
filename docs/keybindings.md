@@ -53,7 +53,7 @@ app.history.search: []
 
 ## Scroll the conversation
 
-Use your terminal's normal scrolling and scrollback controls in the main session. omp does not capture the main-session mouse wheel or open a separate transcript scroll mode.
+Press Page Up from the main prompt to scroll the conversation. Page Up/Page Down navigate the transcript; Escape or typing returns to the live prompt with your draft preserved. Autocomplete keeps its own page-key navigation while open. Normal mouse-wheel scrolling remains available in the main session.
 
 To scroll a bash job's output independently, open its fullscreen view with `/jobs follow <job-id>`. The mouse wheel, arrow keys, and Page Up/Page Down scroll that view; `End` resumes following new output, and `Escape` returns to the main session.
 
