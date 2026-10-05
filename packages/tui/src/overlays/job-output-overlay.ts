@@ -2,6 +2,7 @@ import { formatDuration, sanitizeText } from "@oh-my-pi/pi-utils";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
 import { ScrollView } from "../components/scroll-view";
 import { matchesKey } from "../keys";
+import { routeSgrMouseInput } from "../mouse";
 import { replaceTabs } from "../render/render-utils";
 import { theme } from "../theme/theme";
 import type { TUI } from "../tui";
@@ -93,6 +94,17 @@ export class JobOutputOverlay extends OverlayPanel {
 	}
 
 	handleInput(data: string): void {
+		if (
+			routeSgrMouseInput(data, event => {
+				if (event.wheel === null) return false;
+				this.#following = false;
+				this.#scroll.setFollowTail(false);
+				this.#scroll.scroll(event.wheel * 3);
+				this.#options.tui.requestRender();
+				return true;
+			})
+		)
+			return;
 		if (matchesKey(data, "escape")) {
 			this.dispose();
 			this.#options.onClose();

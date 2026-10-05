@@ -29,7 +29,6 @@ import {
 	clearRenderCache,
 	getComposerStyle,
 	getPaddingX,
-	getWidthConfigEpoch,
 	Loader,
 	Markdown,
 	Spacer,
@@ -39,7 +38,6 @@ import {
 	Text,
 	type TUI,
 	visibleWidth,
-	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui/native/node";
@@ -246,12 +244,7 @@ import { statusLineHost } from "./status-line-host";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import type { LspServerInfo as WelcomeLspServerInfo } from "@oh-my-pi/pi-tui/prompt/welcome";
-import {
-	Composer,
-	type ComposerPreferences,
-	type ComposerStatusCache,
-	PINNED_HUD_TOGGLE_ID,
-} from "@oh-my-pi/pi-tui/prompt/composer";
+import { Composer, type ComposerPreferences, type ComposerStatusCache } from "@oh-my-pi/pi-tui/prompt/composer";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { MAGIC_KEYWORDS } from "./magic-keywords";
 import { sharedComposerCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
@@ -362,7 +355,6 @@ import {
 	cfgTuiHyperlinks,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
-	cfgTuiMouse,
 	cfgTuiRenderMermaid,
 	cfgTuiResizeScrollback,
 	cfgTuiTextSizing,
@@ -804,34 +796,13 @@ function isHudSubagent(session: ObservableSession): boolean {
 	return session.kind === "subagent" && session.status === "active";
 }
 
-/**
- * Anchored subagent HUD block with its visible session order, so click-to-focus
- * can map a rendered row back to its agent. Row 0 is the leading blank, row 1
- * the title; item rows follow in `order`; the overflow summary maps nowhere.
- * The expander row (when `layoutPinnedHud` shows one) resolves to the toggle
- * sentinel, which the click router handles before any registry lookup.
- * Rendering delegates to the same `Text` mount as before, so output bytes are
- * unchanged — only the row map is new. Long rows wrap inside `Text` (content
- * is two cells narrower than the terminal), so the map is built on the first
- * click after rendering at a new width or width configuration: continuation
- * rows belong to the agent (or toggle) whose logical row started them.
- */
+/** Anchored subagent HUD with terminal rendering and independent native actions. */
 export class SubagentHudComponent implements Component {
 	readonly #text: Text;
-	#lines: readonly string[];
-	#order: readonly string[];
-	#toggleLine: number | undefined;
 	#node: NativeNode;
 	readonly #onOpen: (() => void) | undefined;
-	#physicalOwner?: (string | undefined)[];
-	#renderedWidth?: number;
-	#renderedRows = 0;
-	#renderedWidthConfigEpoch?: number;
-	constructor(lines: readonly string[], order: readonly string[], toggleRow?: number, native?: SubagentHudNative) {
+	constructor(lines: readonly string[], native?: SubagentHudNative) {
 		this.#text = new Text(lines.join("\n"), 1, 0);
-		this.#lines = lines;
-		this.#order = order;
-		this.#toggleLine = toggleRow;
 		this.#node = native?.node ?? EMPTY_HUD;
 		this.#onOpen = native?.onOpen;
 	}
@@ -848,65 +819,13 @@ export class SubagentHudComponent implements Component {
 	 * Repaint in place with a new view. Keeping the instance keeps its native
 	 * wire id, so the dock pill stays mounted (a fresh component would be
 	 * removed and re-added, replaying its entrance) and the HUD memo holds.
-	 * The click map rebuilds lazily.
 	 */
-	update(lines: readonly string[], order: readonly string[], toggleRow: number | undefined, node: NativeNode): void {
+	update(lines: readonly string[], node: NativeNode): void {
 		this.#node = node;
-		this.#order = order;
-		this.#toggleLine = toggleRow;
 		this.#text.setText(lines.join("\n"));
-		this.#lines = lines;
-		this.#physicalOwner = undefined;
 	}
 	render(width: number): readonly string[] {
-		const rows = this.#text.render(width);
-		const widthConfigEpoch = getWidthConfigEpoch();
-		if (
-			this.#renderedWidth !== width ||
-			this.#renderedRows !== rows.length ||
-			this.#renderedWidthConfigEpoch !== widthConfigEpoch
-		) {
-			this.#physicalOwner = undefined;
-		}
-		this.#renderedWidth = width;
-		this.#renderedRows = rows.length;
-		this.#renderedWidthConfigEpoch = widthConfigEpoch;
-		return rows;
-	}
-	getClickAgentAtRow(row: number): string | undefined {
-		if (row < 0 || row >= this.#renderedRows || this.#renderedWidth === undefined) return undefined;
-		if (!this.#physicalOwner) {
-			if (this.#renderedWidthConfigEpoch !== getWidthConfigEpoch()) return undefined;
-			this.#rebuildHitMap(this.#renderedWidth, this.#renderedRows);
-		}
-		return this.#physicalOwner?.[row];
-	}
-	// Native wrap splits paragraphs independently, so per-line wrapped
-	// heights compose exactly to the rendered row count. A length mismatch
-	// means the wrap contract drifted: fall back to one row per line (the
-	// old mapping) rather than misrouting clicks.
-	#rebuildHitMap(width: number, renderedRows: number): void {
-		const contentWidth = Math.max(1, width - getPaddingX(1) * 2);
-		const owner: (string | undefined)[] = [];
-		for (let index = 0; index < this.#lines.length; index++) {
-			const height = wrapTextWithAnsi(replaceTabs(this.#lines[index]!), contentWidth).length;
-			let id: string | undefined;
-			if (this.#toggleLine !== undefined && index === this.#toggleLine) id = PINNED_HUD_TOGGLE_ID;
-			else {
-				const orderIndex = index - 2;
-				id = orderIndex >= 0 && orderIndex < this.#order.length ? this.#order[orderIndex] : undefined;
-			}
-			for (let row = 0; row < height; row++) owner.push(id);
-		}
-		if (owner.length !== renderedRows) {
-			this.#physicalOwner = this.#lines.map((_line, index) => {
-				if (this.#toggleLine !== undefined && index === this.#toggleLine) return PINNED_HUD_TOGGLE_ID;
-				const orderIndex = index - 2;
-				return orderIndex >= 0 && orderIndex < this.#order.length ? this.#order[orderIndex] : undefined;
-			});
-			return;
-		}
-		this.#physicalOwner = owner;
+		return this.#text.render(width);
 	}
 }
 
@@ -1609,30 +1528,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#focusController.invalidatePendingFocus();
 	}
 
-	resolveViewportClickCandidates(index: number): string[] {
-		return this.composer.viewportClickCandidates(index);
-	}
-
-	/** Flip the pinned jump list between its collapsed few and the full list, overriding the setting. */
-	togglePinnedHudExpanded(): void {
-		const mode = cfgDisplayPinnedAgents.get(settings);
-		const expanded = this.#pinnedHudOverride ?? mode === "full";
-		this.#pinnedHudOverride = !expanded;
-		this.#renderSubagentList();
-		this.ui.requestRender();
-	}
-
 	/** Rebuild the pinned jump list for a `display.pinnedAgents` change. */
 	applyPinnedAgentsSetting(): void {
-		// An explicit settings change wins over click state: without the reset,
-		// reselecting the current value would keep showing the old override.
-		this.#pinnedHudOverride = undefined;
 		this.#renderSubagentList();
 		this.ui.requestRender();
-	}
-
-	setClickHoverId(id: string | undefined): void {
-		this.composer.setHoveredClickId(id);
 	}
 
 	clearTransientSessionUi(): void {
@@ -1670,13 +1569,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#micCursor: MicCursor | undefined;
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
-	/** Click override for the pinned jump-list density; undefined follows `display.pinnedAgents`. */
-	#pinnedHudOverride: boolean | undefined;
 	#eventBus?: EventBus;
 	#subagentEventBus?: EventBus;
 	#eventBusUnsubscribers: Array<() => void> = [];
-	/** Mirror of `tui.mouse`, read by the TUI's per-frame inline mouse tracking probe. */
-	#mouseCapture = false;
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
@@ -1783,25 +1678,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
 		applyHyperlinkSetting();
-		// The TUI polls the provider every frame, so it reads a field kept in sync by
-		// subscription rather than resolving the setting per render.
-		// Session settings overlay the global layer and forward its changes.
-		this.#mouseCapture = cfgTuiMouse.get(this.settings);
-		this.#eventBusUnsubscribers.push(
-			cfgTuiMouse.listen(this.settings, on => {
-				this.#mouseCapture = on;
-				// Dropping capture must also drop the band: with reporting off no
-				// motion event will ever arrive to clear a mid-hover highlight.
-				// The controller cache goes too, or a re-enable plus motion over
-				// the same card would look unchanged and skip restoring the band.
-				if (!on) {
-					this.composer.setHoveredClickId(undefined);
-					this.#inputController?.clearHoverHighlight();
-				}
-				this.ui.requestRender();
-			}),
-		);
-		this.ui.setInlineMouseTrackingProvider(() => this.#mouseCapture);
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
@@ -4441,10 +4317,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const node = describeSubagentHud(view.sessions);
 		const hud = this.subagentContainer.children[0];
-		if (hud instanceof SubagentHudComponent) hud.update(view.lines, view.order, view.toggleRow, node);
+		if (hud instanceof SubagentHudComponent) hud.update(view.lines, node);
 		else {
 			this.subagentContainer.addChild(
-				new SubagentHudComponent(view.lines, view.order, view.toggleRow, {
+				new SubagentHudComponent(view.lines, {
 					node,
 					onOpen: () => this.showAgentHub(),
 				}),
@@ -4458,8 +4334,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		| {
 				sessions: ObservableSession[];
 				lines: string[];
-				order: string[];
-				toggleRow: number | undefined;
 				tickMs: number | undefined;
 		  }
 		| undefined {
@@ -4467,7 +4341,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (mode === "off") return undefined;
 		const sessions = this.#observerRegistry.getSessions();
 		const running = sessions.filter(isHudSubagent);
-		const expanded = this.#pinnedHudOverride ?? mode === "full";
+		const expanded = mode === "full";
 		const livePreview = cfgDisplaySubagentLivePreview.get(settings);
 		const lines = renderSubagentHudLines(sessions, this.ui.terminal.columns, expanded, livePreview);
 		if (lines.length === 0) return undefined;
@@ -4476,7 +4350,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			livePreview && !agentPauseGate.paused
 				? nextSubagentPreviewTickMs(running.slice(0, layout.itemRows), Date.now())
 				: undefined;
-		return { sessions, lines, order: running.map(session => session.id), toggleRow: layout.toggleRow, tickMs };
+		return { sessions, lines, tickMs };
 	}
 
 	#armSubagentPreviewTick(tickMs: number | undefined): void {
@@ -7919,13 +7793,17 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	// Input handling
-	openTranscriptScroll(delta: -1 | 1): void {
-		this.composer.openTranscriptScroll(delta, text => {
-			copyToClipboard(text).then(
-				() => this.showStatus("Copied selection to clipboard"),
-				(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
-			);
-		});
+	openTranscriptScroll(delta: -1 | 1, mode: "prompt" | "wheel" | "page" = "page"): void {
+		this.composer.openTranscriptScroll(
+			delta,
+			text => {
+				copyToClipboard(text).then(
+					() => this.showStatus("Copied selection to clipboard"),
+					(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
+				);
+			},
+			mode,
+		);
 	}
 
 	handleCtrlC(): void {

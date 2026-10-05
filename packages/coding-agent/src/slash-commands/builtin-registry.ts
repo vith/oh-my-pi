@@ -5,6 +5,7 @@ import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
 	buildArgumentCompletions,
 	buildDirectoryArgumentCompletions,
+	buildJobsArgumentCompletions,
 	buildMcpArgumentCompletions,
 	buildModelSelectorCompletions,
 	buildStaticInlineHint,
@@ -80,10 +81,13 @@ function materializeTuiBuiltinSlashCommand(
 ): TuiBuiltinSlashCommand {
 	const materialized: TuiBuiltinSlashCommand = { ...cmd };
 	if (cmd.subcommands) {
-		materialized.getArgumentCompletions =
-			cmd.name === "mcp" && runtime
-				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
-				: buildArgumentCompletions(cmd.subcommands);
+		if (cmd.name === "mcp" && runtime) {
+			materialized.getArgumentCompletions = buildMcpArgumentCompletions(cmd.subcommands, runtime);
+		} else if (cmd.name === "jobs" && runtime) {
+			materialized.getArgumentCompletions = buildJobsArgumentCompletions(cmd.subcommands, runtime);
+		} else {
+			materialized.getArgumentCompletions = buildArgumentCompletions(cmd.subcommands);
+		}
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
@@ -136,7 +140,9 @@ export async function executeBuiltinSlashCommand(
 	const command = BUILTIN_SLASH_COMMAND_LOOKUP.get(parsed.name);
 	if (!command) return false;
 	if (parsed.args.length > 0 && !command.allowArgs) {
-		return false;
+		runtime.ctx.showStatus(`Usage: /${command.name} (does not accept arguments)`);
+		clearSubmittedText(runtime);
+		return true;
 	}
 	// Collab guests run a read-mostly replica: session-mutating builtins are
 	// host-only; the allowlist covers purely local/read-only commands.

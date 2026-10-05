@@ -496,6 +496,14 @@ thinkingBudgets:
 | `thinkingBudgets.max`             | number  | `32768` | Token budget for `max`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `providers.autoThinkingMaxEffort` | enum    | `xhigh` | Highest effort `defaultThinkingLevel: auto` may resolve. `xhigh` keeps the classifier one tier below the top, so only `ultrathink` reaches `max`; `max` lets the classifier bill the top tier on models that expose it. The local on-device classifier stays capped at `xhigh` either way. This governs what `auto` _resolves_: a model whose ladder offers nothing under the ceiling gets no auto level at all, and one whose metadata requires explicit effort still receives its lowest supported effort from the transport — on a `["max"]` ladder that is `max`, because the model accepts nothing else. |
 
+#### Reasoning stream status
+
+The interactive chat shows a thinking pulse while reasoning is hidden or the provider has started a reasoning block without readable summary text. This is **reasoning stream status**, not encrypted-token telemetry. The pulse shows a numbered stream update, its event kind, and its age—for example, `stream update #7: reasoning item completed · 0ms ago`. A reasoning event can contain no readable text; its number and description explain why the age reset even when no summary appeared.
+
+The number counts UI-handled assistant-stream updates, not tokens or network packets. Updates can be coalesced before reaching the UI. The age measures time since the latest handled stream event; reveal ticks and repaints neither reset it nor advance the update number. Neither the animation nor a reasoning-start or completion event proves that the provider is still generating tokens: during a silent interval, this indicator cannot distinguish ongoing inference from a stalled request. The indicator disappears when answer text or a tool call starts, or when the message finishes.
+
+The thinking token count and speed badge appear only when the provider supplies increasing token usage during the stream. Codex supplies its encrypted reasoning payload when the reasoning item completes and token usage at response completion, so there is no live encrypted-reasoning tok/s measurement during its silent thinking interval.
+
 ### Sampling
 
 For the numeric sampling settings, a negative value (normally `-1`) means "use the provider/model default" — `omp` does not send that parameter.
@@ -836,7 +844,6 @@ tui:
 | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                           |
 | `tui.hyperlinks`              | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
-| `tui.mouse`                   | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on. |
 | `display.pinnedAgents`        | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
 | `display.bashPreviewLines`    | number  | `10`             | Positive integer limiting collapsed bash output previews, still capped by viewport space. `/settings` offers 5, 10, 20, or 40 lines; Ctrl+O expands output. |
 | `display.subagentLivePreview` | boolean | `false`          | Show each pinned subagent's current (or most recent) tool call beneath its jump-list row. |

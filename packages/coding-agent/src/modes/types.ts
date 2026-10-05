@@ -148,12 +148,6 @@ export interface InteractiveModeContext {
 	unfocusSession(): Promise<void>;
 	/** Drop pending focus requests without changing the view (delegates to SessionFocusController.invalidatePendingFocus). */
 	invalidatePendingFocus(): void;
-	/** Candidate subagent ids under a mutable-viewport line, for click-to-focus. Empty when the line has no target. */
-	resolveViewportClickCandidates(index: number): string[];
-	/** Flip the pinned jump list between its collapsed few and the full list. */
-	togglePinnedHudExpanded(): void;
-	/** Point the inline hover band at a click-candidate id (or clear it). */
-	setClickHoverId(id: string | undefined): void;
 	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
 	clearTransientSessionUi(): void;
 	settings: Settings;
@@ -502,8 +496,8 @@ export interface InteractiveModeContext {
 	showHookConfirm(title: string, message: string): Promise<boolean>;
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: AgentHubOpenOptions): void;
-	/** Scroll the conversation one prompt hop from the tail. */
-	openTranscriptScroll(delta: -1 | 1): void;
+	/** Scroll the conversation from the live tail. */
+	openTranscriptScroll(delta: -1 | 1, mode?: "prompt" | "wheel" | "page"): void;
 	/** Run a manual recap of the active session. */
 	handleRecapCommand(): Promise<void>;
 	resetObserverRegistry(): void;

@@ -70,6 +70,7 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "search", description: "Search the skill registry", usage: "<query>" },
 			{ name: "install", description: "Install registry skills", usage: "<@scope/name[@range]>… [--global]" },
 			{ name: "installed", description: "List installed registry skills" },
+			{ name: "help", description: "Show skill registry command usage" },
 			{
 				name: "update",
 				description: "Update registry skills within their ranges",

@@ -4,7 +4,7 @@
 
 The contributor-authorship and submission requirements below apply to PRs sent
 to upstream `can1357/oh-my-pi`, not maintainer integration PRs within this fork.
-For internal fork PRs in `github.com/vith/oh-my-pi-vith`, the assistant writes
+For internal fork PRs in `github.com/vith/oh-my-pi`, the assistant writes
 the description from verified changes and evidence. Do not request a
 human-written sentence from the user or attribute assistant-written prose to
 them. Internal PRs still follow the fork's branch, review, CI, and merge rules.
@@ -16,8 +16,9 @@ reported as passed.
 
 ## GitHub fork validation and catch-up
 
-The canonical branch is `integration`. Historical feature refs preserve their
-original objects. The existing `.woodpecker.yml` remains until replacement
+The ongoing source destination is `github.com/vith/oh-my-pi`, with canonical
+branch `integration`. Historical feature refs preserve their original objects.
+The existing `.woodpecker.yml` remains until replacement
 package delivery is proved; old source automation must not mutate concurrently
 with GitHub catch-up. Repository Actions policy permits only the pinned actions
 used by the migration workflows, prohibiting inherited build/publish actions.
@@ -51,6 +52,42 @@ validation/approval. Refresh conflicts become human-required drafts.
 Existing migrated/human-edited branches are never overwritten;
 one blocked active catch-up stays visible. Closed unmerged proposals require
 explicit manual reconsideration.
+
+### Reconcile the later Forgejo integration
+
+The initial source archive stopped at Forgejo integration
+`1c657a066e44b7d7b17a577c421f60f7160ffbc5`. Forgejo then continued to the
+installed revision `c0a06a77a6a58a937d753f144278403fa6e9a802`, while GitHub
+integration advanced independently to
+`2f406d28d7e451d158557e6a5a9ce5ce1e3ebd2d`. Reconciliation uses an ordinary
+merge of the installed Forgejo revision onto that GitHub base, retaining both
+complete histories rather than cherry-picking features or rewriting integration.
+
+The retained Forgejo changes are PRs #14 and #16–#19: wheel scrolling with
+click-to-focus, accurate reasoning stream status/update age, handled-event
+explanations, terminal-owned chat scrolling/fullscreen bash/slash dispatch, and
+Page Up/Page Down from the live prompt without losing its draft. Superseded
+PR #15 is archival history, not a feature to restore. The retired permissions
+work remains retired. Draft GitHub PRs #1 (old ARM CI) and #2 (v18.4.9 catch-up)
+are not prerequisites and are not merged by this reconciliation.
+
+The existing `migration/forgejo-history` archive preserves attributed historical
+records; these are not fresh GitHub approvals. Later source refs and discussions
+are archived using the existing export machinery where available. Consult its
+manifest and ref map for actual coverage rather than assuming the initial export
+includes the later PRs. The GitHub human-only review workflows remain unchanged;
+the retained legacy Woodpecker file does not authorize concurrent Forgejo
+automation or duplicate ARM compilation. Package compilation and executable
+verification remain the hosted x86_64 package repository's responsibility.
+
+A source candidate must contain both pinned integration identities and authentic
+upstream v18.4.8 as ancestors. Read the runtime identity through
+`readForkVersion` in `scripts/prepare-fork-build.ts` without invoking build
+preparation or compiling on the workstation. Fresh human `source-review`
+approval is required for the exact candidate head and current GitHub integration
+base, followed by a human protected merge. Only then can the package updater
+deliver a signed non-downgrading GitHub package; source reconciliation alone is
+not publication or installation evidence.
 
 Source merge and signed package delivery are distinct. Until independently
 verified matching source/input/signature evidence exists, catch-up reports

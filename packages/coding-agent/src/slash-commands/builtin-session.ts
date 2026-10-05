@@ -324,6 +324,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "jobs",
 		description: "Show background jobs or follow bash output with /jobs follow <job-id>",
 		acpDescription: "Show background jobs",
+		allowArgs: true,
+		subcommands: [{ name: "follow", description: "Open fullscreen bash job output", usage: "<job-id>" }],
 		getTuiAutocompleteDescription: runtime => {
 			const snapshot = runtime.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
 			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) return "Jobs: none";

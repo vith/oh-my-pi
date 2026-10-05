@@ -109,6 +109,78 @@ describe("EventController message_update coalescing", () => {
 		]);
 	});
 
+	it("explains clock resets for reasoning events that add no readable output", async () => {
+		const { controller, ctx, emit } = createStreamingFixture();
+		const nowSpy = vi.spyOn(performance, "now");
+		let now = 1000;
+		nowSpy.mockImplementation(() => now);
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "" }],
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "fixture",
+			usage: zeroUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		try {
+			emit({ type: "message_start", message });
+			await flushMicrotasks();
+			const rendered = () => Bun.stripANSI(ctx.streamingComponent!.render(160).join("\n"));
+			emit({
+				type: "message_update",
+				message,
+				assistantMessageEvent: { type: "thinking_start", contentIndex: 0, partial: message },
+			});
+			vi.advanceTimersByTime(33);
+			await flushMicrotasks();
+			expect(rendered()).toMatch(/stream update #1:.*reasoning.*started/);
+
+			now = 6000;
+			ctx.streamingComponent!.invalidate();
+			expect(rendered()).toContain("5.0s ago");
+			expect(rendered()).toMatch(/stream update #1:/);
+
+			const completed: AssistantMessage = {
+				...message,
+				content: [{ type: "thinking", thinking: "", thinkingSignature: '{"encrypted_content":"opaque"}' }],
+			};
+			const completion: Extract<AgentSessionEvent, { type: "message_update" }> = {
+				type: "message_update",
+				message: completed,
+				assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "", partial: completed },
+			};
+			emit(completion);
+			vi.advanceTimersByTime(33);
+			await flushMicrotasks();
+			expect(rendered()).toMatch(/stream update #2:.*reasoning.*completed/);
+			expect(rendered()).toContain("0ms ago");
+			expect(rendered()).not.toContain("opaque");
+
+			// The same invisible event is still distinguishable from a repaint.
+			now = 7000;
+			emit(completion);
+			vi.advanceTimersByTime(33);
+			await flushMicrotasks();
+			expect(rendered()).toMatch(/stream update #3:.*reasoning.*completed/);
+			expect(rendered()).toContain("0ms ago");
+
+			// Coalesced events cause one UI update, not a packet/token count.
+			now = 8000;
+			emit(completion);
+			emit(completion);
+			vi.advanceTimersByTime(33);
+			await flushMicrotasks();
+			expect(rendered()).toMatch(/stream update #4:.*reasoning.*completed/);
+			expect(rendered()).toContain("0ms ago");
+		} finally {
+			controller.dispose();
+			ctx.streamingComponent?.dispose();
+			nowSpy.mockRestore();
+		}
+	});
+
 	it("flushes the pending snapshot before a subsequent non-update event", async () => {
 		const { ctx, emit } = createStreamingFixture();
 

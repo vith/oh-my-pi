@@ -15,7 +15,6 @@ import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";
  */
 export function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix: string) => AutocompleteItem[] | null {
 	return (argumentPrefix: string) => {
-		if (argumentPrefix.includes(" ")) return null; // past the subcommand
 		const lower = argumentPrefix.toLowerCase();
 		const matches = subcommands
 			.filter(s => s.name.startsWith(lower))
@@ -24,6 +23,36 @@ export function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix:
 				label: s.name,
 				description: s.description,
 				hint: s.usage,
+			}));
+		return matches.length > 0 ? matches : null;
+	};
+}
+
+/**
+ * Complete /jobs follow using the same viewed-session snapshot as its handler.
+ * Only bash jobs have a fullscreen output view; recently completed jobs remain
+ * available alongside running ones.
+ */
+export function buildJobsArgumentCompletions(
+	subcommands: SubcommandDef[],
+	runtime: TuiSlashCommandRuntime,
+): (argumentPrefix: string) => AutocompleteItem[] | null {
+	const genericCompletions = buildArgumentCompletions(subcommands);
+	return argumentPrefix => {
+		const spaceIndex = argumentPrefix.indexOf(" ");
+		if (spaceIndex === -1) return genericCompletions(argumentPrefix);
+		const subcommand = argumentPrefix.slice(0, spaceIndex);
+		if (subcommand !== "follow") return null;
+		const jobPrefix = argumentPrefix.slice(spaceIndex + 1).trimStart();
+		if (/\s/.test(jobPrefix)) return null;
+		const snapshot = runtime.ctx.viewSession.getAsyncJobSnapshot({ recentLimit: 100 });
+		if (!snapshot) return null;
+		const matches = [...snapshot.running, ...snapshot.recent]
+			.filter(job => job.type === "bash" && job.id.startsWith(jobPrefix))
+			.map(job => ({
+				value: `${subcommand} ${job.id} `,
+				label: job.id,
+				description: `${job.status}: ${job.label}`,
 			}));
 		return matches.length > 0 ? matches : null;
 	};

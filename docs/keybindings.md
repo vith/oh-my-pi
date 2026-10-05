@@ -51,9 +51,11 @@ app.history.search: []
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
 
-## Navigate conversation turns
+## Scroll the conversation
 
-Press `Ctrl+Up` or `Ctrl+Down` to enter transcript scroll mode and hop between user prompts. The composer stays pinned at the bottom. Page keys and the mouse wheel scroll within the transcript; `Escape` returns to the live tail. Typing also returns to the live composer and inserts the typed text without submitting it.
+Press Page Up from the main prompt to scroll the conversation. Page Up/Page Down navigate the transcript; Escape or typing returns to the live prompt with your draft preserved. Autocomplete keeps its own page-key navigation while open. Normal mouse-wheel scrolling remains available in the main session.
+
+To scroll a bash job's output independently, open its fullscreen view with `/jobs follow <job-id>`. The mouse wheel, arrow keys, and Page Up/Page Down scroll that view; `End` resumes following new output, and `Escape` returns to the main session.
 
 Use `/recap` for an on-demand summary of the conversation, even when automatic idle recaps are disabled.
 

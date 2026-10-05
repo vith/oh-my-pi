@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { setTranscriptActionHandler, type TranscriptAction } from "@oh-my-pi/pi-tui/chat/transcript-actions";
@@ -114,6 +114,63 @@ describe("native transcript redesign", () => {
 		expect(prop(done, "took")).toBeNumber();
 		expect(harness.find(node => node.k === "spinner")).toBeUndefined();
 		expect(harness.errors).toEqual([]);
+	});
+
+	it("shows summary-less reasoning with provider-update age, resets on incoming activity, then yields to the answer", async () => {
+		const component = new AssistantMessageComponent();
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		const nowSpy = vi.spyOn(performance, "now");
+		let now = 6000;
+		nowSpy.mockImplementation(() => now);
+		const message: AssistantMessage = {
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content: [{ type: "thinking", thinking: "" }],
+		};
+		try {
+			component.updateContent(message, {
+				transient: true,
+				streamUpdatedAt: 1000,
+				streamUpdateNumber: 1,
+				streamUpdateType: "thinking_start",
+			});
+			await harness.render();
+			expect(harness.find(node => node.k === "elapsed")?.p).toMatchObject({ age: 5000 });
+			expect(harness.find(node => node.k === "spinner")?.p).toMatchObject({ style: "starburst" });
+			expect(harness.find(node => node.k === "rate")).toBeUndefined();
+			expect(harness.find(node => /#1:.*reasoning.*started/.test(JSON.stringify(node.p ?? {})))).toBeDefined();
+
+			now = 7000;
+			component.invalidate();
+			await harness.render();
+			expect(harness.find(node => node.k === "elapsed")?.p).toMatchObject({ age: 6000 });
+
+			component.updateContent(message, {
+				transient: true,
+				streamUpdatedAt: now,
+				streamUpdateNumber: 2,
+				streamUpdateType: "thinking_end",
+			});
+			await harness.render();
+			expect(harness.find(node => node.k === "elapsed")?.p).toMatchObject({ age: 0 });
+			expect(harness.find(node => /#2:.*reasoning.*completed/.test(JSON.stringify(node.p ?? {})))).toBeDefined();
+
+			component.updateContent({
+				...message,
+				content: [...message.content, { type: "text", text: "The answer" }],
+			});
+			component.markTranscriptBlockFinalized();
+			await harness.render();
+			expect(harness.find(node => node.k === "spinner")).toBeUndefined();
+			expect(harness.find(node => node.k === "elapsed")).toBeUndefined();
+			expect(harness.find(node => node.k === "md")?.p).toMatchObject({ text: "The answer" });
+			expect(harness.errors).toEqual([]);
+		} finally {
+			nowSpy.mockRestore();
+			component.dispose();
+		}
 	});
 
 	it("gives a user message no head row, and routes its toolbar to omp's copy and rewind", async () => {
