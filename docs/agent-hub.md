@@ -78,19 +78,19 @@ For a normal local subagent, `Enter` or click focuses the main TUI on that agent
 
 Steering uses the normal prompt path, so the message and response are written to the subagent's persisted session history. While a subagent is focused, `Esc` returns to the main session; it does not interrupt the subagent.
 
+From a focused subagent view, `/jobs follow <job-id>` opens that subagent's bash output fullscreen without steering it or switching back to the main session. Other `/jobs` forms remain main-session commands.
+
 Contexts without a local focusable session use the Hub's full-screen transcript viewer instead. This includes collab guests, advisor rows, and aborted agents; advisor and aborted transcripts are read-only. The viewer incrementally tails the file-backed transcript and provides an input line only when the selected agent can be messaged. Sending there has the same semantics: revive if parked, steer if running, and prompt if idle.
 
-## Pinned jump list and click to focus
+## Pinned jump list
 
 While subagents run, a pinned `Subagents` block above the editor lists every live agent — sync task calls and detached background spawns alike.
 
-The list stays short: it shows a few rows plus an expander (`display.pinnedAgents: collapsed`, the default), lists everything (`full`), or hides entirely (`off`). Clicking the expander toggles between the two while `tui.mouse` is on.
+The list stays short: it shows a few rows (`display.pinnedAgents: collapsed`, the default), lists everything (`full`), or hides entirely (`off`).
 
 Set `display.subagentLivePreview: true` to add a second line under each row showing what that agent is doing: its current tool call (or, between calls, the most recent one) with a one-line detail, plus the elapsed time once a call runs longer than five seconds. Off by default.
 
-Enable `tui.mouse` to click live subagent cards and jump-list rows directly in the main session, without opening the Hub first. A click focuses that card's most recent agent (a jump-list row focuses its exact agent); focusing a parked agent revives it. Hovering a live target lights it up first, so you can see what a click will open.
-
-Only rows currently in the live viewport are clickable — retired transcript rows live in terminal scrollback, where clicks cannot map back to content. Enabling capture changes terminal gestures while on: text selection becomes Shift+drag and wheel scroll becomes Shift+wheel. Off by default.
+The terminal owns scrolling and text selection in the main session; omp does not capture its mouse input. Open the fullscreen Hub with `Alt+A` to select and focus an agent. Mouse interaction inside fullscreen views does not change the main session's scrolling.
 
 ## Persisted agents and advisors
 

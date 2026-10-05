@@ -501,21 +501,6 @@ export const cfgTuiHyperlinks = register({
 // effective value, so pi-tui renderers gating on the shared flag track it the same instant path links do.
 effect(cfgTuiHyperlinks, applyHyperlinkSetting);
 
-export const cfgTuiMouse = register({
-	id: "tui.mouse",
-	type: "boolean",
-	default: false,
-	ui: {
-		tab: "appearance",
-		group: "Display",
-		label: "Mouse Click-to-Focus",
-		get description() {
-			const shift = formatKeyHint("shift");
-			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
-		},
-	},
-});
-
 export const cfgTuiTight = register({
 	id: "tui.tight",
 	type: "boolean",

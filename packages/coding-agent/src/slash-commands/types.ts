@@ -118,7 +118,7 @@ export interface TuiSlashCommandRuntime {
 
 /** Unified slash-command spec consumed by both TUI and ACP dispatchers. */
 export interface SlashCommandSpec extends BuiltinSlashCommand {
-	/** When false, the dispatcher refuses to handle invocations that include arguments. */
+	/** When false, the TUI dispatcher consumes arguments with a local usage diagnostic. */
 	allowArgs?: boolean;
 	/**
 	 * ACP-specific override for `description`. Used by `ACP_BUILTIN_SLASH_COMMANDS`

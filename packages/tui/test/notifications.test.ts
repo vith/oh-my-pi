@@ -762,7 +762,6 @@ describe("terminal notifications", () => {
 	it("click dismisses a live toast without activating inline mouse controls", async () => {
 		const terminal = new VirtualTerminal(80, 24);
 		const tui = new TUI(terminal);
-		tui.setInlineMouseTrackingProvider(() => true);
 		const close = vi
 			.spyOn(TERMINAL, "closeNotification")
 			.mockImplementation(() => desktopNotify.closeDesktopNotification());
@@ -783,7 +782,7 @@ describe("terminal notifications", () => {
 			expect(close.mock.calls.length).toBeGreaterThan(before);
 			expect(received).toEqual([]);
 			expect(desktopNotify.isDesktopNotificationLive()).toBe(false);
-			// Inline mouse capture remains usable when the toast is gone.
+			// Subsequent synthetic reports pass through without changing capture.
 			terminal.sendInput("\x1b[<0;10;5M");
 			expect(received).toEqual(["\x1b[<0;10;5M"]);
 			terminal.sendInput("x");

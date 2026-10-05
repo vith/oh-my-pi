@@ -76,5 +76,41 @@
     "archive_markdown": "prs/9.md",
     "github_pr": null,
     "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/9"
+  },
+  "14": {
+    "archive_json": "prs/14.json",
+    "archive_markdown": "prs/14.md",
+    "github_pr": null,
+    "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/14"
+  },
+  "15": {
+    "archive_json": "prs/15.json",
+    "archive_markdown": "prs/15.md",
+    "github_pr": null,
+    "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/15"
+  },
+  "16": {
+    "archive_json": "prs/16.json",
+    "archive_markdown": "prs/16.md",
+    "github_pr": null,
+    "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/16"
+  },
+  "17": {
+    "archive_json": "prs/17.json",
+    "archive_markdown": "prs/17.md",
+    "github_pr": null,
+    "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/17"
+  },
+  "18": {
+    "archive_json": "prs/18.json",
+    "archive_markdown": "prs/18.md",
+    "github_pr": null,
+    "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/18"
+  },
+  "19": {
+    "archive_json": "prs/19.json",
+    "archive_markdown": "prs/19.md",
+    "github_pr": null,
+    "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/19"
   }
 }
