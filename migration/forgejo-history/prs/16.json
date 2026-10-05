@@ -1,0 +1,79 @@
+{
+  "source_head_ref_object": "f5ea3ba24eeab7faf684c558a327a2410838a99a",
+  "assets": null,
+  "comments": null,
+  "pull": {
+    "id": 94,
+    "url": "https://git.n3t.work/vith/oh-my-pi/pulls/16",
+    "number": 16,
+    "title": "fix(tui): show reasoning stream status and time since last update",
+    "body": "## What\n\nAdd **reasoning stream status** in ANSI and native terminals: show a pulse once summary-less reasoning starts, plus time since the last assistant-stream update. Reveal ticks and repaints do not reset the age.\n\nReplaces PR #15 and its misleading encrypted-thinking branch name. Includes current integration 208fbaac02c92148f24ff27ef89c0f4438fa199d and retains the bash-output and wheel-scrolling fixes.\n\n## Why\n\nMake observable state and silence visible. **This is not encrypted-token telemetry. It cannot distinguish ongoing hidden inference from a stalled request or prove that Codex is making progress during silence.** Codex sends encrypted reasoning at item completion and token usage at response completion; no live encrypted-token rate is fabricated.\n\n## Testing\n\n- Delivered: merged as `bd8cf9ebadbcebc2dd671d3c68aff1e71009b550`; merged-source CI #148 and exact-pin Arch pipeline #219 succeeded with recipe `8a6eb2b8b4d1b82d34ac94b26c36e5d46cff8cd2`. Signed package `18.4.8.vith.r344.gbd8cf9ebadbc-1` is published and installed. Both package and repository DB signatures verified against trusted fingerprint `433D492D0438666BBB7230BB91D0A55E51016A94`; the package SHA256 matches the signed DB (`30afecb16f8a9ae1ae3ecbf4866545745fe2260a6147f22a6ddf1da58c55e981`). `/usr/bin/omp` is package-owned and reports `omp/18.4.8+vith-fork.344.bd8cf9ebadbc`. Only the requested package was upgraded; no local compilation.\n\n- Missing summary-less pulse reproduced before the fix.\n- Merged-source verification: 53 focused source tests passed; changed-file oxlint passed. Native protocol regression covers age through redraws, incoming-update reset, and answer transition.\n- Real tmux TUI smoke: reasoning/update-age appeared during silence and disappeared when the answer appeared.\n- Final revision `f5ea3ba24eeab7faf684c558a327a2410838a99a`: n3t pipeline **#144 succeeded**. Workspace lint/format/type checks, Rust checks, web UI build, ARM64 native/CLI build, and execution of the compiled CLI with exact derived-version assertion passed. No local compilation started.\n- CI test suites remain disabled by existing policy; successful CI means checks/builds and exact compiled-version verification, not test-suite success.\n- CHANGELOG intentionally unchanged because not requested. Internal fork PR.\n\n---\n\n- [ ] `bun check` passes\n- [x] Tested locally\n- [ ] CHANGELOG updated with the required attribution (if user-facing; internal issue fixes use issue links, external contributions add the PR link and contributor credit after creation)",
+    "state": "closed",
+    "draft": false,
+    "is_locked": false,
+    "comments": 0,
+    "review_comments": 0,
+    "additions": 349,
+    "deletions": 39,
+    "changed_files": 8,
+    "html_url": "https://git.n3t.work/vith/oh-my-pi/pulls/16",
+    "diff_url": "https://git.n3t.work/vith/oh-my-pi/pulls/16.diff",
+    "patch_url": "https://git.n3t.work/vith/oh-my-pi/pulls/16.patch",
+    "mergeable": true,
+    "merged": true,
+    "merged_at": "2026-10-03T00:53:41+02:00",
+    "merge_commit_sha": "bd8cf9ebadbcebc2dd671d3c68aff1e71009b550",
+    "merge_base": "208fbaac02c92148f24ff27ef89c0f4438fa199d",
+    "created_at": "2026-10-03T00:27:51+02:00",
+    "updated_at": "2026-10-03T19:11:55+02:00",
+    "closed_at": "2026-10-03T00:53:41+02:00",
+    "user": {
+      "id": 1,
+      "login": "vith",
+      "full_name": "",
+      "html_url": "https://git.n3t.work/vith"
+    },
+    "merged_by": {
+      "id": 1,
+      "login": "vith",
+      "full_name": "",
+      "html_url": "https://git.n3t.work/vith"
+    },
+    "assignee": null,
+    "assignees": [],
+    "requested_reviewers": [],
+    "base": {
+      "label": "integration",
+      "ref": "integration",
+      "sha": "c0a06a77a6a58a937d753f144278403fa6e9a802",
+      "repo": {
+        "full_name": "vith/oh-my-pi",
+        "html_url": "https://git.n3t.work/vith/oh-my-pi"
+      }
+    },
+    "head": {
+      "label": "feat/reasoning-stream-status",
+      "ref": "feat/reasoning-stream-status",
+      "sha": "3466d30eb3899435c8e5015ce5e574723d3aa5c2",
+      "repo": {
+        "full_name": "vith/oh-my-pi",
+        "html_url": "https://git.n3t.work/vith/oh-my-pi"
+      }
+    }
+  },
+  "review_threads": [],
+  "reviews": [],
+  "source_number": 16,
+  "source_repository": "https://git.n3t.work/vith/oh-my-pi",
+  "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/16",
+  "timeline": null,
+  "coverage": {
+    "pull": "Retrieved authenticated /pulls/16",
+    "reviews": "Retrieved authenticated /pulls/16/reviews; empty",
+    "review_threads": "No reviews present, so no review threads to fetch",
+    "comments": "Unavailable: /issues/16/comments HTTP 403; mounted pr_comment_list also reports missing read:issue scope",
+    "timeline": "Unavailable: /issues/16/timeline HTTP 403 (read:issue scope unavailable)",
+    "assets": "Unavailable: /issues/16/assets HTTP 403 (read:issue scope unavailable)"
+  },
+  "historical_only": true
+}

@@ -1,0 +1,79 @@
+{
+  "source_head_ref_object": "8a6bac92e50352419f4df7e6d8ed9f78a27e96fd",
+  "assets": null,
+  "comments": null,
+  "pull": {
+    "id": 97,
+    "url": "https://git.n3t.work/vith/oh-my-pi/pulls/18",
+    "number": 18,
+    "title": "fix(tui): restore native chat scrolling and slash dispatch",
+    "body": "## What\n\n- Remove main-chat mouse capture, physical click/hover routing, Ctrl+Up/Down interception, and the custom transcript scroll view. Normal chat scrolling and selection belong to the terminal, including while notifications are live.\n- Keep independent bash scrolling in its fullscreen `/jobs follow` view; add wheel scrolling, viewed-session bash job ID completions, and read-only follow dispatch from focused subagent views.\n- Repair multi-word completions and missing `collab start` / `skills help` metadata. Known builtins with unsupported arguments show local usage rather than becoming chat; unknown-command dispatch and intentional prompt-returning commands stay unchanged.\n- Update existing interaction and slash-command docs; preserve native/TSP semantic actions and background-card updates.\n\n## Why\n\nThe requested behavior is terminal-owned main-chat scrolling, not another wheel workaround. Slash commands also advertised forms that their dispatcher rejected and stopped offering completions after the first word.\n\n## Testing\n\n- Integrated regression run: 500 passed, 0 failed, 2088 assertions across 51 files, including background-card/history retirement regressions and preserved reasoning-stream changes from current integration. The orphaned-stream fixture now supplies the required stream-event metadata; no production fallback was added.\n- Actual source CLI: normal-buffer mouse flags off with the existing user configuration; `/jobs f` and `/memory mm h` displayed completions; `/jobs follow missing` and `/settings unexpected` produced local diagnostics, not chat turns.\n- Real PTY production Composer, AgentSession, AsyncJobManager, BashTool and command handler: native scrollback moved 36→72 with capture off; fullscreen wheel moved the output and paused following; Escape restored the unchanged draft and kept the real job running.\n- Focused real-session PTY: submitted `/jobs follow bg_1` through the enabled editor and InputController; the worker-owned bash job opened fullscreen with live output and mouse capture. Regression failed before the focused admission fix and passes afterward.\n- Two read-only scoped reviews completed; the focused-view admission finding was corrected and re-reviewed with no remaining actionable findings.\n- Final integrated `bun run check:ts` passed: lint, formatting, and all workspace no-emit type checks. No native or shipping builds were run locally.\n- Source PR gate 160 passed for 8a6bac92e50352419f4df7e6d8ed9f78a27e96fd: lint/format/all workspace types, Rust checks, web build, native-addon and CLI builds, and compiled exact-version assertion. PR merged as 4de652557a3691df5991c00672828684c818a0ea; merged-source gate 163 and signed Arch pipeline 222 are queued. Dispatch pins the merged source, recipe 8a6eb2b8b4d1b82d34ac94b26c36e5d46cff8cd2, and oh-my-pi-vith-git. Fork CI test execution remains disabled by existing policy; checks/build success is not a test-suite result.\n- No changelog requested; none changed. User configuration and running user session were not changed or restarted.\n\n---\n\n- [x] `bun check` passes\n- [x] Tested locally\n- [ ] CHANGELOG updated with the required attribution (if user-facing; internal issue fixes use issue links, external contributions add the PR link and contributor credit after creation)\n",
+    "state": "closed",
+    "draft": false,
+    "is_locked": false,
+    "comments": 0,
+    "review_comments": 0,
+    "additions": 431,
+    "deletions": 1313,
+    "changed_files": 33,
+    "html_url": "https://git.n3t.work/vith/oh-my-pi/pulls/18",
+    "diff_url": "https://git.n3t.work/vith/oh-my-pi/pulls/18.diff",
+    "patch_url": "https://git.n3t.work/vith/oh-my-pi/pulls/18.patch",
+    "mergeable": true,
+    "merged": true,
+    "merged_at": "2026-10-03T21:01:29+02:00",
+    "merge_commit_sha": "4de652557a3691df5991c00672828684c818a0ea",
+    "merge_base": "4cc5b2799ffed0366209bcb047c7babc1fd938f9",
+    "created_at": "2026-10-03T20:26:27+02:00",
+    "updated_at": "2026-10-03T21:03:48+02:00",
+    "closed_at": "2026-10-03T21:01:29+02:00",
+    "user": {
+      "id": 1,
+      "login": "vith",
+      "full_name": "",
+      "html_url": "https://git.n3t.work/vith"
+    },
+    "merged_by": {
+      "id": 1,
+      "login": "vith",
+      "full_name": "",
+      "html_url": "https://git.n3t.work/vith"
+    },
+    "assignee": null,
+    "assignees": [],
+    "requested_reviewers": [],
+    "base": {
+      "label": "integration",
+      "ref": "integration",
+      "sha": "c0a06a77a6a58a937d753f144278403fa6e9a802",
+      "repo": {
+        "full_name": "vith/oh-my-pi",
+        "html_url": "https://git.n3t.work/vith/oh-my-pi"
+      }
+    },
+    "head": {
+      "label": "feat/bash-output-visibility",
+      "ref": "feat/bash-output-visibility",
+      "sha": "1c659d0e05a09a3b4d36e7ed3d80ad9601c10be6",
+      "repo": {
+        "full_name": "vith/oh-my-pi",
+        "html_url": "https://git.n3t.work/vith/oh-my-pi"
+      }
+    }
+  },
+  "review_threads": [],
+  "reviews": [],
+  "source_number": 18,
+  "source_repository": "https://git.n3t.work/vith/oh-my-pi",
+  "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/18",
+  "timeline": null,
+  "coverage": {
+    "pull": "Retrieved authenticated /pulls/18",
+    "reviews": "Retrieved authenticated /pulls/18/reviews; empty",
+    "review_threads": "No reviews present, so no review threads to fetch",
+    "comments": "Unavailable: /issues/18/comments HTTP 403; mounted pr_comment_list also reports missing read:issue scope",
+    "timeline": "Unavailable: /issues/18/timeline HTTP 403 (read:issue scope unavailable)",
+    "assets": "Unavailable: /issues/18/assets HTTP 403 (read:issue scope unavailable)"
+  },
+  "historical_only": true
+}

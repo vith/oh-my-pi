@@ -72,10 +72,17 @@ work remains retired. Draft GitHub PRs #1 (old ARM CI) and #2 (v18.4.9 catch-up)
 are not prerequisites and are not merged by this reconciliation.
 
 The existing `migration/forgejo-history` archive preserves attributed historical
-records; these are not fresh GitHub approvals. Later source refs and discussions
-are archived using the existing export machinery where available. Consult its
-manifest and ref map for actual coverage rather than assuming the initial export
-includes the later PRs. The GitHub human-only review workflows remain unchanged;
+records; these are not fresh GitHub approvals. Supplemental records for PRs
+#14–#19 use the existing JSON/Markdown archive layout and whitelist public PR
+descriptions, actor identities, branch/merge identities and timestamps. Their
+review endpoints returned empty lists. Comments, timeline and attachment
+endpoints returned HTTP 403 because the available credential lacks `read:issue`;
+these unavailable fields are recorded as `null`, with exact coverage per PR.
+The original private export digest still covers only PRs #1–#13. The ref map
+records the later integration, changed feature branches and all six PR heads
+without overwriting the initial archived integration. PR #15 is preserved only
+as a closed, superseded historical record.
+The GitHub human-only review workflows remain unchanged;
 the retained legacy Woodpecker file does not authorize concurrent Forgejo
 automation or duplicate ARM compilation. Package compilation and executable
 verification remain the hosted x86_64 package repository's responsibility.

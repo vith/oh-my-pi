@@ -1,0 +1,79 @@
+{
+  "source_head_ref_object": "3466d30eb3899435c8e5015ce5e574723d3aa5c2",
+  "assets": null,
+  "comments": null,
+  "pull": {
+    "id": 96,
+    "url": "https://git.n3t.work/vith/oh-my-pi/pulls/17",
+    "number": 17,
+    "title": "fix(tui): explain invisible reasoning stream updates",
+    "body": "## What\n\nShow a numbered UI-handled stream update and its normalized event kind alongside reasoning-update age in ANSI and native terminals. Preserve the number, kind and timestamp through smooth reveal and repaint paths.\n\nThe number counts handled snapshots, not tokens or network packets; coalesced events may become one UI update. Empty or identical reasoning events now have a visible explanation for resetting the clock.\n\n## Why\n\nFollow-up to #16: the previous clock could reset when a reasoning event supplied no readable text, leaving the user unable to see what changed. This explains those resets without presenting them as proof of ongoing inference. The specific event behind the user's original observation was not captured.\n\n## Testing\n\n- Failing-before/passing-after regressions exercise actual EventController handling of empty reasoning events and native protocol rendering.\n- Focused source tests: **59 passed, 0 failed**, 625 assertions across streaming-reveal, event-controller-message-update-coalesce, assistant-message-error and transcript-redesign-native. Includes identical invisible completions, repaint aging and coalesced updates.\n- Local lint and repository formatting passed. Coding-agent type checking completed successfully during `bun run check:ts`; the broad command timed out at 120 seconds before remaining packages finished. Separate TUI `check:types` passed. No local native/CLI build.\n- Real tmux TUI fixture using production component/controller: #1 aged to 2s without a stream event; invisible completions showed #2 and #3 at 0ms; answer text removed the indicator. This was a controlled fixture, not a live-provider token measurement.\n- Independent read-only review found no substantive defects or unexpected scope changes.\n- n3t PR pipeline #151 passed for `3466d30eb3899435c8e5015ce5e574723d3aa5c2`; merged-source pipeline #154 passed for `4cc5b2799ffed0366209bcb047c7babc1fd938f9`. Both exercised lint, formatting, all workspace TypeScript checks, Rust checks, web/native/CLI builds and the compiled executable derived-version assertion. Fork CI skips test execution; this is checks/build evidence, not test-suite evidence.\n- Arch pipeline #221 succeeded. Immutable dispatch `694581671e7e9739dd70de3689ac887c9c4f343e` pins source `4cc5b2799ffed0366209bcb047c7babc1fd938f9`, recipe `8a6eb2b8b4d1b82d34ac94b26c36e5d46cff8cd2` and `oh-my-pi-vith-git`.\n- Published database and package detached signatures verified against fully trusted key `433D492D0438666BBB7230BB91D0A55E51016A94`. Package size and SHA-256 match the signed database: `3b11ffdc511af4a4c0697c93a0ff36b932d18d98627d519dc7673542f3b5dbdd`.\n- With explicit user approval, pacman removed only upstream `oh-my-pi-git 1:v18.5.1.r11.g66394a0-1` and installed `oh-my-pi-vith-git 18.4.8.vith.r346.g4cc5b2799ffe-1`; no repository sync or unrelated upgrade. Verified package-owned `/usr/bin/omp` reports `omp/18.4.8+vith-fork.346.4cc5b2799ffe`.\n- Updated existing settings documentation. Changelog intentionally unchanged because no changelog update was requested.\n\n---\n\n- [x] `bun check` passes (equivalent full `check:ts` and `check:rs` gates passed on n3t; broad local TypeScript command timed out)\n- [x] Tested locally\n- [ ] CHANGELOG updated with the required attribution (intentionally unchanged; not requested)",
+    "state": "closed",
+    "draft": false,
+    "is_locked": false,
+    "comments": 0,
+    "review_comments": 0,
+    "additions": 155,
+    "deletions": 14,
+    "changed_files": 7,
+    "html_url": "https://git.n3t.work/vith/oh-my-pi/pulls/17",
+    "diff_url": "https://git.n3t.work/vith/oh-my-pi/pulls/17.diff",
+    "patch_url": "https://git.n3t.work/vith/oh-my-pi/pulls/17.patch",
+    "mergeable": true,
+    "merged": true,
+    "merged_at": "2026-10-03T19:19:29+02:00",
+    "merge_commit_sha": "4cc5b2799ffed0366209bcb047c7babc1fd938f9",
+    "merge_base": "bd8cf9ebadbcebc2dd671d3c68aff1e71009b550",
+    "created_at": "2026-10-03T19:11:55+02:00",
+    "updated_at": "2026-10-03T19:58:28+02:00",
+    "closed_at": "2026-10-03T19:19:29+02:00",
+    "user": {
+      "id": 1,
+      "login": "vith",
+      "full_name": "",
+      "html_url": "https://git.n3t.work/vith"
+    },
+    "merged_by": {
+      "id": 1,
+      "login": "vith",
+      "full_name": "",
+      "html_url": "https://git.n3t.work/vith"
+    },
+    "assignee": null,
+    "assignees": [],
+    "requested_reviewers": [],
+    "base": {
+      "label": "integration",
+      "ref": "integration",
+      "sha": "c0a06a77a6a58a937d753f144278403fa6e9a802",
+      "repo": {
+        "full_name": "vith/oh-my-pi",
+        "html_url": "https://git.n3t.work/vith/oh-my-pi"
+      }
+    },
+    "head": {
+      "label": "feat/reasoning-stream-status",
+      "ref": "feat/reasoning-stream-status",
+      "sha": "3466d30eb3899435c8e5015ce5e574723d3aa5c2",
+      "repo": {
+        "full_name": "vith/oh-my-pi",
+        "html_url": "https://git.n3t.work/vith/oh-my-pi"
+      }
+    }
+  },
+  "review_threads": [],
+  "reviews": [],
+  "source_number": 17,
+  "source_repository": "https://git.n3t.work/vith/oh-my-pi",
+  "source_url": "https://git.n3t.work/vith/oh-my-pi/pulls/17",
+  "timeline": null,
+  "coverage": {
+    "pull": "Retrieved authenticated /pulls/17",
+    "reviews": "Retrieved authenticated /pulls/17/reviews; empty",
+    "review_threads": "No reviews present, so no review threads to fetch",
+    "comments": "Unavailable: /issues/17/comments HTTP 403; mounted pr_comment_list also reports missing read:issue scope",
+    "timeline": "Unavailable: /issues/17/timeline HTTP 403 (read:issue scope unavailable)",
+    "assets": "Unavailable: /issues/17/assets HTTP 403 (read:issue scope unavailable)"
+  },
+  "historical_only": true
+}

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "repository": "https://github.com/vith/oh-my-pi-vith",
+  "repository": "https://github.com/vith/oh-my-pi",
   "mapping": {
     "refs/heads/feat/arm-pr-ci": {
       "original_object": "574a559ff74196be413503dcf2a6b6fcc2990611",
@@ -162,6 +162,59 @@
     "ref": "refs/heads/integration",
     "original_ancestor": "1c657a066e44b7d7b17a577c421f60f7160ffbc5",
     "retains_original_ancestry": true
+  },
+  "later_reconciliation": {
+    "github_base": "2f406d28d7e451d158557e6a5a9ce5ce1e3ebd2d",
+    "forgejo_integration": "c0a06a77a6a58a937d753f144278403fa6e9a802",
+    "merge_policy": "Ordinary merge retaining both histories; no source approvals transferred",
+    "discussion_coverage": "PRs 14-19 descriptions/public identities and empty review lists are archived in the existing prs/ layout. Comments, timeline and attachments could not be retrieved: authenticated issue endpoints return HTTP 403 and mounted pr_comment_list reports missing read:issue scope. Each supplemental PR records exact coverage; the original private export digest covers only PRs 1-13.",
+    "mapping": {
+      "refs/heads/integration": {
+        "original_object": "c0a06a77a6a58a937d753f144278403fa6e9a802",
+        "github_ref": "refs/heads/archive/forgejo/integration-20261004",
+        "object_preserved_exactly": true
+      },
+      "refs/heads/feat/bash-output-visibility": {
+        "original_object": "1c659d0e05a09a3b4d36e7ed3d80ad9601c10be6",
+        "github_ref": "refs/heads/archive/forgejo/bash-output-visibility-20261004",
+        "object_preserved_exactly": true
+      },
+      "refs/heads/feat/reasoning-stream-status": {
+        "original_object": "3466d30eb3899435c8e5015ce5e574723d3aa5c2",
+        "github_ref": "refs/heads/archive/forgejo/reasoning-stream-status-20261004",
+        "object_preserved_exactly": true
+      },
+      "refs/pull/14/head": {
+        "original_object": "902e3b4aa6d8be78011fc235aaf7216790f8678d",
+        "github_ref": "refs/heads/archive/forgejo/pr-14",
+        "object_preserved_exactly": true
+      },
+      "refs/pull/15/head": {
+        "original_object": "b39e0854214dd3bb40db814aec59b3d0d6df0581",
+        "github_ref": "refs/heads/archive/forgejo/pr-15",
+        "object_preserved_exactly": true
+      },
+      "refs/pull/16/head": {
+        "original_object": "f5ea3ba24eeab7faf684c558a327a2410838a99a",
+        "github_ref": "refs/heads/archive/forgejo/pr-16",
+        "object_preserved_exactly": true
+      },
+      "refs/pull/17/head": {
+        "original_object": "3466d30eb3899435c8e5015ce5e574723d3aa5c2",
+        "github_ref": "refs/heads/archive/forgejo/pr-17",
+        "object_preserved_exactly": true
+      },
+      "refs/pull/18/head": {
+        "original_object": "8a6bac92e50352419f4df7e6d8ed9f78a27e96fd",
+        "github_ref": "refs/heads/archive/forgejo/pr-18",
+        "object_preserved_exactly": true
+      },
+      "refs/pull/19/head": {
+        "original_object": "1c659d0e05a09a3b4d36e7ed3d80ad9601c10be6",
+        "github_ref": "refs/heads/archive/forgejo/pr-19",
+        "object_preserved_exactly": true
+      }
+    }
   },
   "native_metadata_limit": "GitHub imported PR author/timestamp/review identity cannot be synthesized; attributed records are retained in this archive."
 }
