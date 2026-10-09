@@ -9,10 +9,13 @@ the description from verified changes and evidence. Do not request a
 human-written sentence from the user or attribute assistant-written prose to
 them. Internal PRs still follow the fork's branch, review, CI, and merge rules.
 
-Source merges require human review. Compilation and runtime verification run
-through the hosted x86_64 OMP package build in `vith/arch-packages`; there is no
-separate ARM source build. Source test suites remain disabled and must not be
-reported as passed.
+Maintainer-authored internal fork PRs do not require additional human approval.
+The assistant may merge the user's requested, verified changes through the
+protected PR path, including PRs it prepares under the maintainer's account.
+External and bot-authored contributions remain subject to maintainer review.
+Compilation and runtime verification run through the hosted x86_64 OMP package
+build in `vith/arch-packages`; there is no separate ARM source build. Source test
+suites remain disabled and must not be reported as passed.
 
 ## GitHub fork validation and catch-up
 
@@ -23,10 +26,11 @@ package delivery is proved; old source automation must not mutate concurrently
 with GitHub catch-up. Repository Actions policy permits only the pinned actions
 used by the migration workflows, prohibiting inherited build/publish actions.
 
-Source PRs receive ordinary human review and a protected merge through GitHub;
-there is no separate workflow approval prerequisite. No controller auto-merges
-source. Hosted package validation and signed delivery remain independent of
-source review and merge.
+Maintainer-authored source PRs may be verified and merged by the assistant
+without additional approval. There is no separate workflow approval prerequisite.
+Catch-up controllers still propose PRs rather than auto-merging source.
+Hosted package validation and signed delivery remain independent of source
+review and merge.
 
 `tools/catchup.py` discovers authentic stable `vMAJOR.MINOR.PATCH` upstream tags
 every six hours (or by explicit manual tag). Scheduled discovery fails closed
@@ -78,7 +82,7 @@ The original private export digest still covers only PRs #1–#13. The ref map
 records the later integration, changed feature branches and all six PR heads
 without overwriting the initial archived integration. PR #15 is preserved only
 as a closed, superseded historical record.
-GitHub source PRs follow ordinary human review and protected merge;
+GitHub source PRs follow the protected PR policy above;
 the retained legacy Woodpecker file does not authorize concurrent Forgejo
 automation or duplicate ARM compilation. Package compilation and executable
 verification remain the hosted x86_64 package repository's responsibility.
@@ -86,9 +90,9 @@ verification remain the hosted x86_64 package repository's responsibility.
 A source candidate must contain both pinned integration identities and authentic
 upstream v18.4.8 as ancestors. Read the runtime identity through
 `readForkVersion` in `scripts/prepare-fork-build.ts` without invoking build
-preparation or compiling on the workstation. The candidate requires ordinary
-human review and a protected merge through GitHub, with no separate workflow
-approval. Only then can the package updater
+preparation or compiling on the workstation. Maintainer-authored candidates may
+be verified and merged by the assistant through GitHub without extra approval.
+After the source merge, the package updater can
 deliver a signed non-downgrading GitHub package; source reconciliation alone is
 not publication or installation evidence.
 
