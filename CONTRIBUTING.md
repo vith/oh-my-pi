@@ -23,14 +23,10 @@ package delivery is proved; old source automation must not mutate concurrently
 with GitHub catch-up. Repository Actions policy permits only the pinned actions
 used by the migration workflows, prohibiting inherited build/publish actions.
 
-`fork-pr-dispatch.yml` reads PR metadata only and dispatches the human review
-workflow `fork-ci.yml` at integration. Preparation pins the exact PR head and
-current integration base. This workflow does not execute candidate code.
-
-The human-approved `source-review` status is required before merging.
-The secret-free `source-review` environment shows the
-PR and pinned identities; head/base movement invalidates old evidence. A human
-merges through GitHub. No controller auto-approves or auto-merges source.
+Source PRs receive ordinary human review and a protected merge through GitHub;
+there is no separate workflow approval prerequisite. No controller auto-merges
+source. Hosted package validation and signed delivery remain independent of
+source review and merge.
 
 `tools/catchup.py` discovers authentic stable `vMAJOR.MINOR.PATCH` upstream tags
 every six hours (or by explicit manual tag). Scheduled discovery fails closed
@@ -41,14 +37,14 @@ Moved tags fail closed. A clean
 ordinary merge retains both pinned parents; conflicts create a draft from the
 exact upstream commit with actual conflict paths for human resolution. A fresh
 trusted writer validates the bounded receipt, bundle, authentic tag and parent
-identities before publishing only the intended tag/branch and explicitly
-dispatching CI. Stable scheduled discovery uses published non-draft,
-non-prerelease upstream releases, not arbitrary similarly named tags. Exact
-bot-owned candidates have bounded bot-authored ownership receipts; missing,
-failed or stale-base statuses are dispatched again. An unedited clean bot
-candidate can refresh for a changed integration base only with an exact
-force-with-lease and verified original parents. New heads invalidate old
-validation/approval. Refresh conflicts become human-required drafts.
+identities before publishing only the intended tag/branch and creating or
+refreshing a PR for human review and protected merge. Stable scheduled discovery
+uses published non-draft, non-prerelease upstream releases, not arbitrary
+similarly named tags. Exact bot-owned candidates have bounded bot-authored
+ownership receipts; an unchanged proposal on the same integration base is reused
+without publication artifacts. An unedited clean bot candidate can refresh for
+a changed integration base only with an exact force-with-lease and verified
+original parents. Refresh conflicts become human-required drafts.
 Existing migrated/human-edited branches are never overwritten;
 one blocked active catch-up stays visible. Closed unmerged proposals require
 explicit manual reconsideration.
@@ -82,7 +78,7 @@ The original private export digest still covers only PRs #1–#13. The ref map
 records the later integration, changed feature branches and all six PR heads
 without overwriting the initial archived integration. PR #15 is preserved only
 as a closed, superseded historical record.
-The GitHub human-only review workflows remain unchanged;
+GitHub source PRs follow ordinary human review and protected merge;
 the retained legacy Woodpecker file does not authorize concurrent Forgejo
 automation or duplicate ARM compilation. Package compilation and executable
 verification remain the hosted x86_64 package repository's responsibility.
@@ -90,9 +86,9 @@ verification remain the hosted x86_64 package repository's responsibility.
 A source candidate must contain both pinned integration identities and authentic
 upstream v18.4.8 as ancestors. Read the runtime identity through
 `readForkVersion` in `scripts/prepare-fork-build.ts` without invoking build
-preparation or compiling on the workstation. Fresh human `source-review`
-approval is required for the exact candidate head and current GitHub integration
-base, followed by a human protected merge. Only then can the package updater
+preparation or compiling on the workstation. The candidate requires ordinary
+human review and a protected merge through GitHub, with no separate workflow
+approval. Only then can the package updater
 deliver a signed non-downgrading GitHub package; source reconciliation alone is
 not publication or installation evidence.
 

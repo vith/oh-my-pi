@@ -85,11 +85,6 @@ def ownership(pr):
     return record
 
 
-def needs_dispatch(pr, base):
-    statuses = api('/commits/' + pr['head']['sha'] + '/status')['statuses']
-    latest = {row['context']: row for row in reversed(statuses)}
-    return any(context not in latest or latest[context]['state'] in ('failure', 'error') or latest[context].get('description') != 'Pinned integration base ' + base for context in ['source-review'])
-
 
 def save_receipt(out, receipt):
     content = json.dumps(receipt, sort_keys=True, separators=(',', ':')) + '\n'
@@ -147,10 +142,7 @@ def discovery(out, requested):
             raise ValueError('existing bot ownership authentic tag identity changed')
         current = api('/git/ref/heads/integration')['object']['sha']
         if current == previous['base']:
-            if needs_dispatch(active_pr, current):
-                save_receipt(out, {'schema': 1, 'operation': 'dispatch', 'repository': repository, 'number': active_pr['number'], 'head': previous['candidate'], 'base': current})
-            else:
-                print('Identical bot proposal and current statuses reused: ' + active_pr['html_url'])
+            print('Identical bot proposal reused: ' + active_pr['html_url'])
             return
     if not active_pr and not requested and any(pr['head']['ref'] == 'feat/catchup-' + tag and not pr['merged_at'] for pr in pulls('closed')):
         print('Closed unmerged proposal requires explicit manual tag reconsideration')
@@ -202,16 +194,6 @@ def publish(out, requested):
     if len(content) > 65536:
         raise ValueError('oversized receipt')
     receipt = json.loads(content)
-    if receipt.get('operation') == 'dispatch':
-        if set(receipt) != {'schema', 'operation', 'repository', 'number', 'head', 'base'} or receipt['schema'] != 1 or receipt['repository'] != os.environ['GITHUB_REPOSITORY'] or type(receipt['number']) is not int or receipt['number'] < 1:
-            raise ValueError('invalid dispatch receipt')
-        pr = api('/pulls/' + str(receipt['number']))
-        previous = ownership(pr)
-        if pr['state'] != 'open' or pr['base']['ref'] != 'integration' or not previous or previous['conflicts'] or previous['candidate'] != receipt['head'] or previous['base'] != receipt['base'] or api('/git/ref/heads/integration')['object']['sha'] != receipt['base']:
-            raise ValueError('dispatch ownership/head/base changed')
-        api('/actions/workflows/fork-ci.yml/dispatches', {'ref': 'integration', 'inputs': {'pr_number': str(pr['number'])}})
-        print('Re-dispatched identical bot proposal: ' + pr['html_url'])
-        return
     if set(receipt) != {'schema', 'repository', 'base', 'tag', 'tag_object', 'upstream_commit', 'candidate', 'conflicts', 'bundle_sha256', 'refresh'} or receipt['schema'] != 1 or receipt['repository'] != os.environ['GITHUB_REPOSITORY']:
         raise ValueError('invalid receipt schema/repository')
     for field in ['base', 'tag_object', 'upstream_commit', 'candidate']:
@@ -284,7 +266,7 @@ def publish(out, requested):
         refspecs.append('refs/audit/upstream:' + ref)
     lease = ['--force-with-lease=refs/heads/' + branch + ':' + refresh['previous']['candidate']] if active_pr else []
     subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'push', '--atomic', *lease, fork, *refspecs], cwd=workspace, env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    body = 'Deterministic proposal. Human source approval and merge required.\n\nPinned integration: `' + receipt['base'] + '`\nAuthentic upstream tag object: `' + receipt['tag_object'] + '`\nUpstream commit: `' + receipt['upstream_commit'] + '`\nCandidate: `' + receipt['candidate'] + '`\n\nSource not merged; package delivery pending independent signed evidence.'
+    body = 'Deterministic proposal. Human review and protected merge required.\n\nPinned integration: `' + receipt['base'] + '`\nAuthentic upstream tag object: `' + receipt['tag_object'] + '`\nUpstream commit: `' + receipt['upstream_commit'] + '`\nCandidate: `' + receipt['candidate'] + '`\n\nSource not merged; package delivery pending independent signed evidence.'
     if receipt['conflicts']:
         body += '\n\nBlocked: recreate a merge from pinned integration, resolve conflicts, and push human-reviewed work. Recorded conflict paths:\n' + '\n'.join('- `' + path.replace('`', '\\`') + '`' for path in receipt['conflicts'])
     if active_pr:
@@ -300,7 +282,6 @@ def publish(out, requested):
         raise ValueError('created/refreshed PR exact head mismatch')
     record = {field: receipt[field] for field in ['schema', 'tag', 'base', 'candidate', 'upstream_commit', 'tag_object', 'conflicts']}
     api('/issues/' + str(pr['number']) + '/comments', {'body': OWNERSHIP + json.dumps(record, sort_keys=True, separators=(',', ':'))})
-    api('/actions/workflows/fork-ci.yml/dispatches', {'ref': 'integration', 'inputs': {'pr_number': str(pr['number'])}})
     print(pr['html_url'])
 
 
