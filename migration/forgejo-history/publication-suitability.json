@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "reachable_git_blob_count": 133762,
+  "largest_git_blob_bytes": 56548921,
+  "github_limit_bytes": 104857600,
+  "git_blobs_at_or_above_limit": 0,
+  "historical_lfs_pointer_count": 9,
+  "lfs_provenance": "lfs.json",
+  "wiki_initialized_repository_present": false,
+  "original_export_verified_file_count": 357,
+  "original_export_digest_mismatches": 0,
+  "large_blob_note": "A blob exceeds GitHub recommended 50MiB threshold but none reaches the hard 100MiB Git blob limit; original history is preserved without rewriting."
+}

@@ -1,0 +1,59 @@
+name: Human source review
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Numeric integration PR to review
+        type: string
+        required: true
+permissions: {}
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: source-review-${{ inputs.pr_number }}
+  cancel-in-progress: true
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    outputs:
+      head: ${{ steps.pin.outputs.head }}
+      base: ${{ steps.pin.outputs.base }}
+      number: ${{ steps.pin.outputs.number }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: pin
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: python3 tools/source_gate.py prepare --number "$PR_NUMBER"
+  review:
+    name: Approve PR ${{ needs.prepare.outputs.number }} head ${{ needs.prepare.outputs.head }} base ${{ needs.prepare.outputs.base }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    environment:
+      name: source-review
+      url: https://github.com/${{ github.repository }}/pull/${{ needs.prepare.outputs.number }}
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Revalidate approved exact proposal
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.prepare.outputs.number }}
+          HEAD_SHA: ${{ needs.prepare.outputs.head }}
+          BASE_SHA: ${{ needs.prepare.outputs.base }}
+        run: python3 tools/source_gate.py status --number "$PR_NUMBER" --head "$HEAD_SHA" --base "$BASE_SHA" --context source-review --state success

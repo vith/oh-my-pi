@@ -4,16 +4,103 @@
 
 The contributor-authorship and submission requirements below apply to PRs sent
 to upstream `can1357/oh-my-pi`, not maintainer integration PRs within this fork.
-For internal fork PRs, including `git.n3t.work/vith/oh-my-pi`, the assistant writes
+For internal fork PRs in `github.com/vith/oh-my-pi`, the assistant writes
 the description from verified changes and evidence. Do not request a
 human-written sentence from the user or attribute assistant-written prose to
 them. Internal PRs still follow the fork's branch, review, CI, and merge rules.
 
-Fork CI temporarily skips test execution until its runtime is optimized. It
-retains lint, formatting and type checks, builds the web UI and native CLI, and
-verifies the compiled executable reports the derived fork version. A passing
-fork pipeline does not mean the test suites passed; report skipped tests
-explicitly in internal PRs.
+Source merges require human review. Compilation and runtime verification run
+through the hosted x86_64 OMP package build in `vith/arch-packages`; there is no
+separate ARM source build. Source test suites remain disabled and must not be
+reported as passed.
+
+## GitHub fork validation and catch-up
+
+The ongoing source destination is `github.com/vith/oh-my-pi`, with canonical
+branch `integration`. Historical feature refs preserve their original objects.
+The existing `.woodpecker.yml` remains until replacement
+package delivery is proved; old source automation must not mutate concurrently
+with GitHub catch-up. Repository Actions policy permits only the pinned actions
+used by the migration workflows, prohibiting inherited build/publish actions.
+
+`fork-pr-dispatch.yml` reads PR metadata only and dispatches the human review
+workflow `fork-ci.yml` at integration. Preparation pins the exact PR head and
+current integration base. This workflow does not execute candidate code.
+
+The human-approved `source-review` status is required before merging.
+The secret-free `source-review` environment shows the
+PR and pinned identities; head/base movement invalidates old evidence. A human
+merges through GitHub. No controller auto-approves or auto-merges source.
+
+`tools/catchup.py` discovers authentic stable `vMAJOR.MINOR.PATCH` upstream tags
+every six hours (or by explicit manual tag). Scheduled discovery fails closed
+unless repository variable `CATCHUP_SCHEDULE_ENABLED` is exactly `true`. It remains
+`false` during migration until the maintainer verifies the old Oracle mutator is
+quiescent; explicit manual dispatch remains available for controlled proof.
+Moved tags fail closed. A clean
+ordinary merge retains both pinned parents; conflicts create a draft from the
+exact upstream commit with actual conflict paths for human resolution. A fresh
+trusted writer validates the bounded receipt, bundle, authentic tag and parent
+identities before publishing only the intended tag/branch and explicitly
+dispatching CI. Stable scheduled discovery uses published non-draft,
+non-prerelease upstream releases, not arbitrary similarly named tags. Exact
+bot-owned candidates have bounded bot-authored ownership receipts; missing,
+failed or stale-base statuses are dispatched again. An unedited clean bot
+candidate can refresh for a changed integration base only with an exact
+force-with-lease and verified original parents. New heads invalidate old
+validation/approval. Refresh conflicts become human-required drafts.
+Existing migrated/human-edited branches are never overwritten;
+one blocked active catch-up stays visible. Closed unmerged proposals require
+explicit manual reconsideration.
+
+### Reconcile the later Forgejo integration
+
+The initial source archive stopped at Forgejo integration
+`1c657a066e44b7d7b17a577c421f60f7160ffbc5`. Forgejo then continued to the
+installed revision `c0a06a77a6a58a937d753f144278403fa6e9a802`, while GitHub
+integration advanced independently to
+`2f406d28d7e451d158557e6a5a9ce5ce1e3ebd2d`. Reconciliation uses an ordinary
+merge of the installed Forgejo revision onto that GitHub base, retaining both
+complete histories rather than cherry-picking features or rewriting integration.
+
+The retained Forgejo changes are PRs #14 and #16–#19: wheel scrolling with
+click-to-focus, accurate reasoning stream status/update age, handled-event
+explanations, terminal-owned chat scrolling/fullscreen bash/slash dispatch, and
+Page Up/Page Down from the live prompt without losing its draft. Superseded
+PR #15 is archival history, not a feature to restore. The retired permissions
+work remains retired. Draft GitHub PRs #1 (old ARM CI) and #2 (v18.4.9 catch-up)
+are not prerequisites and are not merged by this reconciliation.
+
+The existing `migration/forgejo-history` archive preserves attributed historical
+records; these are not fresh GitHub approvals. Supplemental records for PRs
+#14–#19 use the existing JSON/Markdown archive layout and whitelist public PR
+descriptions, actor identities, branch/merge identities and timestamps. Their
+review endpoints returned empty lists. Comments, timeline and attachment
+endpoints returned HTTP 403 because the available credential lacks `read:issue`;
+these unavailable fields are recorded as `null`, with exact coverage per PR.
+The original private export digest still covers only PRs #1–#13. The ref map
+records the later integration, changed feature branches and all six PR heads
+without overwriting the initial archived integration. PR #15 is preserved only
+as a closed, superseded historical record.
+The GitHub human-only review workflows remain unchanged;
+the retained legacy Woodpecker file does not authorize concurrent Forgejo
+automation or duplicate ARM compilation. Package compilation and executable
+verification remain the hosted x86_64 package repository's responsibility.
+
+A source candidate must contain both pinned integration identities and authentic
+upstream v18.4.8 as ancestors. Read the runtime identity through
+`readForkVersion` in `scripts/prepare-fork-build.ts` without invoking build
+preparation or compiling on the workstation. Fresh human `source-review`
+approval is required for the exact candidate head and current GitHub integration
+base, followed by a human protected merge. Only then can the package updater
+deliver a signed non-downgrading GitHub package; source reconciliation alone is
+not publication or installation evidence.
+
+Source merge and signed package delivery are distinct. Until independently
+verified matching source/input/signature evidence exists, catch-up reports
+package delivery as pending rather than inferring publication from a source run.
+The package repository observes integration read-only; no cross-repository write
+credential or Oracle/model publication observer is used.
 
 Pull requests are welcome. Keep them focused, understand the work you submit,
 and be prepared to explain and maintain it.
