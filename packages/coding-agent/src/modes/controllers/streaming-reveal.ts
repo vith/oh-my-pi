@@ -389,7 +389,7 @@ export class StreamingRevealController {
 			this.#revealed = total;
 			this.#targetDirty = false;
 			this.#stopTimer();
-			if (alreadySnapped) return;
+			if (alreadySnapped && !(eventType === "thinking_end" && contentIndex !== undefined)) return;
 			this.#component.updateContent(this.#build(message, this.#revealed), {
 				transient: true,
 				streamUpdatedAt: this.#streamUpdatedAt,

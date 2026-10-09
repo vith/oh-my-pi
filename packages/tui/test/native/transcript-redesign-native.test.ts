@@ -235,6 +235,46 @@ describe("native transcript redesign", () => {
 		}
 	});
 
+	it("does not invent a duration for an item first observed at explicit completion", async () => {
+		const component = new AssistantMessageComponent();
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		let now = 1000;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+		const message: AssistantMessage = {
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content: [{ type: "thinking", thinking: "" }],
+		};
+		try {
+			component.updateContent(message, {
+				transient: true,
+				streamUpdatedAt: now,
+				streamUpdateType: "thinking_end",
+				streamUpdateContentIndex: 0,
+			});
+			now = 6000;
+			component.invalidate();
+			component.updateContent(message, { transient: true });
+			await harness.render();
+			// Only provider update age has an elapsed node; the unobserved
+			// reasoning item has neither a live clock nor a stopped clock.
+			expect(harness.find(node => node.k === "elapsed" && node.p?.age === 5000)).toBeDefined();
+			expect(harness.find(node => node.k === "elapsed" && node.p?.age !== 5000)).toBeUndefined();
+			expect(harness.find(node => node.k === "elapsed" && node.p?.stopped !== undefined)).toBeUndefined();
+			now = 9000;
+			component.markTranscriptBlockFinalized();
+			await harness.render();
+			expect(harness.find(node => node.k === "elapsed")).toBeUndefined();
+			expect(harness.find(node => /Thought.*for/.test(texts(node)))).toBeUndefined();
+			expect(harness.errors).toEqual([]);
+		} finally {
+			nowSpy.mockRestore();
+			component.dispose();
+		}
+	});
+
 	it("closes the indexed older item without stopping newer thinking or extending duplicate completions", async () => {
 		const component = new AssistantMessageComponent();
 		harness = await TspHarness.start();

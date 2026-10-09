@@ -371,6 +371,8 @@ export class AssistantMessageComponent extends Container {
 	#thinkingCollapsed = new Map<number, boolean>();
 	/** When each thinking block was seen streaming and when it stopped (native "Thought for 12s"), by content index. */
 	#thinkingClock = new Map<number, { start: number; end?: number; tokens: number; explicitEnd?: boolean }>();
+	/** Explicitly completed items first observed after their start cannot acquire a clock on rebuild. */
+	#unobservedThinkingEnds: Set<number> | undefined;
 	#nativeViewVersion = 0;
 	readonly #native = new Memo();
 	/** Markdown nodes by key, reused while their text and streaming flag are unchanged. */
@@ -625,6 +627,8 @@ export class AssistantMessageComponent extends Container {
 				clock.end = Math.max(clock.start, updatedAt);
 				clock.explicitEnd = true;
 				changed = true;
+			} else if (!clock) {
+				(this.#unobservedThinkingEnds ??= new Set()).add(contentIndex);
 			}
 		}
 		const tail = this.#lastUpdateTransient ? this.#thinkingTailIndex(message) : undefined;
@@ -638,7 +642,7 @@ export class AssistantMessageComponent extends Container {
 			const clock = this.#thinkingClock.get(tail);
 			const tokens = message.usage.reasoningTokens ?? message.usage.output;
 			if (clock) clock.tokens = tokens || clock.tokens;
-			else if (!(eventType === "thinking_end" && contentIndex === tail)) {
+			else if (!this.#unobservedThinkingEnds?.has(tail)) {
 				this.#thinkingClock.set(tail, { start: updatedAt, tokens });
 			}
 		}
