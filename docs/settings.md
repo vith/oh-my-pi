@@ -502,6 +502,8 @@ The interactive chat shows a thinking pulse while reasoning is hidden or the pro
 
 The number counts UI-handled assistant-stream updates, not tokens or network packets. Updates can be coalesced before reaching the UI. The age measures time since the latest handled stream event; reveal ticks and repaints neither reset it nor advance the update number. Neither the animation nor a reasoning-start or completion event proves that the provider is still generating tokens: during a silent interval, this indicator cannot distinguish ongoing inference from a stalled request. The indicator disappears when answer text or a tool call starts, or when the message finishes.
 
+Thinking duration is separate from the latest-update age: receiving an update resets the age, not the current item's elapsed time. Changing thinking visibility does not pause or restart that duration. When an observed thinking item completes, its duration freezes; completed hidden or summary-less items retain a compact `Thought for …` row as later thinking items arrive and after the answer. These durations measure intervals observed by the UI, not server inference time. Rebuilt transcripts and items first observed at completion cannot recover an unobserved duration.
+
 The thinking token count and speed badge appear only when the provider supplies increasing token usage during the stream. Codex supplies its encrypted reasoning payload when the reasoning item completes and token usage at response completion, so there is no live encrypted-reasoning tok/s measurement during its silent thinking interval.
 
 ### Sampling

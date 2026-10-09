@@ -2701,7 +2701,7 @@ export class InputController {
 
 		if (this.ctx.streamingComponent && this.ctx.streamingMessage) {
 			this.ctx.streamingComponent.setHideThinkingBlock(this.ctx.hideThinkingBlock);
-			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
+			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage, { transient: true });
 		}
 
 		// This is an explicit user display gesture: rebuild native history so the

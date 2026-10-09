@@ -181,6 +181,68 @@ describe("EventController message_update coalescing", () => {
 		}
 	});
 
+	it("retains completed thinking durations when later empty thinking items arrive", async () => {
+		const { controller, ctx, emit } = createStreamingFixture();
+		let now = 1000;
+		vi.spyOn(performance, "now").mockImplementation(() => now);
+		let message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "" }],
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "fixture",
+			usage: zeroUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const rendered = () => Bun.stripANSI(ctx.streamingComponent!.render(180).join("\n"));
+		const update = async (type: "thinking_start" | "thinking_end", contentIndex: number) => {
+			emit({
+				type: "message_update",
+				message,
+				assistantMessageEvent:
+					type === "thinking_end"
+						? { type, contentIndex, content: "", partial: message }
+						: { type, contentIndex, partial: message },
+			});
+			vi.advanceTimersByTime(33);
+			await flushMicrotasks();
+		};
+		try {
+			emit({ type: "message_start", message });
+			await flushMicrotasks();
+			await update("thinking_start", 0);
+			now = 6000;
+			await update("thinking_end", 0);
+
+			now = 10000;
+			message = { ...message, content: [...message.content, { type: "thinking", thinking: "" }] };
+			await update("thinking_start", 1);
+			expect(rendered()).toMatch(/Thought.*5s/);
+
+			now = 12000;
+			await update("thinking_start", 1);
+			expect(rendered()).toMatch(/Thought.*5s/);
+			expect(rendered()).toContain("2.0s elapsed");
+			expect(rendered()).toContain("0ms ago");
+
+			now = 14000;
+			await update("thinking_end", 1);
+			now = 20000;
+			message = { ...message, content: [...message.content, { type: "text", text: "Answer" }] };
+			emit({ type: "message_end", message });
+			await flushMicrotasks();
+			const final = Bun.stripANSI(ctx.chatContainer.render(180).join("\n"));
+			expect(final).toMatch(/Thought.*5s/);
+			expect(final).toMatch(/Thought.*4s/);
+			expect(final).toContain("Answer");
+			expect(final).not.toContain("stream update");
+		} finally {
+			controller.dispose();
+			ctx.streamingComponent?.dispose();
+		}
+	});
+
 	it("flushes the pending snapshot before a subsequent non-update event", async () => {
 		const { ctx, emit } = createStreamingFixture();
 

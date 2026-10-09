@@ -135,6 +135,74 @@ describe("streaming reveal", () => {
 		}
 	});
 
+	it("keeps a cold completed thinking item untimed through display rebuilds", () => {
+		let now = 1000;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+		const component = new AssistantMessageComponent(undefined, false);
+		const message = makeMessage([{ type: "thinking", thinking: "" }]);
+		try {
+			component.updateContent(message, {
+				transient: true,
+				streamUpdatedAt: now,
+				streamUpdateType: "thinking_end",
+				streamUpdateContentIndex: 0,
+			});
+			now = 6000;
+			component.invalidate();
+			component.updateContent(message, { transient: true });
+			const live = Bun.stripANSI(component.render(120).join("\n"));
+			expect(live).toContain("Thinking");
+			expect(live).not.toContain("elapsed");
+			expect(live).toContain("5.0s ago");
+			component.markTranscriptBlockFinalized();
+			expect(Bun.stripANSI(component.render(120).join("\n"))).not.toContain("Thought for");
+		} finally {
+			component.dispose();
+			nowSpy.mockRestore();
+		}
+	});
+
+	it("corrects an inferred thinking duration at a tool boundary on explicit completion", () => {
+		vi.useFakeTimers();
+		let now = 1000;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+		const component = new AssistantMessageComponent(undefined, false);
+		const controller = new StreamingRevealController({
+			getSmoothStreaming: () => true,
+			getHideThinkingBlock: () => false,
+			getProseOnlyThinking: () => true,
+			requestRender: () => {},
+		});
+		const message = makeMessage([{ type: "thinking", thinking: "" }]);
+		const toolMessage = makeMessage([
+			...message.content,
+			{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "file.ts" } },
+		]);
+		try {
+			controller.begin(component, message, false);
+			now = 4000;
+			controller.setTarget(toolMessage, true, "toolcall_start", 1);
+			expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Thought for 3s");
+
+			now = 6000;
+			controller.setTarget(toolMessage, true, "toolcall_delta", 1);
+			expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Thought for 3s");
+
+			now = 8000;
+			controller.setTarget(toolMessage, true, "thinking_end", 0);
+			const corrected = Bun.stripANSI(component.render(120).join("\n"));
+			expect(corrected).toContain("Thought for 7s");
+			expect(corrected).not.toContain("Thought for 3s");
+			now = 10000;
+			controller.setTarget(toolMessage, true, "thinking_end", 0);
+			expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Thought for 7s");
+		} finally {
+			controller.stop();
+			component.dispose();
+			nowSpy.mockRestore();
+		}
+	});
+
 	it("slices at grapheme boundaries without mutating the target message", () => {
 		const familyEmoji = "👨‍👩‍👧‍👦";
 		const target = makeMessage([{ type: "text", text: `${familyEmoji}B` }]);

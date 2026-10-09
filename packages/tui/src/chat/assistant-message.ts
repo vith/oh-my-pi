@@ -370,7 +370,9 @@ export class AssistantMessageComponent extends Container {
 	/** Collapse state of thinking sections toggled in the terminal, by content index; cleared by {@link setHideThinkingBlock}. */
 	#thinkingCollapsed = new Map<number, boolean>();
 	/** When each thinking block was seen streaming and when it stopped (native "Thought for 12s"), by content index. */
-	#thinkingClock = new Map<number, { start: number; end?: number; tokens: number }>();
+	#thinkingClock = new Map<number, { start: number; end?: number; tokens: number; explicitEnd?: boolean }>();
+	/** Explicitly completed items first observed after their start cannot acquire a clock on rebuild. */
+	#unobservedThinkingEnds: Set<number> | undefined;
 	#nativeViewVersion = 0;
 	readonly #native = new Memo();
 	/** Markdown nodes by key, reused while their text and streaming flag are unchanged. */
@@ -611,6 +613,46 @@ export class AssistantMessageComponent extends Container {
 		return tailIndex;
 	}
 
+	/** Observe clocks at snapshot time, independently of either renderer's repaint cadence. */
+	#updateThinkingClocks(
+		message: AssistantMessage,
+		updatedAt: number,
+		eventType?: AssistantMessageEvent["type"],
+		contentIndex?: number,
+	): void {
+		let changed = false;
+		if (eventType === "thinking_end" && contentIndex !== undefined) {
+			const clock = this.#thinkingClock.get(contentIndex);
+			if (clock && !clock.explicitEnd) {
+				clock.end = Math.max(clock.start, updatedAt);
+				clock.explicitEnd = true;
+				changed = true;
+			} else if (!clock) {
+				(this.#unobservedThinkingEnds ??= new Set()).add(contentIndex);
+			}
+		}
+		const tail = this.#lastUpdateTransient ? this.#thinkingTailIndex(message) : undefined;
+		for (const [index, clock] of this.#thinkingClock) {
+			if (index !== tail && clock.end === undefined) {
+				clock.end = Math.max(clock.start, updatedAt);
+				changed = true;
+			}
+		}
+		if (tail !== undefined) {
+			const clock = this.#thinkingClock.get(tail);
+			const tokens = message.usage.reasoningTokens ?? message.usage.output;
+			if (clock) clock.tokens = tokens || clock.tokens;
+			else if (!this.#unobservedThinkingEnds?.has(tail)) {
+				this.#thinkingClock.set(tail, { start: updatedAt, tokens });
+			}
+		}
+		if (changed) {
+			// Completed duration rows change layout even when the message shape is unchanged.
+			this.#fastPathKey = undefined;
+			this.#fastPathItems = undefined;
+		}
+	}
+
 	#streamUpdateLabel(): string {
 		const number = this.#streamUpdateNumber === undefined ? "" : ` #${this.#streamUpdateNumber}`;
 		const event =
@@ -628,7 +670,16 @@ export class AssistantMessageComponent extends Container {
 						"dim",
 						` · ${this.#streamUpdateLabel()} · ${formatDuration(Math.max(0, Math.floor((performance.now() - this.#streamUpdatedAt) / 1000)) * 1000)} ago`,
 					);
-		const thinkingLabel = theme.fg("muted", " Thinking") + updateAge;
+		const tail = this.#displayedMessage ? this.#thinkingTailIndex(this.#displayedMessage) : undefined;
+		const clock = tail === undefined ? undefined : this.#thinkingClock.get(tail);
+		const thinkingElapsed =
+			clock === undefined
+				? ""
+				: theme.fg(
+						"dim",
+						` · ${formatDuration(Math.max(0, (clock.end ?? performance.now()) - clock.start))} elapsed`,
+					);
+		const thinkingLabel = theme.fg("muted", " Thinking") + thinkingElapsed + updateAge;
 		const rate = Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed());
 		// The numeric badge ("<total> · <rate> toks/s") only renders while this block
 		// is genuinely streaming provider tokens. A block that has observed no token
@@ -821,14 +872,8 @@ export class AssistantMessageComponent extends Container {
 				} else if (content.type === "thinking") {
 					const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
 					const thinkingLive = live && thinkingTail === index;
-					if (!display.visible && !thinkingLive) continue;
 					const clock = this.#thinkingClock.get(index);
-					if (thinkingLive) {
-						if (clock) clock.tokens = this.#thinkingTokens || clock.tokens;
-						else this.#thinkingClock.set(index, { start: performance.now(), tokens: this.#thinkingTokens });
-					} else if (clock && clock.end === undefined) {
-						clock.end = performance.now();
-					}
+					if (!display.visible && !thinkingLive && !clock) continue;
 					const tokens = thinkingLive ? this.#thinkingTokens : (clock?.tokens ?? 0);
 					const title = tokens > 0 ? `${formatNumber(tokens)} tokens` : undefined;
 					// Live: starburst · "Thinking…" · ticking timer · tok/s. Done: "Thought for 12s".
@@ -839,22 +884,31 @@ export class AssistantMessageComponent extends Container {
 								[
 									node("spinner", { style: "starburst", role: "omp.thinking.spin" }),
 									text([span("Thinking…", "muted")]),
-									...(this.#streamUpdatedAt === undefined
-										? [
+									...(clock === undefined
+										? []
+										: [
 												elapsed(
-													performance.now() - (this.#thinkingClock.get(index)?.start ?? performance.now()),
+													Math.max(0, (clock.end ?? performance.now()) - clock.start),
+													clock.end !== undefined,
 												),
-											]
+											]),
+									...(this.#streamUpdatedAt === undefined
+										? []
 										: [
 												text([span(this.#streamUpdateLabel(), "dim")]),
-												elapsed(performance.now() - this.#streamUpdatedAt),
+												elapsed(Math.max(0, performance.now() - this.#streamUpdatedAt)),
 												text([span("ago", "dim")]),
 											]),
 									...(rate >= 0.05 ? [node("rate", { value: rate, unit: "tok/s" })] : []),
 								],
 								display.visible ? "head" : `k${index}`,
 							)
-						: node("text", { spans: [span(thoughtLabel(clock), "muted")], title }, undefined, "head");
+						: node(
+								"text",
+								{ spans: [span(thoughtLabel(clock), "muted")], title },
+								undefined,
+								display.visible ? "head" : `k${index}`,
+							);
 					if (!display.visible) {
 						children.push(head);
 						continue;
@@ -1289,9 +1343,8 @@ export class AssistantMessageComponent extends Container {
 		this.#transcriptBlockFinalized = true;
 		this.#dropStableRenders();
 		this.#stopThinkingAnimation();
-		// If the live pulse was on screen when the block sealed, drop the fast path
-		// and rebuild so the placeholder is removed — finalized blocks never animate.
-		if (this.#thinkingDots) {
+		// Rebuild for observed clocks even if only the native surface showed them.
+		if (this.#thinkingDots || this.#thinkingClock.size > 0) {
 			this.#fastPathKey = undefined;
 			this.#fastPathItems = undefined;
 			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
@@ -1568,6 +1621,7 @@ export class AssistantMessageComponent extends Container {
 			streamUpdatedAt?: number;
 			streamUpdateNumber?: number;
 			streamUpdateType?: AssistantMessageEvent["type"];
+			streamUpdateContentIndex?: number;
 		},
 	): void {
 		if (opts?.streamUpdatedAt !== undefined) {
@@ -1582,6 +1636,12 @@ export class AssistantMessageComponent extends Container {
 		// verbatim message so re-renders re-derive the reaction deterministically.
 		message = this.#displayMessage(message, this.#lastUpdateTransient);
 		this.#displayedMessage = message;
+		this.#updateThinkingClocks(
+			message,
+			opts?.streamUpdatedAt ?? performance.now(),
+			opts?.streamUpdateType,
+			opts?.streamUpdateContentIndex,
+		);
 
 		// Streaming-speed gauge: only a live, in-flight render of the single
 		// animating hidden-thinking block feeds the shared session tracker. The
@@ -1650,6 +1710,7 @@ export class AssistantMessageComponent extends Container {
 		// Render content in order
 		let thinkingIndex = 0;
 		let hasRenderedContent = false;
+		const thinkingTail = this.#thinkingTailIndex(message);
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
@@ -1662,12 +1723,16 @@ export class AssistantMessageComponent extends Container {
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
 				hasRenderedContent = true;
 			} else if (content.type === "thinking") {
-				if (this.#hideThinkingBlock) {
+				const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
+				if (this.#hideThinkingBlock || !display.visible) {
+					const clock = this.#thinkingClock.get(i);
+					if (clock?.end !== undefined && i !== thinkingTail) {
+						this.#contentContainer.addChild(new Text(theme.fg("muted", thoughtLabel(clock)), 1, 0));
+						hasRenderedContent = true;
+					}
 					thinkingIndex += 1;
 					continue;
 				}
-				const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
-				if (!display.visible) continue;
 				const thinkingText = display.text;
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.

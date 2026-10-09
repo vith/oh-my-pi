@@ -1,9 +1,15 @@
-import { describe, expect, it, type Mock, vi } from "bun:test";
+import { beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
+
+beforeAll(async () => {
+	await initTheme(false);
+});
 
 function createAssistant(): AssistantMessageComponent {
 	const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
@@ -12,6 +18,62 @@ function createAssistant(): AssistantMessageComponent {
 }
 
 describe("InputController thinking visibility", () => {
+	it("keeps live elapsed time and provider update age advancing after a visibility toggle", () => {
+		let now = 1000;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+		const assistant = new AssistantMessageComponent(undefined, false);
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "mock",
+			stopReason: "stop",
+			timestamp: 0,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		const ctx = {
+			hideThinkingBlock: false,
+			hasDisplayableThinkingContent: true,
+			settings: Settings.isolated(),
+			session: { thinkingLevel: "high" },
+			chatContainer: { children: [assistant], resetStableEmission: vi.fn() },
+			streamingComponent: assistant,
+			streamingMessage: message,
+			showStatus: vi.fn(),
+			ui: { resetDisplay: vi.fn() },
+		} as unknown as InteractiveModeContext;
+		try {
+			assistant.updateContent(message, {
+				transient: true,
+				streamUpdatedAt: now,
+				streamUpdateNumber: 7,
+				streamUpdateType: "thinking_start",
+				streamUpdateContentIndex: 0,
+			});
+			now = 4000;
+			new InputController(ctx).toggleThinkingBlockVisibility();
+			now = 9000;
+			// Refresh the cached ANSI pulse without introducing another provider update.
+			assistant.invalidate();
+			const frame = Bun.stripANSI(assistant.render(160).join("\n"));
+			expect(frame).toContain("8.0s elapsed");
+			expect(frame).toContain("#7: reasoning item started");
+			expect(frame).toContain("8.0s ago");
+			expect(frame).not.toContain("Thought for");
+		} finally {
+			assistant.dispose();
+			nowSpy.mockRestore();
+		}
+	});
+
 	it("refuses to toggle and informs the user when thinking level is off", () => {
 		// When thinking is "off", effectiveHideThinkingBlock is true even if the
 		// user's hideThinkingBlock setting is false. The toggle should refuse
