@@ -33,7 +33,7 @@ function createHarness() {
 		showStatus: (text: string) => {
 			statuses.push(text);
 		},
-		handleJobsCommand: (args: string) => controller.handleJobsCommand(args),
+		handleJobsCommand: (options?: { full?: boolean; follow?: string }) => controller.handleJobsCommand(options),
 	} as unknown as InteractiveModeContext;
 	const controller = new CommandController(ctx);
 	const runtime: TuiSlashCommandRuntime = { ctx };

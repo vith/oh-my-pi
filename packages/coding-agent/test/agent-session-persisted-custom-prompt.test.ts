@@ -52,7 +52,7 @@ describe("AgentSession persisted custom prompt", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		sessionManager.appendSessionInit({ systemPrompt: ["test"], task: "test", tools: [] });
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");
 		expect(await Bun.file(sessionFile).exists()).toBe(false);
@@ -97,7 +97,7 @@ describe("AgentSession persisted custom prompt", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		sessionManager.appendSessionInit({ systemPrompt: ["test"], task: "test", tools: [] });
 		await sessionManager.ensureOnDisk();
 		const flushEntered = Promise.withResolvers<void>();
 		const releaseFlush = Promise.withResolvers<void>();
@@ -150,7 +150,7 @@ describe("AgentSession persisted custom prompt", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		sessionManager.appendSessionInit({ systemPrompt: ["test"], task: "test", tools: [] });
 		await sessionManager.ensureOnDisk();
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");
@@ -217,7 +217,7 @@ describe("AgentSession persisted custom prompt", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		sessionManager.appendSessionInit({ systemPrompt: ["test"], task: "test", tools: [] });
 		await sessionManager.ensureOnDisk();
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");
@@ -288,7 +288,7 @@ describe("AgentSession persisted custom prompt", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		sessionManager.appendSessionInit({ systemPrompt: ["test"], task: "test", tools: [] });
 		await sessionManager.ensureOnDisk();
 		const sessionFile = sessionManager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");
@@ -385,7 +385,7 @@ describe("AgentSession persisted custom prompt", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-		sessionManager.appendSessionInit({ systemPrompt: "test", task: "test", tools: [] });
+		sessionManager.appendSessionInit({ systemPrompt: ["test"], task: "test", tools: [] });
 		const seedUser = {
 			role: "user" as const,
 			content: [{ type: "text" as const, text: "seed user context".repeat(40) }],

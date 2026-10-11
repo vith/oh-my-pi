@@ -40,6 +40,8 @@ The most capable agent surface that ships. Continuously tuned by real-world use 
 curl -fsSL https://omp.sh/install | sh
 ```
 
+Without a usable bun (or with `--binary`), the install scripts fetch the prebuilt binary from `build.stencil.so` and check its SHA-256 before installing it. Pin a release with `curl -fsSL https://omp.sh/install | sh -s -- --binary --ref v<version>` (PowerShell: `-Binary -Ref v<version>`).
+
 > **Alpine / musl:** the prebuilt musl binary links `libstdc++`/`libgcc` dynamically, which stock Alpine does not ship. Install them first: `apk add libstdc++ libgcc`.
 
 **Homebrew**
@@ -587,6 +589,17 @@ Key ideas:
 - Keep interactive terminal-first UX for real coding work
 - Include practical built-ins (tools, sessions, branching, subagents, extensibility)
 - Make advanced behavior configurable rather than hidden
+
+### Project inputs and trust
+
+Opening a repository loads its project inputs by design: settings, extensions, hooks, tools, commands, skills, rules, and project MCP configuration. To exclude project `.mcp.json` for one invocation, pass `--config <file>` pointing at a YAML overlay with nested keys (a flat `mcp.enableProjectConfig: false` line is ignored):
+
+```yaml
+mcp:
+  enableProjectConfig: false
+```
+
+Use `--no-extensions` to skip ambient extension discovery; or use `--trusted-extension /absolute/path/to/file.ts` for an exact extension allowlist. `--no-tools` disables built-in tools, but project tool modules remain a separate discovery surface. These flags narrow inputs without changing the repository-trust model.
 
 ---
 

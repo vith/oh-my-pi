@@ -280,7 +280,7 @@ describe("Codex model discovery", () => {
 			// retains the standard window; the registry expands it only when
 			// extended context is enabled.
 			expect(builtModel.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
-			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
+			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5, ultrafast: 8 });
 			expect(builtModel).toMatchObject({
 				contextWindow: 272_000,
 				maxTokens: 128_000,
@@ -323,12 +323,20 @@ describe("Codex model discovery", () => {
 			// Discovery has no rates; the generated KDL policy supplies them
 			// when the discovered spec becomes a usable model.
 			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
-			expect(buildModel(model).cost).toEqual(
+			const builtModel = buildModel(model);
+			expect(builtModel.cost).toEqual(
 				model.id.startsWith("gpt-6.1-sol")
 					? { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 }
 					: model.id.startsWith("gpt-6-sol")
 						? { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 }
 						: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
+			);
+			// GPT-6.1 Sol ships Ultrafast at Codex's 8x included-usage rate;
+			// GPT-6 Sol and Luna have only Fast and Flex.
+			expect(builtModel.serviceTierCost).toEqual(
+				model.id.startsWith("gpt-6.1-sol")
+					? { flex: 0.5, priority: 2.5, ultrafast: 8 }
+					: { flex: 0.5, priority: 2.5 },
 			);
 		}
 	});

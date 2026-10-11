@@ -177,6 +177,13 @@ provider "openai" {
 			cache-write 25.0
 		}
 	}
+	// API Ultrafast is 6x the standard card on both context tiers: GPT-6 Astra
+	// $60/$6/$75/$300 and GPT-6.1 Sol $12/$0.60/$15/$60 per 1M short-context.
+	models "gpt-6-astra*" "gpt-6.1-sol*" {
+		service-tier-cost {
+			ultrafast 6
+		}
+	}
 	// residue: the bare Daybreak rolling aliases pin the documented 5.6-gen
 	// wire restrictions without carrying the gpt- prefix identity.
 	models "daybreak-blue-latest" "daybreak-red-latest" {

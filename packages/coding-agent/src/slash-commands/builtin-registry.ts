@@ -6,6 +6,8 @@ import {
 	buildArgumentCompletions,
 	buildDirectoryArgumentCompletions,
 	buildJobsArgumentCompletions,
+	buildEffortArgumentCompletions,
+	buildEffortInlineHint,
 	buildMcpArgumentCompletions,
 	buildModelSelectorCompletions,
 	buildStaticInlineHint,
@@ -70,6 +72,7 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 		},
 		icon: command.icon,
 		subcommands: command.subcommands,
+		subcommandOptional: command.subcommandOptional,
 		inlineHint: command.inlineHint,
 		getTuiAutocompleteDescription: command.getTuiAutocompleteDescription,
 	}),
@@ -81,14 +84,21 @@ function materializeTuiBuiltinSlashCommand(
 ): TuiBuiltinSlashCommand {
 	const materialized: TuiBuiltinSlashCommand = { ...cmd };
 	if (cmd.subcommands) {
-		if (cmd.name === "mcp" && runtime) {
-			materialized.getArgumentCompletions = buildMcpArgumentCompletions(cmd.subcommands, runtime);
-		} else if (cmd.name === "jobs" && runtime) {
-			materialized.getArgumentCompletions = buildJobsArgumentCompletions(cmd.subcommands, runtime);
+		const subcommands = cmd.subcommands;
+		if (runtime && cmd.name === "mcp") {
+			materialized.getArgumentCompletions = buildMcpArgumentCompletions(subcommands, runtime);
+			materialized.getInlineHint = buildSubcommandInlineHint(subcommands);
+		} else if (runtime && cmd.name === "jobs") {
+			materialized.getArgumentCompletions = buildJobsArgumentCompletions(subcommands, runtime);
+			materialized.getInlineHint = buildSubcommandInlineHint(subcommands, { optional: cmd.subcommandOptional });
+		} else if (runtime && cmd.name === "effort") {
+			materialized.getArgumentCompletions = buildEffortArgumentCompletions(runtime);
+			materialized.getInlineHint = buildEffortInlineHint(runtime);
 		} else {
-			materialized.getArgumentCompletions = buildArgumentCompletions(cmd.subcommands);
+			const options = { optional: cmd.subcommandOptional };
+			materialized.getArgumentCompletions = buildArgumentCompletions(subcommands, options);
+			materialized.getInlineHint = buildSubcommandInlineHint(subcommands, options);
 		}
-		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);

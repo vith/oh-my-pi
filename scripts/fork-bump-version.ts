@@ -170,7 +170,7 @@ async function main(): Promise<void> {
 	const addonBuildEnv = { ...process.env };
 	if (process.platform === "linux") {
 		addonBuildEnv.OMP_NATIVE_BUILD_BACKEND = "cargo";
-		addonBuildEnv.OMP_NATIVE_PIPEWIRE = "1";
+		addonBuildEnv.OMP_NATIVE_FEATURES = "wayland-pipewire";
 	}
 	await $`bun --cwd=packages/natives run build`.env(addonBuildEnv).quiet();
 	const platformTag = `${process.platform}-${process.arch}`;

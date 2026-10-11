@@ -67,7 +67,7 @@ steps:
         bun run collab:web:build
         # Stamp only disposable build inputs; keep the checked-in upstream versions.
         fork_version="$(bun scripts/prepare-fork-build.ts)"
-        OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_PIPEWIRE=1 bun run build:native
+        OMP_NATIVE_BUILD_BACKEND=cargo OMP_NATIVE_CARGO_PROFILE=ci OMP_NATIVE_FEATURES=wayland-pipewire bun run build:native
         bun --cwd=packages/coding-agent run build
         test "$(packages/coding-agent/dist/omp --version)" = "omp/$fork_version"
     when:
