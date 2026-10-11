@@ -1589,25 +1589,36 @@ describe("openai-codex streaming", () => {
 		const fetchMock: FetchImpl = (input: string | URL | Request, init?: RequestInit) =>
 			Promise.resolve(createNoProgressCodexSse(getRequestSignal(input, init)));
 		const controller = new AbortController();
-		setTimeout(() => controller.abort(), 30);
+		let abortTimer: NodeJS.Timeout | undefined;
 
 		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
-		const result = await streamOpenAICodexResponses(model, context, {
+		const stream = streamOpenAICodexResponses(model, context, {
 			fetch: fetchMock as FetchImpl,
 			apiKey: token,
 			signal: controller.signal,
-		}).result();
+		});
+		try {
+			for await (const event of stream) {
+				if (event.type === "toolcall_start") {
+					abortTimer = setTimeout(() => controller.abort(), 30);
+				}
+			}
+			const result = await stream.result();
 
-		expect(result.stopReason).toBe("aborted");
-		expect(result.errorMessage).not.toBe("OpenAI Codex SSE stream stalled while waiting for the next event");
-		expect(JSON.parse(JSON.stringify(result.content))).toEqual([
-			{
-				type: "toolCall",
-				id: "call_stalled|fc_stalled",
-				name: "todo",
-				arguments: {},
-			},
-		]);
+			expect(result.stopReason).toBe("aborted");
+			expect(result.errorMessage).not.toBe("OpenAI Codex SSE stream stalled while waiting for the next event");
+			expect(JSON.parse(JSON.stringify(result.content))).toEqual([
+				{
+					type: "toolCall",
+					id: "call_stalled|fc_stalled",
+					name: "todo",
+					arguments: {},
+				},
+			]);
+		} finally {
+			if (abortTimer) clearTimeout(abortTimer);
+			controller.abort();
+		}
 	});
 
 	it("parses websocket JSON from non-string payloads", async () => {
