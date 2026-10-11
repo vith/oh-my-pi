@@ -30,170 +30,170 @@ import { TempDir } from "@oh-my-pi/pi-utils";
  * continues into the same on-screen components.
  */
 const usage = {
- input: 0,
- output: 0,
- cacheRead: 0,
- cacheWrite: 0,
- totalTokens: 0,
- cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
 function assistantWithBash(command: string): AssistantMessage {
- return {
-  role: "assistant",
-  content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command } }],
-  api: "anthropic-messages",
-  provider: "anthropic",
-  model: "claude-sonnet-4-5",
-  stopReason: "toolUse",
-  usage,
-  timestamp: Date.now(),
- };
+	return {
+		role: "assistant",
+		content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command } }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason: "toolUse",
+		usage,
+		timestamp: Date.now(),
+	};
 }
 
 describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn", () => {
- let authStorage: AuthStorage;
- let mode: InteractiveMode;
- let session: AgentSession;
- let tempDir: TempDir;
+	let authStorage: AuthStorage;
+	let mode: InteractiveMode;
+	let session: AgentSession;
+	let tempDir: TempDir;
 
- beforeAll(() => {
-  initTheme();
- });
+	beforeAll(() => {
+		initTheme();
+	});
 
- beforeEach(async () => {
-  vi.spyOn(process.stdout, "write").mockReturnValue(true);
-  vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
-  vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
-  vi.spyOn(process.stdin, "setEncoding").mockReturnValue(process.stdin);
-  if (typeof process.stdin.setRawMode === "function") {
-   vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
-  }
+	beforeEach(async () => {
+		vi.spyOn(process.stdout, "write").mockReturnValue(true);
+		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
+		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
+		vi.spyOn(process.stdin, "setEncoding").mockReturnValue(process.stdin);
+		if (typeof process.stdin.setRawMode === "function") {
+			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
+		}
 
-  resetSettingsForTest();
-  tempDir = TempDir.createSync("@pi-issue-3656-");
-  await Settings.init({ inMemory: true, cwd: tempDir.path() });
-  authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-  const modelRegistry = new ModelRegistry(authStorage);
-  const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
-  if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-issue-3656-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		const modelRegistry = new ModelRegistry(authStorage);
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
 
-  session = new AgentSession({
-   agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
-   sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
-   settings: Settings.isolated(),
-   modelRegistry,
-  });
-  mode = new InteractiveMode(session, "test");
-  mode.ui.requestRender = vi.fn();
- });
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		mode = new InteractiveMode(session, "test");
+		mode.ui.requestRender = vi.fn();
+	});
 
- afterEach(async () => {
-  mode?.stop();
-  HistoryStorage.close();
-  vi.restoreAllMocks();
-  await session?.dispose();
-  authStorage?.close();
-  tempDir?.removeSync();
-  resetSettingsForTest();
- });
+	afterEach(async () => {
+		mode?.stop();
+		HistoryStorage.close();
+		vi.restoreAllMocks();
+		await session?.dispose();
+		authStorage?.close();
+		tempDir?.removeSync();
+		resetSettingsForTest();
+	});
 
- function makeStreamingFixture(streaming = true): {
-  streamingComponent: AssistantMessageComponent;
-  pendingTool: ToolExecutionComponent;
- } {
-  const streamingComponent = new AssistantMessageComponent();
-  const pendingTool = new ToolExecutionComponent(
-   "bash",
-   { command: "echo hi" },
-   {},
-   undefined,
-   mode.ui,
-   tempDir.path(),
-   "call-1",
-  );
-  mode.chatContainer.addChild(streamingComponent);
-  mode.chatContainer.addChild(pendingTool);
-  mode.streamingComponent = streamingComponent;
-  mode.streamingMessage = assistantWithBash("echo hi");
-  mode.pendingTools.set("call-1", pendingTool);
-  Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
-  return { streamingComponent, pendingTool };
- }
+	function makeStreamingFixture(streaming = true): {
+		streamingComponent: AssistantMessageComponent;
+		pendingTool: ToolExecutionComponent;
+	} {
+		const streamingComponent = new AssistantMessageComponent();
+		const pendingTool = new ToolExecutionComponent(
+			"bash",
+			{ command: "echo hi" },
+			{},
+			undefined,
+			mode.ui,
+			tempDir.path(),
+			"call-1",
+		);
+		mode.chatContainer.addChild(streamingComponent);
+		mode.chatContainer.addChild(pendingTool);
+		mode.streamingComponent = streamingComponent;
+		mode.streamingMessage = assistantWithBash("echo hi");
+		mode.pendingTools.set("call-1", pendingTool);
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
+		return { streamingComponent, pendingTool };
+	}
 
- it("keeps the streaming assistant component attached after a mid-stream rebuild", () => {
-  const { streamingComponent } = makeStreamingFixture();
+	it("keeps the streaming assistant component attached after a mid-stream rebuild", () => {
+		const { streamingComponent } = makeStreamingFixture();
 
-  mode.rebuildChatFromMessages();
+		mode.rebuildChatFromMessages();
 
-  expect(mode.chatContainer.children).toContain(streamingComponent);
-  expect(mode.streamingComponent).toBe(streamingComponent);
- });
+		expect(mode.chatContainer.children).toContain(streamingComponent);
+		expect(mode.streamingComponent).toBe(streamingComponent);
+	});
 
- it("routes later streamed tool-call deltas into the preserved on-screen component", async () => {
-  const { pendingTool } = makeStreamingFixture();
-  const updateArgs = vi.spyOn(pendingTool, "updateArgs");
+	it("routes later streamed tool-call deltas into the preserved on-screen component", async () => {
+		const { pendingTool } = makeStreamingFixture();
+		const updateArgs = vi.spyOn(pendingTool, "updateArgs");
 
-  mode.rebuildChatFromMessages();
-  const message = assistantWithBash("echo after");
-  await mode.eventController.handleEvent({
-   type: "message_update",
-   message,
-   assistantMessageEvent: {
-    type: "toolcall_delta",
-    contentIndex: 0,
-    delta: JSON.stringify({ command: "echo after" }),
-    partial: message,
-   },
-  } satisfies AgentSessionEvent);
+		mode.rebuildChatFromMessages();
+		const message = assistantWithBash("echo after");
+		await mode.eventController.handleEvent({
+			type: "message_update",
+			message,
+			assistantMessageEvent: {
+				type: "toolcall_delta",
+				contentIndex: 0,
+				delta: JSON.stringify({ command: "echo after" }),
+				partial: message,
+			},
+		} satisfies AgentSessionEvent);
 
-  expect(mode.pendingTools.get("call-1")).toBe(pendingTool);
-  expect(updateArgs).toHaveBeenCalledWith({ command: "echo after" }, "call-1");
- });
+		expect(mode.pendingTools.get("call-1")).toBe(pendingTool);
+		expect(updateArgs).toHaveBeenCalledWith({ command: "echo after" }, "call-1");
+	});
 
- it("re-appends in-flight components after the historical replay (live tail order)", () => {
-  const { streamingComponent, pendingTool } = makeStreamingFixture();
+	it("re-appends in-flight components after the historical replay (live tail order)", () => {
+		const { streamingComponent, pendingTool } = makeStreamingFixture();
 
-  mode.rebuildChatFromMessages();
+		mode.rebuildChatFromMessages();
 
-  const children = mode.chatContainer.children;
-  const streamingIdx = children.indexOf(streamingComponent);
-  const pendingIdx = children.indexOf(pendingTool);
-  expect(streamingIdx).toBeGreaterThanOrEqual(0);
-  expect(pendingIdx).toBeGreaterThan(streamingIdx);
- });
+		const children = mode.chatContainer.children;
+		const streamingIdx = children.indexOf(streamingComponent);
+		const pendingIdx = children.indexOf(pendingTool);
+		expect(streamingIdx).toBeGreaterThanOrEqual(0);
+		expect(pendingIdx).toBeGreaterThan(streamingIdx);
+	});
 
- it("uses the rendered view session when preserving a focused subagent stream", () => {
-  const { streamingComponent, pendingTool } = makeStreamingFixture(false);
-  Object.defineProperty(mode, "viewSession", {
-   configurable: true,
-   get: () => ({
-    isStreaming: true,
-    buildTranscriptSessionContext: () => ({ messages: [] }),
-    getToolByName: () => undefined,
-    sessionManager: { getCwd: () => tempDir.path() },
-    retryAttempt: undefined,
-   }),
-  });
+	it("uses the rendered view session when preserving a focused subagent stream", () => {
+		const { streamingComponent, pendingTool } = makeStreamingFixture(false);
+		Object.defineProperty(mode, "viewSession", {
+			configurable: true,
+			get: () => ({
+				isStreaming: true,
+				buildTranscriptSessionContext: () => ({ messages: [] }),
+				getToolByName: () => undefined,
+				sessionManager: { getCwd: () => tempDir.path() },
+				retryAttempt: undefined,
+			}),
+		});
 
-  mode.rebuildChatFromMessages();
+		mode.rebuildChatFromMessages();
 
-  expect(mode.chatContainer.children).toContain(streamingComponent);
-  expect(mode.chatContainer.children).toContain(pendingTool);
-  expect(mode.pendingTools.get("call-1")).toBe(pendingTool);
- });
+		expect(mode.chatContainer.children).toContain(streamingComponent);
+		expect(mode.chatContainer.children).toContain(pendingTool);
+		expect(mode.pendingTools.get("call-1")).toBe(pendingTool);
+	});
 
- it("does not preserve in-flight tracking when the session is idle (post-stream rebuilds reset cleanly)", () => {
-  const streamingComponent = new AssistantMessageComponent();
-  mode.chatContainer.addChild(streamingComponent);
-  mode.streamingComponent = streamingComponent;
-  Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
+	it("does not preserve in-flight tracking when the session is idle (post-stream rebuilds reset cleanly)", () => {
+		const streamingComponent = new AssistantMessageComponent();
+		mode.chatContainer.addChild(streamingComponent);
+		mode.streamingComponent = streamingComponent;
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => false });
 
-  mode.rebuildChatFromMessages();
+		mode.rebuildChatFromMessages();
 
-  // Idle rebuilds (resume, /compact post-flush, theme overlay close) treat
-  // `streamingComponent` as stale UI to discard — the chat must be redrawn
-  // purely from committed messages.
-  expect(mode.chatContainer.children).not.toContain(streamingComponent);
- });
+		// Idle rebuilds (resume, /compact post-flush, theme overlay close) treat
+		// `streamingComponent` as stale UI to discard — the chat must be redrawn
+		// purely from committed messages.
+		expect(mode.chatContainer.children).not.toContain(streamingComponent);
+	});
 });
