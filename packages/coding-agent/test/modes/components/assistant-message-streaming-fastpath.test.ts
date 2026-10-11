@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -278,6 +278,7 @@ Average Latency: 1,240 ms
 
 	it("matches fresh live output across hidden thinking emptiness transitions and reveal", () => {
 		const reused = new AssistantMessageComponent(undefined, true);
+		const now = spyOn(performance, "now").mockReturnValue(1_000);
 		const latestReasoning = "Latest canonical reasoning";
 		try {
 			// A comment is raw-nonempty but display-empty; whitespace is canonically empty.
@@ -303,6 +304,7 @@ Average Latency: 1,240 ms
 			expect(revealed).toContain(latestReasoning);
 			expect(revealed).toContain("Visible answer");
 		} finally {
+			now.mockRestore();
 			reused.dispose();
 		}
 	});
