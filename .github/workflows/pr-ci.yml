@@ -25,16 +25,21 @@ jobs:
       run:
         shell: bash
     env:
-      TMPDIR: ${{ runner.temp }}/omp-pr-ci/tmp
-      TMP: ${{ runner.temp }}/omp-pr-ci/tmp
-      TEMP: ${{ runner.temp }}/omp-pr-ci/tmp
-      CI_LOG_DIR: ${{ runner.temp }}/omp-pr-ci/logs
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
       OMP_NATIVE_CARGO_PROFILE: dev
     steps:
       - name: Prepare test directories
-        run: mkdir -p "$TMPDIR" "$CI_LOG_DIR"
+        env:
+          CI_WORK_DIR: ${{ runner.temp }}/omp-pr-ci
+        run: |
+          mkdir -p "$CI_WORK_DIR/tmp" "$CI_WORK_DIR/logs"
+          {
+            for name in TMPDIR TMP TEMP; do
+              printf '%s=%s/tmp\n' "$name" "$CI_WORK_DIR"
+            done
+            printf 'CI_LOG_DIR=%s/logs\n' "$CI_WORK_DIR"
+          } >> "$GITHUB_ENV"
 
       - name: Check out candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
