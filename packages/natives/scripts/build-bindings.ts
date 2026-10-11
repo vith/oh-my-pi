@@ -7,6 +7,9 @@
  *
  * `OMP_NATIVE_CARGO_PROFILE` selects the cargo profile (default `local`:
  * incremental, unstripped). Image builds set `ci` for a stripped addon.
+ *
+ * `OMP_NATIVE_FEATURES` passes extra cargo features to `napi build --features`
+ * (e.g. `wayland-pipewire`). Cargo path only; Bazel builds ignore it.
  */
 
 import * as fsSync from "node:fs";
@@ -230,13 +233,11 @@ const napiArgs = [
 	cargoProfile,
 ];
 
-// Wayland screencast capture links system libpipewire-0.3 via pkg-config, so
-// it is opt-in through the `wayland-pipewire` cargo feature: the shipped Bazel
-// addons build with crate_features = [] to stay lean and portable. Local host
-// builds enable it on Linux when OMP_NATIVE_PIPEWIRE=1 (the fork release
-// pipeline sets this on its native addon build step).
-if (process.platform === "linux" && Bun.env.OMP_NATIVE_PIPEWIRE === "1") {
-	napiArgs.push("--features", "wayland-pipewire");
+// Local-only opt-in: pass extra cargo features through to napi build, e.g.
+// OMP_NATIVE_FEATURES=wayland-pipewire bun --cwd=packages/natives run build
+const extraFeatures = Bun.env.OMP_NATIVE_FEATURES?.trim();
+if (extraFeatures) {
+	napiArgs.push("--features", extraFeatures);
 }
 
 // napi-rs / cargo route much failure detail to stdout (e.g. `cargo metadata`

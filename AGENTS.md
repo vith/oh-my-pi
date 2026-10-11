@@ -35,7 +35,7 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 When authorized to create or edit a contributor-submitted PR, follow the checklist below. RoboOMP-managed PRs follow their dedicated workflow and enforced body format in `python/robomp/src/prompts/system_append.md` instead.
 
 - MUST read `CONTRIBUTING.md` and `.github/PULL_REQUEST_TEMPLATE.md` first. Preserve the template sections and checklist, including when shortening an existing description.
-- Internal fork PRs (including `git.n3t.work/vith/oh-my-pi`) are maintainer integration work, not upstream contributions. The assistant MUST write their descriptions from verified changes and evidence; NEVER ask the user to supply a human-written sentence or claim assistant prose is user-authored.
+- Internal fork PRs in `github.com/vith/oh-my-pi` are maintainer integration work, not upstream contributions. The assistant MUST write their descriptions from verified changes and evidence; NEVER ask the user to supply a human-written sentence or claim assistant prose is user-authored.
 - ONLY for PRs submitted to upstream `can1357/oh-my-pi`: obtain the contributor-written sentence required by `CONTRIBUTING.md`. If missing, ask the contributor; NEVER generate a substitute. Preserve that sentence during edits.
 - For user-facing changes, MUST follow the [Changelog](#changelog) attribution rules. Internal issue fixes keep their issue links. For external contributions, add the PR link and contributor credit after GitHub assigns the number, then push the entry before marking the changelog checklist item complete.
 - MUST read back the published PR description after creating or editing it. Check only verified checklist items; explain skipped or inapplicable checks in `Testing`.
@@ -50,6 +50,7 @@ When authorized to create or edit a contributor-submitted PR, follow the checkli
 - **Class privacy**: use ES `#private` fields; leave externally accessible members bare. **No `private`/`protected`/`public` keyword on fields or methods**, except on **constructor parameter properties** where TypeScript requires it (e.g. `constructor(private readonly session: ToolSession)`).
 - **Promises**: use `Promise.withResolvers()` instead of `new Promise((resolve, reject) => ...)`.
 - **Prompts**: never build prompts in code (no inline strings, template literals, or concatenation). Prompts live in static `.md` files; use Handlebars for dynamic content. Import them via `import content from "./prompt.md" with { type: "text" }` — not `readFile`.
+- **Judge questions**: one JSON file per feature (`src/prompts/judge/<feature>.json`) maps question ids to `{ instructions, criteria? }`. Load it with `judgeQuestions(file)` from `@oh-my-pi/pi-ai`; fill Handlebars instructions with `renderQuestion(question, context)`. `criteria` sets the kind: a list of levels → score, omitted or `true`/`false` keys only → yes/no, any other labels → choice (`{}` when the caller supplies the labels). Choice labels and answer types come from the JSON keys.
 - **Worker scripts**: workers re-enter the CLI entrypoint; never spawn separate worker entry modules. `cli.ts` declares itself as the worker host at startup (`declareWorkerHostEntry()` from `@oh-my-pi/pi-utils/env`) and dispatches hidden argv selectors (`__omp_worker_stats_sync`, `__omp_worker_tab`, `__omp_worker_js_eval`, `__omp_worker_tiny_inference`) before loading the command registry. Spawn sites use:
   ```ts
   import { workerHostEntry } from "@oh-my-pi/pi-utils";
@@ -260,8 +261,9 @@ For the bash tool specifically:
 
 - Work in dedicated `.worktrees/<name>` checkouts on `feat/*` branches; NEVER develop directly on `integration`.
 - Reuse a feature's branch for follow-up work. Preserve feature branches after merging.
-- Upstream catch-ups MUST use a branch → PR → validation → merge workflow. By default, builds and the full validation gate run in CI; local no-emit checks and source-level tests are allowed. Only an explicit user instruction may substitute equivalent local builds/checks for a particular PR. Record that exception and its evidence; NEVER describe canceled or failed remote CI as successful.
-- PR jobs persist APT lists/archives at `/apt-cache`, and Bun package/transpiler caches plus Cargo downloads/artifacts under `/ci-cache`. Use `scripts/ci-prepare-workspace.sh` to preserve unchanged source mtimes; serialize jobs sharing its cached workspace. Cache APT downloads rather than relying on automated base-image rebuilds.
+- Upstream catch-ups MUST use a branch → GitHub PR against `vith/oh-my-pi:integration` → validation → merge workflow. Verify the live source validation gate; NEVER treat legacy Forgejo jobs or package CI as source validation.
+- Test execution remains disabled until its CI cost is optimized. NEVER run TS/Rust suites or worker smoke tests without an explicit user policy change.
+- A source-only request does not authorize package CI, publication, or installation. An explicit user-approved no-emit TypeScript/lint/format checks plus independent review gate MUST record the exception and evidence in PR `Testing`, with build/runtime validation marked unverified. NEVER describe canceled or failed CI as successful.
 - For a clean-base reconstruction, start from the upstream release tag and port only retained feature-specific changes. NEVER merge old feature branches wholesale: their ancestry may include intentionally dropped features.
 - Preserve retained behavior, not obsolete implementation. Prefer current upstream APIs over resurrected duplicates; redesign poor fork integrations when necessary.
 - The fork permissions rework is retired. Use upstream approval behavior; do not restore its engine, dialogs, commands, or rule migration.

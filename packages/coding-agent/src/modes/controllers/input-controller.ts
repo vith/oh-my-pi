@@ -6,6 +6,7 @@ import {
 	type Component,
 	isKeyRelease,
 	matchesKey,
+	parseSgrMouse,
 	type PasteOptions,
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
@@ -31,7 +32,7 @@ import {
 	shiftImageMarkers,
 } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { expandEmoticons } from "@oh-my-pi/pi-tui/prompt/emoji-autocomplete";
-import { materializeImageReferenceLinks, setCachedImageDimensions } from "@oh-my-pi/pi-tui/prompt/image-references";
+import { setCachedImageDimensions } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
 import { createModelMentionSource } from "@oh-my-pi/pi-tui/prompt/model-mention-autocomplete";
 import { createModelBrowserSource } from "../model-browser-source";
@@ -39,6 +40,9 @@ import { parseQueueShorthand, splitQueuedMessages } from "@oh-my-pi/pi-tui/promp
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext, SubmittedUserInput } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
+import { AgentRegistry } from "../../registry/agent-registry";
+import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
+import { pickRecentFocusableAgentId } from "./session-focus-controller";
 import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
@@ -58,7 +62,9 @@ import {
 import { commandUsage, hintUsage } from "../../utils/usage-counter";
 import { EnhancedPasteController } from "../../utils/enhanced-paste";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
+import { resendProgramStatus } from "../../utils/run-status";
 import { loadImageInput } from "../../utils/image-loading";
+import { materializeImageChipLinks } from "../utils/ui-helpers";
 import { ensureSupportedImageInput, ImageInputTooLargeError } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { type ImageAttachmentSource, tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
@@ -75,6 +81,7 @@ import {
 	cfgEmojiAutocomplete,
 	cfgImagesAutoResize,
 	cfgPasteLargeMenuThreshold,
+	cfgTuiMouse,
 } from "../settings";
 import { cfgHideThinkingBlock } from "../../session/settings";
 
@@ -274,6 +281,8 @@ export class InputController {
 	#globalEditorActionsListenerInstalled = false;
 	#expandToolsListenerInstalled = false;
 	#transcriptScrollListenerInstalled = false;
+	#inlineMouseListenerInstalled = false;
+	#lastHoverClickId: string | undefined;
 
 	/** Return the last full editor snapshot delivered by its change contract. */
 	getDraftText(): string {
@@ -450,6 +459,10 @@ export class InputController {
 				return { consume: true };
 			});
 		}
+		if (!this.#inlineMouseListenerInstalled) {
+			this.#inlineMouseListenerInstalled = true;
+			this.ctx.ui.addInputListener(data => this.#handleInlineMouse(data));
+		}
 		this.ctx.editor.onEscape = () => {
 			// `/mcp test` advertises Esc until each owner's post-settlement grace expires.
 			// Cancel every overlapping test before any main-turn or side-channel action.
@@ -487,6 +500,9 @@ export class InputController {
 				return;
 			}
 			if (this.ctx.hasActiveCleanse() && this.ctx.handleCleanseEscape()) {
+				return;
+			}
+			if (this.ctx.dismissCommandReport()) {
 				return;
 			}
 
@@ -682,8 +698,8 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.live.toggle")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleLiveCommand());
 		}
-		// Hold the space bar to push-to-talk: the editor recognizes the auto-repeat burst, tracks
-		// the spam back out, and starts STT on hold start / stops it on release.
+		// Push-to-talk uses its own binding, separate from the STT toggle.
+		this.ctx.editor.spaceHold.keys = this.ctx.keybindings.getKeys("app.stt.pushToTalk");
 		this.ctx.editor.spaceHold.handler = this.ctx.dictationSpaceHold(this.ctx.editor);
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
@@ -747,6 +763,56 @@ export class InputController {
 		if (this.#detectLeftDoubleTap()) {
 			void this.ctx.unfocusSession();
 		}
+	}
+
+	/** Route inline clicks, hover, and wheel reports without leaking bytes into the editor. */
+	#handleInlineMouse(data: string): { consume?: boolean; data?: string } | undefined {
+		if (!data.startsWith("\x1b[<")) return undefined;
+		if (!cfgTuiMouse.get(this.ctx.settings)) return undefined;
+		if (this.ctx.ui.hasOverlay()) return undefined;
+		const event = parseSgrMouse(data);
+		if (!event) return undefined;
+		if (event.wheel) {
+			this.ctx.openTranscriptScroll(event.wheel, "wheel");
+		} else if (event.motion) this.#updateHoverHighlight(event.row);
+		else if (event.leftClick) this.#focusClickedAgent(event.row);
+		return { consume: true };
+	}
+
+	#updateHoverHighlight(screenRow: number): void {
+		const hovered = this.#viewportCandidates(screenRow)[0];
+		if (hovered === this.#lastHoverClickId) return;
+		this.#lastHoverClickId = hovered;
+		this.ctx.setClickHoverId(hovered);
+		this.ctx.ui.requestRender();
+	}
+
+	#viewportCandidates(screenRow: number): string[] {
+		const viewport = this.ctx.ui.getMutableViewport();
+		const local = screenRow - viewport.top;
+		if (viewport.length === 0 || local < 0 || local >= viewport.length) return [];
+		return this.ctx.resolveViewportClickCandidates(local);
+	}
+
+	clearHoverHighlight(): void {
+		this.#lastHoverClickId = undefined;
+	}
+
+	#focusClickedAgent(screenRow: number): void {
+		const candidates = this.#viewportCandidates(screenRow);
+		if (candidates.length === 0) return;
+		const refs = AgentRegistry.global().list();
+		const scoped = refs.filter(ref => candidates.includes(ref.id));
+		if (candidates.includes(PINNED_HUD_TOGGLE_ID) && scoped.length === 0) {
+			this.ctx.togglePinnedHudExpanded();
+			return;
+		}
+		const nextId = pickRecentFocusableAgentId(scoped, this.ctx.focusedAgentId);
+		if (nextId === undefined) {
+			this.ctx.showStatus("That subagent is gone — open the hub for live agents");
+			return;
+		}
+		this.#focusResolvedAgent(nextId);
 	}
 
 	/** Focus a resolved agent id, ignoring already-viewing and surfacing errors as status. */
@@ -850,10 +916,7 @@ export class InputController {
 		if (result?.text !== undefined) text = result.text.trim();
 		if (result?.images !== undefined) {
 			images = result.images;
-			imageLinks = await materializeImageReferenceLinks(
-				images,
-				this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager),
-			);
+			imageLinks = await materializeImageChipLinks(images, this.ctx.sessionManager);
 		}
 		if (!text && !images?.length) return undefined;
 		return { text, images, imageLinks };
@@ -871,7 +934,7 @@ export class InputController {
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
 
 			// Focused subagent session: the editor is a plain chat box for it.
-			// Everything below (continue shortcuts, slash/bash/python, loop,
+			// Everything below (slash/bash/python, loop,
 			// compaction queueing) is main-session-only.
 			if (this.ctx.focusedAgentId) {
 				await this.#submitToFocusedSession(text, "steer");
@@ -1213,10 +1276,6 @@ export class InputController {
 					},
 					{ clearEditor: false },
 				);
-				// Start titling only after the optimistic row painted, so the local
-				// tiny-title worker's subprocess spawn never blocks the first frame.
-				this.#maybeStartTitleGeneration(text);
-
 				this.ctx.onInputCallback(submission);
 			} else {
 				// No input waiter: the main loop is between turns (post-turn
@@ -1230,7 +1289,6 @@ export class InputController {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.editor.pendingImages = [];
 				this.ctx.editor.pendingImageLinks = [];
-				this.#maybeStartTitleGeneration(text);
 				try {
 					const forwarded = await this.ctx.withLocalSubmission(
 						text,
@@ -1326,11 +1384,7 @@ export class InputController {
 		);
 	}
 
-	/**
-	 * Kick off session-title generation after the optimistic user row paints.
-	 * Local extension commands are consumed before reaching the shared session
-	 * title gate and must not name the conversation.
-	 */
+	/** Whether `text` invokes a registered extension command, which runs locally instead of prompting the model. */
 	#isLocalExtensionCommand(text: string): boolean {
 		const extensionCommandSpace = text.indexOf(" ");
 		return (
@@ -1341,14 +1395,7 @@ export class InputController {
 		);
 	}
 
-	#maybeStartTitleGeneration(text: string): void {
-		if (this.#isLocalExtensionCommand(text)) {
-			return;
-		}
-		this.ctx.session.maybeStartTitleGeneration(text);
-	}
-
-	/** Submit editor text to the focused subagent session (chat-only focus policy). */
+	/** Submit editor text to the focused subagent session (chat and continue shortcuts only). */
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
@@ -1382,12 +1429,18 @@ export class InputController {
 			);
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
+		const isContinueShortcut = streamingBehavior === "steer" && !images && (text === "." || text === "c");
 		this.ctx.editor.clearDraft(text);
 		try {
-			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
-			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
-				imageCount: images?.length ?? 0,
-			});
+			// Synthetic directives must not use streamingBehavior: AgentSession would
+			// otherwise queue them as visible user messages while the target is busy.
+			if (isContinueShortcut) {
+				await target.prompt(manualContinuePrompt, { synthetic: true, userInitiated: true });
+			} else {
+				await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
+					imageCount: images?.length ?? 0,
+				});
+			}
 		} catch (error) {
 			// Hand the message back, mirroring the main submit error path: restore
 			// pasted images so the user can retry an image-only or text+image draft.
@@ -1482,6 +1535,7 @@ export class InputController {
 			clearInterval(suspendKeepalive);
 			this.ctx.ui.start();
 			this.ctx.ui.requestRender(true);
+			resendProgramStatus();
 		};
 		process.once("SIGCONT", onResume);
 
@@ -1549,14 +1603,14 @@ export class InputController {
 	}
 
 	/**
-	 * Pop the single most-recently-queued restorable message for the Alt+Up
-	 * dequeue key. Prefers the agent queues (steering, then follow-up) via the
-	 * session API that steps over hidden companions; falls back to the compaction
-	 * queue for messages typed while compacting, which live outside those queues.
+	 * Pop the last restorable message from the viewed session's agent queues.
+	 * Only the main session owns the separate compaction queue; focused views
+	 * must not restore its messages into a subagent's composer.
 	 */
 	#popLastQueuedMessage(): RestoredQueuedMessage | undefined {
-		const fromQueue = this.ctx.session.popLastQueuedMessage();
+		const fromQueue = this.ctx.viewSession.popLastQueuedMessage();
 		if (fromQueue) return fromQueue;
+		if (this.ctx.focusedAgentId) return undefined;
 		const compaction = this.ctx.compactionQueuedMessages;
 		if (compaction.length === 0) return undefined;
 		const last = compaction[compaction.length - 1];
@@ -1663,6 +1717,14 @@ export class InputController {
 			detachedText?: string;
 		},
 	): Promise<void> {
+		// Queue shorthand reaches this helper before the normal guest input gate.
+		// Like /queue, it must not submit to the guest's local session.
+		if (this.ctx.collabGuest) {
+			this.ctx.showStatus("/queue is host-only during a collab session");
+			this.ctx.editor.setText(options.detachedText ?? options.historyText ?? text);
+			return;
+		}
+
 		const splitMessages = splitQueuedMessages(text);
 		if (splitMessages.length === 0 && !options.images?.length) {
 			if (options.detachedText === undefined) this.ctx.editor.clearDraft();
@@ -1955,13 +2017,9 @@ export class InputController {
 		const image: ImageContent = source
 			? tagImageAttachmentSource(imageData, source.path, source.kind)
 			: { type: "image", data: imageData.data, mimeType: imageData.mimeType };
-		// File-backed attachments link to their file (so the chip opens it); payloads
-		// without one (a failed clipboard persist) materialize a clickable blob copy.
-		const imageLink =
-			source?.path ??
-			(
-				await materializeImageReferenceLinks([image], this.ctx.sessionManager.putBlob.bind(this.ctx.sessionManager))
-			)?.[0];
+		// The source URL stays on the image for the model; the chip opens the file itself,
+		// or a stable blob copy of the original bytes behind an internal URL (else the payload).
+		const [imageLink] = await materializeImageChipLinks([image], this.ctx.sessionManager);
 		this.ctx.editor.pendingImages.push(image);
 		this.ctx.editor.pendingImageLinks.push(imageLink);
 		this.ctx.editor.imageLinks = this.ctx.editor.pendingImageLinks;
@@ -2316,7 +2374,7 @@ export class InputController {
 			// No usable image-file URL (pure bitmap pasteboard: screenshots,
 			// browser copies, or a non-image Finder selection). Fall to the
 			// image representation. The text bridge starts alongside the image
-			// bridge: on Windows each is a cold powershell.exe spawn (~100ms+),
+			// bridge: either can shell out (WSL's powershell.exe, wl-paste, xclip),
 			// so serial awaits stall an empty clipboard by their sum before
 			// "Clipboard is empty" can surface. Image precedence is preserved —
 			// a resolved text payload is discarded unused when an image is present.
@@ -2523,7 +2581,7 @@ export class InputController {
 			basePath,
 			commandUsage: name => commandUsage.get(name),
 			modelMentions: createModelMentionSource({
-				source: createModelBrowserSource(this.ctx.settings),
+				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
 				registry: this.ctx.session.modelRegistry,
 				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
 			}),

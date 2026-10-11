@@ -691,7 +691,10 @@ describe("subagent HUD lines", () => {
 				}),
 			];
 			for (const columns of [60, 120]) {
-				const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, columns, false, true));
+				const hud = new SubagentHudComponent(
+					renderSubagentHudLines(sessions, columns, false, true),
+					sessions.map(session => session.id),
+				);
 				const rows = hud.render(columns).map(row => Bun.stripANSI(row));
 				for (const row of rows) {
 					expect(Bun.stringWidth(row)).toBeLessThanOrEqual(columns);
@@ -749,7 +752,10 @@ describe("subagent HUD lines", () => {
 				makeSession({ id: `Worker${"W".repeat(80)}`, description: "Every available column ".repeat(10) }),
 			];
 			for (const columns of [40, 60]) {
-				const hud = new SubagentHudComponent(renderSubagentHudLines(sessions, columns, false, true));
+				const hud = new SubagentHudComponent(
+					renderSubagentHudLines(sessions, columns, false, true),
+					sessions.map(session => session.id),
+				);
 				// No wrapping: exactly the blank row, the header and one agent row.
 				expect(hud.render(columns)).toHaveLength(3);
 			}

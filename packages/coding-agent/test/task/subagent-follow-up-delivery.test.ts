@@ -462,7 +462,7 @@ describe("durable subagent follow-up delivery", () => {
 
 	it("appends a follow-up once and never starts a second model turn for the same key", async () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
-		manager.appendSessionInit({ systemPrompt: "test", task: "test", tools: ["yield"] });
+		manager.appendSessionInit({ systemPrompt: ["test"], task: "test", tools: ["yield"] });
 		await manager.ensureOnDisk();
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");
@@ -568,7 +568,7 @@ describe("durable subagent follow-up delivery", () => {
 
 	it("serializes concurrent same-key delivery before either provider turn can duplicate it", async () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
-		manager.appendSessionInit({ systemPrompt: "test", task: "test", tools: ["yield"] });
+		manager.appendSessionInit({ systemPrompt: ["test"], task: "test", tools: ["yield"] });
 		await manager.ensureOnDisk();
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");
@@ -606,7 +606,7 @@ describe("durable subagent follow-up delivery", () => {
 
 	it("continues to include revival time in ordinary follow-up result duration", async () => {
 		const manager = SessionManager.create(tempDir.path(), tempDir.path());
-		manager.appendSessionInit({ systemPrompt: "test", task: "test", tools: ["yield"] });
+		manager.appendSessionInit({ systemPrompt: ["test"], task: "test", tools: ["yield"] });
 		await manager.ensureOnDisk();
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected persisted session file");

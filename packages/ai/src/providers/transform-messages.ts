@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { carriesReasoning } from "@oh-my-pi/pi-catalog/compat/reasoning-carry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -10,7 +11,13 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "../types";
-import { isDemotedThinking, kDemotedThinking, kSyntheticUser, type SyntheticUserCarrier } from "../utils/block-symbols";
+import {
+	isDemotedThinking,
+	kCarriedReasoning,
+	kDemotedThinking,
+	kSyntheticUser,
+	type SyntheticUserCarrier,
+} from "../utils/block-symbols";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -28,7 +35,7 @@ const enum ToolCallStatus {
  * `convertAnthropicMessages` (and friends) unchanged, so the `_dupN` suffix
  * MUST not push a normalized id past this bound.
  */
-const MAX_TOOL_CALL_ID_LENGTH = 64;
+export const MAX_TOOL_CALL_ID_LENGTH = 64;
 
 /**
  * OpenAI Responses-family APIs mint composite tool ids (`call_id|item_id`);
@@ -128,7 +135,7 @@ function toolCallPairingKey(id: string, originScope: ToolCallOriginScope): strin
 	return originScope.responsesComponents.has(prefix) ? prefix : id;
 }
 
-function appendDuplicateSuffix(originalId: string, suffix: string, maxLength: number): string {
+export function appendDuplicateSuffix(originalId: string, suffix: string, maxLength: number): string {
 	// Responses-family ids are composites (`callId|itemId`): the wire call_id is
 	// the FIRST segment (normalizeResponsesToolCallId splits on `|`), so the
 	// suffix must land on every segment or the duplicate collapses back onto the
@@ -248,8 +255,35 @@ function deduplicateToolCallIds(
 	});
 }
 
+const MAX_TOOL_CALL_NAME_LENGTH = 128;
+const TOOL_CALL_NAME_SEPARATOR_RE = /[\s\p{Cc}]/u;
+
 /**
- * Drop assistant `toolCall` blocks whose `id` or `name` is empty / whitespace-only,
+ * Whether a tool-call name cannot belong to any declared tool: missing, empty,
+ * longer than OpenAI's 128-character replay limit, or containing whitespace or
+ * control characters (tool schemas never allow them; their presence means the
+ * name slot carries invocation text).
+ */
+export function isMalformedToolCallName(name: unknown): boolean {
+	return (
+		typeof name !== "string" ||
+		name.length === 0 ||
+		name.length > MAX_TOOL_CALL_NAME_LENGTH ||
+		TOOL_CALL_NAME_SEPARATOR_RE.test(name)
+	);
+}
+
+function isMalformedToolCallId(id: string | undefined): boolean {
+	return !id || id.trim().length === 0;
+}
+
+function isMalformedToolCall(block: { id: string; name: string }): boolean {
+	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name);
+}
+
+/**
+ * Drop assistant `toolCall` blocks with an empty / whitespace-only `id` or a `name`
+ * no provider could have declared (see {@link isMalformedToolCallName}),
  * the `toolResult` messages they point at, and any assistant turn that has no
  * replayable content left.
  *
@@ -262,24 +296,15 @@ function deduplicateToolCallIds(
  * Anthropic 400s on `tool_use.name` / `tool_use.id` (alongside an orphan
  * `tool_result`), OpenAI Chat Completions 400s on malformed
  * `tool_calls[i].function.*` — wedging the session in a 400 loop until manual
- * `/clear`.
+ * `/clear`. Gateways also hand back the model's whole invocation text as the
+ * name (observed: a 9654-char script and a NUL-separated `bash\0arg\0…` string
+ * from GLM-5.3); OpenAI Responses rejects any replayed `input[N].name` over
+ * 128 characters with `string_above_max_length`.
  *
  * Run before any other transform so the rest of the pipeline never sees a
  * malformed call. Idempotent: a re-run on an already-sanitized list returns
  * the input untouched. Provider-agnostic — any wire model could surface this.
  */
-function isMalformedToolCallName(name: string | undefined): boolean {
-	return !name || name.trim().length === 0;
-}
-
-function isMalformedToolCallId(id: string | undefined): boolean {
-	return !id || id.trim().length === 0;
-}
-
-function isMalformedToolCall(block: { id: string; name: string }): boolean {
-	return isMalformedToolCallId(block.id) || isMalformedToolCallName(block.name);
-}
-
 function sanitizeMalformedToolCalls(messages: Message[]): Message[] {
 	// Fast path: skip the rewrite entirely when nothing is malformed.
 	let hasMalformed = false;
@@ -374,6 +399,47 @@ function targetReadsForeignThinking(model: Model, compat: Model["compat"]): bool
 	if (!("thinkingFormat" in compat)) return false;
 	if (compat.requiresThinkingAsText) return false;
 	return model.reasoning && compat.thinkingFormat === "zai";
+}
+
+/**
+ * Whether the target's encoder already replays the target's own plaintext
+ * reasoning in a native slot. Reasoning carried from another host of the same
+ * model (`carriesReasoning`) takes exactly that path, so this is derived from
+ * the flags the encoders branch on rather than declared per host:
+ * - chat completions writes a reasoning field or content part for thinking
+ *   blocks only under these flags; otherwise it drops them.
+ * - the Responses wire replays reasoning items unless history is filtered, and
+ *   hosts that require reasoning replay already receive id-less plaintext
+ *   items from omp (the `requiresReasoningContent*` safety net). OpenRouter's
+ *   chat fallback shares the tool-call flag.
+ * - Devin sends every turn's thinking in the prompt's `thinking` field.
+ * Anthropic-format targets that accept unsigned thinking already read it via
+ * `targetReadsForeignThinking`; Bedrock and Google reject or ignore unsigned
+ * reasoning, and Codex hosts no portable family.
+ */
+function targetReplaysPlaintextReasoning(model: Model, compat: Model["compat"]): boolean {
+	if (!model.reasoning || compat === undefined) return false;
+	if (model.api === "devin-agent") return true;
+	if (!("requiresReasoningContentForToolCalls" in compat)) return false;
+	switch (model.api) {
+		case "openai-completions":
+			return (
+				!compat.requiresThinkingAsText &&
+				(compat.mistralReasoningContentParts === true ||
+					compat.requiresReasoningContentForToolCalls ||
+					compat.thinkingFormat === "zai" ||
+					compat.replayReasoningContent)
+			);
+		case "openrouter":
+			return !compat.filterReasoningHistory && compat.requiresReasoningContentForToolCalls;
+		case "openai-responses":
+			return (
+				!compat.filterReasoningHistory &&
+				(compat.requiresReasoningContentForToolCalls || compat.requiresReasoningContentForAllAssistantTurns)
+			);
+		default:
+			return false;
+	}
 }
 
 const ANTHROPIC_TOOL_CALL_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -500,24 +566,28 @@ export function redactSensitiveInObject(val: unknown): { result: unknown; change
 		const redacted = redactSensitiveCredentials(val);
 		return { result: redacted, changed: redacted !== val };
 	}
+	// Copy-on-write: history is re-redacted on every request and almost never
+	// contains a credential, so unchanged subtrees are returned as-is.
 	if (Array.isArray(val)) {
-		let changed = false;
-		const result = val.map(item => {
-			const res = redactSensitiveInObject(item);
-			if (res.changed) changed = true;
-			return res.result;
-		});
-		return { result, changed };
+		let result: unknown[] | undefined;
+		for (let i = 0; i < val.length; i++) {
+			const sub = redactSensitiveInObject(val[i]);
+			if (!sub.changed) continue;
+			result ??= val.slice();
+			result[i] = sub.result;
+		}
+		return result ? { result, changed: true } : { result: val, changed: false };
 	}
 	if (val !== null && typeof val === "object") {
-		let changed = false;
-		const res: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(val)) {
+		const entries = Object.entries(val);
+		let result: Record<string, unknown> | undefined;
+		for (const [k, v] of entries) {
 			const sub = redactSensitiveInObject(v);
-			if (sub.changed) changed = true;
-			res[k] = sub.result;
+			if (!sub.changed) continue;
+			result ??= Object.fromEntries(entries);
+			result[k] = sub.result;
 		}
-		return { result: res, changed };
+		return result ? { result, changed: true } : { result: val, changed: false };
 	}
 	return { result: val, changed: false };
 }
@@ -657,6 +727,7 @@ export function transformMessages<TApi extends Api>(
 			}
 		}
 	}
+	const targetHasReasoningSlot = targetReplaysPlaintextReasoning(model, targetCompat);
 	// First pass: transform messages (thinking blocks, tool call ID normalization)
 	const normalizedMessages = messages.map((msg, index) => {
 		// User and developer messages pass through unchanged
@@ -685,6 +756,24 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.provider === model.provider &&
 				assistantMsg.api === model.api &&
 				assistantMsg.model === model.id;
+			// The same model on another host (or another id of the same model):
+			// its full plaintext reasoning replays natively where the target has
+			// a native slot, exactly as the target replays its own turns. Errored
+			// turns keep the text fallback: Responses encoders skip their reasoning.
+			// A router's reported serving model is the identity that produced the
+			// reasoning, so it is what must match.
+			const carriesSameModelReasoning =
+				!isSameModel &&
+				assistantMsg.stopReason !== "error" &&
+				targetHasReasoningSlot &&
+				carriesReasoning(
+					{
+						provider: assistantMsg.provider,
+						api: assistantMsg.api,
+						model: assistantMsg.upstreamModel ?? assistantMsg.model,
+					},
+					model,
+				);
 
 			const isAnthropicTarget = isAnthropicMessagesModel(model);
 			// Anthropic's all-or-none contract on prior-turn thinking blocks
@@ -874,6 +963,13 @@ export function transformMessages<TApi extends Api>(
 					// canonical visible-text fallback without adding model context.
 					if (targetReadsForeignThinking(model, targetCompat)) {
 						return sanitized.thinkingSignature ? { ...sanitized, thinkingSignature: undefined } : sanitized;
+					}
+					// Same model from another host: keep the full trace natively, minus
+					// the signature and item id bound to the host that minted them.
+					// Only blocks their parser confirmed as the model's own trace carry;
+					// summaries and blocks of unknown provenance keep the text fallback.
+					if (carriesSameModelReasoning && sanitized.summary === false) {
+						return { type: "thinking" as const, thinking: sanitized.thinking, [kCarriedReasoning]: true };
 					}
 					// Other cross-API targets (openai-responses encrypted blobs, google
 					// thought parts, anthropic-target from a non-Anthropic source, or any
