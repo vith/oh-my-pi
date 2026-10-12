@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "./helpers/session-defaults";
 
 describe("handleRpcCancelSubagent", () => {
 	let registry: RpcSubagentRegistry;
@@ -66,6 +67,7 @@ describe("handleRpcCancelSubagent", () => {
 			displayName: id,
 			kind: "sub",
 			session: {
+				...createSessionDefaults(),
 				abort: async () => {
 					calls.push(`abort:${id}`);
 				},
@@ -110,6 +112,7 @@ describe("handleRpcCancelSubagent", () => {
 			displayName: "SubagentA",
 			kind: "sub",
 			session: {
+				...createSessionDefaults(),
 				// The executor may accept a yield that lands while the abort is in flight.
 				abort: async () => {
 					acceptedDuringAbort = AgentRegistry.global().markResultAccepted("SubagentA");
@@ -140,6 +143,7 @@ describe("handleRpcCancelSubagent", () => {
 			displayName: "SubagentA",
 			kind: "sub",
 			session: {
+				...createSessionDefaults(),
 				abort: async () => {
 					await disposed.promise;
 					await nextMacrotask();
@@ -215,6 +219,7 @@ describe("handleRpcCancelSubagent", () => {
 		const listeners: Array<(event: AgentSessionEvent) => void> = [];
 		// Minimal session whose turn never finishes on its own: only a cancel can end the run.
 		const session = {
+			...createSessionDefaults(),
 			state: { messages: [] },
 			agent: { state: { systemPrompt: ["test"] } },
 			model: undefined,
@@ -222,8 +227,6 @@ describe("handleRpcCancelSubagent", () => {
 			sessionManager: { appendSessionInit: () => {} },
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
-			getToolByName: () => undefined,
-			setActiveToolsByName: async () => {},
 			setWorkPoolYieldItems: () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listeners.push(listener);
@@ -233,20 +236,9 @@ describe("handleRpcCancelSubagent", () => {
 				promptEntered.resolve();
 				await Promise.withResolvers<never>().promise;
 			},
-			waitForIdle: async () => {},
-			isAdvisorActive: () => false,
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
-			getLastAssistantMessage: () => undefined,
-			hasPendingAsyncWork: () => false,
 			getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
 			settleAsyncWork: async () => {},
-			abort: async () => {},
-			dispose: async () => {},
-			setIrcWakeTurnObserver: () => {},
 			trackIrcReply: () => {},
-			subscribeRunState: () => () => {},
-			addDisposer: () => {},
 		} as unknown as AgentSession;
 		AgentRegistry.global().register({
 			id,
