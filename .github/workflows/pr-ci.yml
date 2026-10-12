@@ -79,6 +79,25 @@ jobs:
           OMP_NATIVE_FEATURES: wayland-pipewire
         run: bun --cwd=packages/natives run build:bindings 2>&1 | tee "$CI_LOG_DIR/native-build.log"
 
+      - name: Smoke builtin autocomplete insertion
+        if: matrix.suite == 'typescript'
+        run: |
+          bun -e '
+            import * as assert from "node:assert/strict";
+            import { BUILTIN_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+            import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
+            const input = "/memory mm h";
+            const provider = new CombinedAutocompleteProvider([...BUILTIN_SLASH_COMMANDS], process.cwd());
+            const suggestions = await provider.getSuggestions([input], 0, input.length);
+            const item = suggestions?.items.find(item => item.value === "mm history ");
+            if (!suggestions || !item) throw new Error("Declared memory history completion is missing");
+            const edited = provider.applyCompletion([input], 0, input.length, item, suggestions.prefix);
+            assert.deepEqual(edited.lines, ["/memory mm history "]);
+            assert.equal(edited.cursorLine, 0);
+            assert.equal(edited.cursorCol, 19);
+            console.log(JSON.stringify({ line: edited.lines[0], cursorColumn: edited.cursorCol }));
+          ' 2>&1 | tee "$CI_LOG_DIR/autocomplete-smoke.log"
+
       - name: Run full local-scope TypeScript suites
         if: matrix.suite == 'typescript'
         run: bun run test:ts 2>&1 | tee "$CI_LOG_DIR/typescript.log"

@@ -20,7 +20,10 @@ function createHarness() {
 		recent: [{ id: "bash-finished", type: "bash", status: "completed", label: "check", startTime: 1 }],
 	};
 	const ctx = {
-		session: { getAsyncJobSnapshot: () => ({ running: [], recent: [] }) },
+		session: {
+			getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
+			configuredThinkingLevel: () => undefined,
+		},
 		viewSession: { getAsyncJobSnapshot: () => snapshot },
 		editor: {
 			setText: (text: string) => {
@@ -54,10 +57,10 @@ describe("builtin slash dispatch and autocomplete", () => {
 		expect(settings?.items.map(item => item.value)).toContain("settings");
 	});
 
-	it("completes /jobs follow through the real autocomplete provider", async () => {
+	it("offers both valid /jobs f completions through the real autocomplete provider", async () => {
 		const { provider } = createHarness();
 		const result = await complete(provider, "/jobs f");
-		expect(result?.items.map(item => item.value)).toEqual(["follow "]);
+		expect(new Set(result?.items.map(item => item.value))).toEqual(new Set(["full ", "follow "]));
 	});
 
 	it("completes only available bash job IDs from the viewed session", async () => {

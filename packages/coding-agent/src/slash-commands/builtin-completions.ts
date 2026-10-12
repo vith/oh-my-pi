@@ -30,8 +30,8 @@ function subcommandRemainderHint(sub: SubcommandDef, prefix: string): string | u
 
 /**
  * Build getArgumentCompletions from declarative subcommand definitions.
- * Returns subcommand names filtered by prefix in the dropdown; each item's
- * hint is the ghost text the editor shows while that item is selected.
+ * Returns subcommand names, including multiword names, filtered by prefix in
+ * the dropdown; each item's hint is the ghost text shown while it is selected.
  * An optional subcommand offers nothing until a prefix is typed, so Enter on
  * the bare `/name ` submits it instead of accepting the first subcommand.
  */
@@ -40,7 +40,6 @@ export function buildArgumentCompletions(
 	options: SubcommandCompletionOptions = {},
 ): (prefix: string) => AutocompleteItem[] | null {
 	return (argumentPrefix: string) => {
-		if (argumentPrefix.includes(" ")) return null; // past the subcommand
 		if (options.optional && argumentPrefix.length === 0) return null;
 		const lower = argumentPrefix.toLowerCase();
 		const matches = subcommands

@@ -17,8 +17,10 @@ Source tests run through `.github/workflows/pr-ci.yml` on GitHub-hosted x86_64
 Linux runners for PRs targeting `integration` and manual dispatch. CI runs the
 full local-scope TypeScript suites, root script tests, Rust nextest suites and
 doctests, and the vendored napi unit tests. The TypeScript job builds its native
-test addon with Wayland/PipeWire support. Only executed results may be reported
-as passing; a workflow starting is not test-success evidence.
+test addon with Wayland/PipeWire support and smoke-checks command autocomplete
+insertion using the production command definitions and autocomplete provider.
+Only executed results may be reported as passing; a workflow starting is not
+test-success evidence.
 
 Source CI does not build shipping binaries, invoke `vith/arch-packages`, publish
 packages, or install omp on the workstation. Package validation and delivery
