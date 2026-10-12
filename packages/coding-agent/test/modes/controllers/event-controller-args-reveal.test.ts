@@ -19,6 +19,7 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { messageUpdateFromSnapshot } from "../../helpers/assistant-message-events";
 
 beforeAll(async () => {
 	await initTheme();
@@ -70,12 +71,7 @@ function createFixture(streamingMessage: AssistantMessage, tool?: AgentTool) {
 }
 
 async function dispatch(controller: EventController, message: AssistantMessage) {
-	const event = {
-		type: "message_update",
-		message,
-		assistantMessageEvent: undefined as never,
-	} as Extract<AgentSessionEvent, { type: "message_update" }>;
-	await controller.handleEvent(event);
+	await controller.handleEvent(messageUpdateFromSnapshot(message));
 }
 
 async function dispatchToolStart(

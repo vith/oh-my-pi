@@ -13,6 +13,7 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 import { cfgDisplaySmoothStreaming } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { messageUpdateFromSnapshot } from "../../helpers/assistant-message-events";
 
 beforeAll(async () => {
 	await initTheme();
@@ -87,11 +88,7 @@ describe("EventController queues exclusive device writes until execution starts"
 		]);
 		const { controller, pendingTools } = createFixture(streaming);
 
-		await controller.handleEvent({
-			type: "message_update",
-			message: streaming,
-			assistantMessageEvent: undefined as never,
-		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		await controller.handleEvent(messageUpdateFromSnapshot(streaming));
 		expect(pendingTools.size).toBe(2);
 		expect(cardText(pendingTools, "write-1")).toContain("queued");
 		expect(cardText(pendingTools, "write-1")).toContain("ecoport/search");

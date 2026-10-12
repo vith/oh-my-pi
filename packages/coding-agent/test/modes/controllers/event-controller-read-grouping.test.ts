@@ -25,6 +25,7 @@ import { type Component, Image, ImageProtocol, setTerminalImageProtocol, TERMINA
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 import { cfgDisplayShowTokenUsage, cfgTerminalShowImages } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { messageUpdateFromSnapshot } from "../../helpers/assistant-message-events";
 
 beforeAll(async () => {
 	await initTheme(false, undefined, undefined, "dark", "light");
@@ -86,7 +87,7 @@ function createFixture() {
 async function streamCompletion(controller: EventController, content: Block[]): Promise<void> {
 	const message = assistantMessage(content);
 	await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
-	await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+	await controller.handleEvent(messageUpdateFromSnapshot(message));
 }
 
 function readGroups(chatContainer: TranscriptContainer): ReadToolGroupComponent[] {
@@ -135,7 +136,7 @@ describe("EventController read-group accretion", () => {
 		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
 
 		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
-		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent(messageUpdateFromSnapshot(message));
 		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
 
 		const [group] = readGroups(chatContainer);
@@ -161,7 +162,7 @@ describe("EventController read-group accretion", () => {
 		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
 
 		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
-		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent(messageUpdateFromSnapshot(message));
 		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
 
 		const [group] = readGroups(chatContainer);
@@ -188,7 +189,7 @@ describe("EventController read-group accretion", () => {
 		message.timestamp = new Date(2026, 0, 2, 3, 4, 5).getTime();
 
 		await controller.handleEvent({ type: "message_start", message } as AgentSessionEvent);
-		await controller.handleEvent({ type: "message_update", message } as AgentSessionEvent);
+		await controller.handleEvent(messageUpdateFromSnapshot(message));
 		await controller.handleEvent({ type: "message_end", message } as AgentSessionEvent);
 		await streamCompletion(controller, [read("second.ts:1-50")]);
 

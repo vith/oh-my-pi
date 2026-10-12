@@ -20,6 +20,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 import { cfgDisplayShowTokenUsage } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { messageUpdateFromSnapshot } from "../../helpers/assistant-message-events";
 
 beforeAll(async () => {
 	await initTheme();
@@ -65,14 +66,7 @@ function createFixture(streamingMessage: AssistantMessage) {
 
 async function dispatchUpdate(message: AssistantMessage) {
 	const { controller, markTranscriptBlockFinalized } = createFixture(message);
-	// #handleMessageUpdate only reads `event.message`; the raw provider stream
-	// event is irrelevant to the finalization contract under test.
-	const event = {
-		type: "message_update",
-		message,
-		assistantMessageEvent: undefined as never,
-	} as Extract<AgentSessionEvent, { type: "message_update" }>;
-	await controller.handleEvent(event);
+	await controller.handleEvent(messageUpdateFromSnapshot(message));
 	return markTranscriptBlockFinalized;
 }
 
@@ -161,11 +155,7 @@ describe("EventController finalizes orphaned post-tool assistant segments", () =
 			{ type: "text", text: "post-tool commentary" },
 		]);
 		const { controller, ctx } = createFixture(message);
-		await controller.handleEvent({
-			type: "message_update",
-			message,
-			assistantMessageEvent: undefined as never,
-		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		await controller.handleEvent(messageUpdateFromSnapshot(message));
 		const segment = ctx.chatContainer.children.find(child => child instanceof AssistantMessageComponent);
 		expect(segment).toBeInstanceOf(AssistantMessageComponent);
 		expect((segment as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(false);
