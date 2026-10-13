@@ -7,6 +7,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { renderedDurationsMs } from "./helpers/rendered-durations";
 
 import { cfgSpeechEnabled, cfgSpeechMode } from "@oh-my-pi/pi-coding-agent/tts/settings";
 
@@ -196,10 +197,6 @@ describe("EventController message_update coalescing", () => {
 			timestamp: 0,
 		};
 		const rendered = () => Bun.stripANSI(ctx.streamingComponent!.render(180).join("\n"));
-		const durations = (text: string) =>
-			[...text.matchAll(/\b(\d+(?:\.\d+)?)(ms|s)\b/g)].map(
-				([, value, unit]) => Number(value) * (unit === "s" ? 1000 : 1),
-			);
 		const update = async (type: "thinking_start" | "thinking_end", contentIndex: number) => {
 			emit({
 				type: "message_update",
@@ -222,11 +219,11 @@ describe("EventController message_update coalescing", () => {
 			now = 10000;
 			message = { ...message, content: [...message.content, { type: "thinking", thinking: "" }] };
 			await update("thinking_start", 1);
-			expect(durations(rendered())).toContain(5_000);
+			expect(renderedDurationsMs(rendered())).toContain(5_000);
 
 			now = 12000;
 			await update("thinking_start", 1);
-			expect(durations(rendered())).toEqual(expect.arrayContaining([2_000, 7_000]));
+			expect(renderedDurationsMs(rendered())).toEqual(expect.arrayContaining([2_000, 7_000]));
 
 			now = 14000;
 			await update("thinking_end", 1);
@@ -235,7 +232,7 @@ describe("EventController message_update coalescing", () => {
 			emit({ type: "message_end", message });
 			await flushMicrotasks();
 			const final = Bun.stripANSI(ctx.chatContainer.render(180).join("\n"));
-			expect(durations(final)).toEqual(expect.arrayContaining([4_000, 9_000]));
+			expect(renderedDurationsMs(final)).toEqual(expect.arrayContaining([4_000, 9_000]));
 			expect(final).toContain("Answer");
 			expect(final).not.toContain("stream update");
 		} finally {
