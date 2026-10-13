@@ -85,6 +85,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { supportsOutputTokenLimit } from "@oh-my-pi/pi-catalog/compat/output-limits";
 import { requiresNativeTools, requiresToolFreeHistoryForToolOptOut } from "@oh-my-pi/pi-catalog/compat/tools";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
@@ -108,6 +109,8 @@ import {
 	withFileLock,
 } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
+import { frameDataBytesBudget } from "@oh-my-pi/snapcompact";
+import { asyncJobState, isSettledJobFrame } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { formatUsageResetWindow } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { loadAdvisorTranscriptCosts } from "../advisor";
@@ -344,7 +347,9 @@ import { isDateCwdReminderControl } from "./date-cwd-reminder";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
 	collectPendingToolCalls,
+	createInterruptedToolResults,
 	createInterruptedTurnAbortMessage,
+	hasRestorableTurn,
 	SESSION_EXIT_CUSTOM_TYPE,
 	type SessionExitData,
 	summarizeToolArguments,
@@ -1533,6 +1538,7 @@ export class AgentSession implements SettingsScope {
 					logger.debug("IRC wake turn deferred behind the running turn");
 					return;
 				}
+				this.#admitProviderTurn();
 				observation = this.#startTurnObservation(records);
 				return this.agent.prompt(records);
 			})
@@ -2587,6 +2593,7 @@ export class AgentSession implements SettingsScope {
 			model: () => this.model,
 			thinkingLevel: () => this.thinkingLevel,
 			sessionId: () => this.sessionId,
+			getPromptCacheKeyForModel: model => this.getPromptCacheKeyForModel(model),
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
 			setSkipPostTurnMaintenance: timestamp => {
 				this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = timestamp;
@@ -2644,11 +2651,14 @@ export class AgentSession implements SettingsScope {
 		// the CLI path), so discovery-backed providers (e.g. GitHub Copilot, or a
 		// models.yml LiteLLM provider with a cold cache) may not be populated yet.
 		// Reactivate a `no_model` advisor (#9010), retract stale
-		// retry.fallbackChains warnings (#10048), and rebind the active model to
-		// its refreshed same-selector entry (#10488) once discovery settles.
+		// retry.fallbackChains warnings (#10048), rebind the active model to
+		// its refreshed same-selector entry (#10488), and surface registry
+		// warnings discovery produced (e.g. an unreachable OLLAMA_BASE_URL)
+		// once discovery settles.
 		void this.#retryInactiveAdvisorAfterModelDiscovery();
 		void this.#revalidateFallbackChainsAfterModelDiscovery();
 		if (config.rebindModelAfterDiscovery) void this.#rebindActiveModelAfterModelDiscovery();
+		void this.#surfaceModelRegistryWarningsAfterDiscovery();
 		this.#watchWorkspaceAndPowerSettings();
 		this.#watchSessionSettings();
 		this.#watchModelAvailabilitySettings();
@@ -3479,7 +3489,13 @@ export class AgentSession implements SettingsScope {
 			// logical session transitions clear the cache.
 			this.#activeToolExecutionUpdates.set(event.toolCallId, event);
 		} else if (event.type === "tool_execution_end") {
-			this.#activeToolExecutionUpdates.delete(event.toolCallId);
+			const cached = this.#activeToolExecutionUpdates.get(event.toolCallId);
+			// A job may finish before its call returns the running start result.
+			// Keep that newer terminal frame for same-session focus rebuilds.
+			const resultDetails = isRecord(event.result) ? event.result.details : undefined;
+			if (asyncJobState(resultDetails) !== "running" || !isSettledJobFrame(cached?.partialResult.details)) {
+				this.#activeToolExecutionUpdates.delete(event.toolCallId);
+			}
 		}
 		if (event.type === "message_update") {
 			this.#emit(event);
@@ -4827,7 +4843,7 @@ export class AgentSession implements SettingsScope {
 			}
 			for (;;) {
 				try {
-					await this.agent.continue(signal);
+					await this.#continueAgentWithAdmission(signal);
 					return { status: "completed" };
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;
@@ -5369,14 +5385,6 @@ export class AgentSession implements SettingsScope {
 		return [...this.#activeToolExecutionUpdates.values()];
 	}
 
-	/** Managed background output is display-only: it must not wake or feed the model. */
-	emitBackgroundToolUpdate(event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>): void {
-		if (this.#isDisposed) return;
-		void this.#emitSessionEvent(event, { detachExtensions: true }).catch(error => {
-			logger.warn("Background tool display update failed", { toolCallId: event.toolCallId, error: String(error) });
-		});
-	}
-
 	/**
 	 * Observe authoritative run-state transitions before public `agent_end`
 	 * deferral, for lifecycle owners that must not remain stale while prompts unwind.
@@ -5858,7 +5866,7 @@ export class AgentSession implements SettingsScope {
 		try {
 			await state?.dispose({ timeoutMs: consolidateTimeoutMs });
 		} finally {
-			// Consolidation may embed final memories, so terminate its worker only afterward.
+			// Consolidation may embed final memories, so drop the embedding-server connection only afterward.
 			await shutdownMnemopiEmbedClient();
 		}
 	}
@@ -6809,8 +6817,8 @@ export class AgentSession implements SettingsScope {
 		return this.#providerBoundary.getImageAttachments();
 	}
 
-	buildDisplaySessionContext(): SessionContext {
-		return this.#withEvalStateContext(this.#providerBoundary.buildDisplaySessionContext());
+	buildDisplaySessionContext(model = this.model): SessionContext {
+		return this.#withEvalStateContext(this.#providerBoundary.buildDisplaySessionContext(model));
 	}
 
 	#withEvalStateContext(context: SessionContext): SessionContext {
@@ -6885,6 +6893,17 @@ export class AgentSession implements SettingsScope {
 	/** Apply session-level stream hooks to a direct side request. */
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider = "anthropic"): SimpleStreamOptions {
 		return this.#providerBoundary.prepareSimpleStreamOptions(options, provider);
+	}
+
+	/** Cache identity for the main loop and side requests that reuse its context. */
+	getPromptCacheKeyForModel(model: Model | undefined): string | undefined {
+		const candidate = this.sessionManager.getHeader()?.taskPromptCacheKey;
+		return (
+			this.agent.promptCacheKey ??
+			(candidate !== undefined && model !== undefined && resolveCatalogPolicy(model).taskSiblingPromptCache === true
+				? candidate
+				: undefined)
+		);
 	}
 
 	/** Current steering mode */
@@ -7772,13 +7791,19 @@ export class AgentSession implements SettingsScope {
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
+			durableReservation?: DurablePromptReservation;
 		},
 	): Promise<boolean> {
 		// Same barrier/claim protocol as prompt(): skill invocations, collab peer
 		// prompts and the CLI initial message must not start during manual
 		// compaction or before a handoff commits its history.
+		const generation = this.#promptGeneration;
 		const release = await this.#maintenance.waitForManualMaintenanceCleanup();
 		const outcome: PromptDispatchOutcome = { sessionClaimed: false };
+		if (options?.durableReservation && (this.#isDisposed || this.#promptGeneration !== generation)) {
+			release?.(false);
+			return false;
+		}
 		if (!release) return this.#dispatchCustomPrompt(message, options, outcome);
 		try {
 			return await this.#dispatchCustomPrompt(message, options, outcome);
@@ -7793,6 +7818,7 @@ export class AgentSession implements SettingsScope {
 			| (Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onPromptAdmitted"> & {
 					queueChipText?: string;
 					queueOnly?: boolean;
+					durableReservation?: DurablePromptReservation;
 			  })
 			| undefined,
 		outcome: PromptDispatchOutcome,
@@ -7815,7 +7841,8 @@ export class AgentSession implements SettingsScope {
 			keywordNotices = this.#createMagicKeywordNotices(skillArgs);
 		}
 
-		if (options?.queueOnly || this.isStreaming) {
+		const busy = () => (options?.durableReservation ? this.agent.state.isStreaming : this.isStreaming);
+		if (options?.queueOnly || busy()) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) {
 				// Mirrors #dispatchPrompt: busy because the agent owns a turn claims the
@@ -7856,7 +7883,7 @@ export class AgentSession implements SettingsScope {
 		// description must not publish the skill or start a turn afterwards.
 		if (hasSkillImages && (this.#promptGeneration !== preparationGeneration || this.#isDisposed)) {
 			outcome.sessionClaimed = false;
-			return true;
+			return options?.durableReservation === undefined;
 		}
 
 		// Image normalization and the vision-description call suspend after the
@@ -7864,7 +7891,7 @@ export class AgentSession implements SettingsScope {
 		// between. Re-check before dispatch and queue with the already-prepared
 		// content, mirroring #dispatchPrompt; no await sits between this check and
 		// #promptWithMessage's in-flight increment.
-		if (this.isStreaming) {
+		if (busy()) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
@@ -7881,6 +7908,24 @@ export class AgentSession implements SettingsScope {
 		}
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
+			reservedInFlight: options?.durableReservation !== undefined,
+			beforeProvider: options?.durableReservation
+				? async () => {
+						await this.sessionManager.ensureOnDisk();
+						this.sessionManager.appendCustomMessageEntry(
+							preparedMessage.customType,
+							preparedMessage.content,
+							preparedMessage.display,
+							preparedMessage.details,
+							preparedMessage.attribution,
+						);
+						await this.sessionManager.flush();
+						this.#persistedCustomPromptMessages.add(preparedMessage);
+					}
+				: undefined,
+			reconcileAfterProviderCancellation: options?.durableReservation
+				? () => this.agent.appendMessage(preparedMessage)
+				: undefined,
 			prependMessages:
 				keywordNotices.length > 0 || descriptionNotice
 					? [...keywordNotices, ...(descriptionNotice ? [descriptionNotice] : [])]
@@ -8052,32 +8097,9 @@ export class AgentSession implements SettingsScope {
 		const reservation = this.#reserveDurablePrompt();
 		this.#beginInFlight();
 		try {
-			const customMessage: CustomMessage<T> = {
-				role: "custom",
-				customType: message.customType,
-				content: message.content,
-				display: message.display,
-				details: message.details,
-				attribution: message.attribution ?? "agent",
-				timestamp: Date.now(),
-			};
-			return await this.#promptWithMessage(customMessage, this.#getCustomMessageTextContent(customMessage), {
-				reservedInFlight: true,
-				durableReservation: reservation,
-				beforeProvider: async () => {
-					await this.sessionManager.ensureOnDisk();
-					this.sessionManager.appendCustomMessageEntry(
-						customMessage.customType,
-						customMessage.content,
-						customMessage.display,
-						customMessage.details,
-						customMessage.attribution,
-					);
-					await this.sessionManager.flush();
-					this.#persistedCustomPromptMessages.add(customMessage);
-				},
-				reconcileAfterProviderCancellation: () => this.agent.appendMessage(customMessage),
-			});
+			return await this.#admitSubmission(() =>
+				this.#promptCustomMessage(message, { durableReservation: reservation }),
+			);
 		} finally {
 			this.#releaseDurablePrompt(reservation);
 			this.#endInFlight();
@@ -11328,6 +11350,38 @@ export class AgentSession implements SettingsScope {
 		return this.#recovery.retry();
 	}
 
+	/**
+	 * Go on with the turn the previous process was in when it ended (`omp --restore`).
+	 *
+	 * A turn cut off without an exit record (a crash, SIGKILL or power loss records
+	 * none) is first closed the way exit recovery closes one whose exit was recorded:
+	 * its unfinished tool calls get "outcome unknown" results and an interrupted-turn
+	 * abort ends it. That turn is then retried as `/retry` does: a batch whose every
+	 * call was cut off runs again, otherwise the model answers from where the
+	 * transcript stops. A turn that finished, failed, or the user interrupted stays
+	 * as it is.
+	 *
+	 * @returns whether a continuation was scheduled; false while a turn runs, without
+	 * a model, or with nothing left unfinished.
+	 */
+	async restoreInterruptedTurn(): Promise<boolean> {
+		const branch = this.sessionManager.getBranch();
+		if (this.isStreaming || !hasRestorableTurn(branch)) return false;
+		const model = this.model;
+		if (!model) return false;
+		const abort = createInterruptedTurnAbortMessage(
+			branch,
+			{ api: model.api, provider: model.provider, model: model.id },
+			{ assumeExit: true },
+		);
+		if (abort) {
+			for (const result of createInterruptedToolResults(branch)) this.sessionManager.appendMessage(result);
+			this.sessionManager.appendMessage(abort);
+			this.agent.replaceMessages(this.buildDisplaySessionContext().messages);
+		}
+		return this.retry();
+	}
+
 	// =========================================================================
 	// Bash Execution
 	// =========================================================================
@@ -11589,7 +11643,7 @@ export class AgentSession implements SettingsScope {
 				// Request controls (OpenAI effort updates) still replay the main
 				// conversation's, so the side request keeps its cached prefix.
 				parentSessionId: cacheSessionId,
-				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
+				promptCacheKey: this.getPromptCacheKeyForModel(model) ?? this.agent.sessionId,
 				preferWebsockets: this.preferWebsockets,
 				providerSessionState: this.#providerSessionState,
 				reasoning: toReasoningEffort(this.thinkingLevel),
@@ -11934,6 +11988,11 @@ export class AgentSession implements SettingsScope {
 						? `Could not restore model ${targetModelStrings[0]}. Using ${currentModel.provider}/${currentModel.id}`
 						: `Could not restore model ${targetModelStrings[0]}`;
 				}
+			}
+			// The first build used the departing model's frame budget; size the
+			// archive for the model this session is about to adopt.
+			if (targetModel && frameDataBytesBudget(targetModel) !== frameDataBytesBudget(this.model)) {
+				sessionContext = this.buildDisplaySessionContext(targetModel);
 			}
 			const didReloadConversationChange =
 				previousSessionContext !== undefined &&
@@ -12755,7 +12814,9 @@ export class AgentSession implements SettingsScope {
 		}
 
 		// Update agent state — build display context to populate agent messages.
-		const stateContext = this.sessionManager.buildSessionContext();
+		const stateContext = this.sessionManager.buildSessionContext({
+			maxFrameDataBytes: frameDataBytesBudget(this.model),
+		});
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
 		this.agent.replaceMessages(displayContext.messages);
 		this.#rehydrateCheckpointRewindState();
@@ -12785,7 +12846,9 @@ export class AgentSession implements SettingsScope {
 				summaryEntry,
 				fromExtension: summaryText ? fromExtension : undefined,
 			});
-			const rawContext = this.sessionManager.buildSessionContext();
+			const rawContext = this.sessionManager.buildSessionContext({
+				maxFrameDataBytes: frameDataBytesBudget(this.model),
+			});
 			return {
 				editorText,
 				editorImages,
@@ -13858,6 +13921,22 @@ export class AgentSession implements SettingsScope {
 		if (this.#recovery.revalidateRetryFallbackChainsAfterDiscovery()) {
 			this.#emit({ type: "config_warnings_changed" });
 		}
+	}
+
+	/**
+	 * Move registry warnings produced by the initial background discovery into
+	 * {@link configWarnings} so the interactive header shows them. Startup drains
+	 * the registry before discovery runs, so a discovery-time warning (an
+	 * env-redirected built-in provider failing) would otherwise only be logged.
+	 */
+	async #surfaceModelRegistryWarningsAfterDiscovery(): Promise<void> {
+		if (this.#isDisposed || typeof this.#modelRegistry.awaitInitialBackgroundRefresh !== "function") return;
+		await this.#modelRegistry.awaitInitialBackgroundRefresh(this.#modelDiscoveryAbortController.signal);
+		if (this.#isDisposed) return;
+		const warnings = this.#modelRegistry.drainConfigWarnings();
+		if (warnings.length === 0) return;
+		this.configWarnings.push(...warnings);
+		this.#emit({ type: "config_warnings_changed" });
 	}
 
 	/**

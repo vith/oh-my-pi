@@ -7,6 +7,7 @@ import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -100,6 +101,51 @@ describe("capture failure across background and cancellation boundaries", () => 
 		} finally {
 			await manager.dispose();
 			await sessionManager.close();
+		}
+	});
+
+	it("preserves capture-error metadata when an async bash result has no exit status", async () => {
+		await using temp = await TempDir.create("@capture-background-unfinished-");
+		const manager = new AsyncJobManager({});
+		const gate = Promise.withResolvers<void>();
+		let terminalDetails: BashToolDetails | undefined;
+		try {
+			vi.spyOn(bashExecutor, "executeBash").mockImplementation(async () => {
+				await gate.promise;
+				return {
+					output: "partial command output",
+					exitCode: undefined,
+					cancelled: false,
+					timedOut: false,
+					truncated: true,
+					totalBytes: 1000,
+					totalLines: 1,
+					outputBytes: 22,
+					outputLines: 1,
+					artifactError: "write",
+				};
+			});
+			const result = await new BashTool(sessionFor(temp.path(), manager)).execute(
+				"unfinished",
+				{ command: "echo example", async: true },
+				undefined,
+				update => {
+					if (update.details?.async?.state === "failed") terminalDetails = update.details;
+				},
+			);
+			const jobId = result.details?.async?.jobId;
+			if (!jobId) throw new Error("Expected background job");
+			gate.resolve();
+			await manager.getJob(jobId)?.promise;
+			const job = manager.getJob(jobId);
+			expect(job?.status).toBe("failed");
+			expect(job?.latestDetails?.meta?.artifactError).toBe("write");
+			expect(terminalDetails?.meta?.artifactError).toBe("write");
+			expect(job?.errorText).toContain("missing exit status");
+			expect(job?.errorText).toContain("not saved completely");
+		} finally {
+			gate.resolve();
+			await manager.dispose();
 		}
 	});
 

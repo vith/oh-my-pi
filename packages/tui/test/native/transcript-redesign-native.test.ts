@@ -173,7 +173,7 @@ describe("native transcript redesign", () => {
 		}
 	});
 
-	it("retains each completed summary-less thinking duration through later items and finalization", async () => {
+	it("coalesces consecutive summary-less thinking into current and cumulative timers, excluding gaps", async () => {
 		const component = new AssistantMessageComponent();
 		harness = await TspHarness.start();
 		harness.tui.addChild(component);
@@ -204,30 +204,73 @@ describe("native transcript redesign", () => {
 			now = 10000;
 			message = { ...message, content: [...message.content, { type: "thinking", thinking: "" }] };
 			await update("thinking_start", 1);
-			expect(harness.find(node => /Thought.*5s/.test(texts(node)))).toBeDefined();
+			expect(harness.find(node => /Thought.*5s/.test(texts(node)))).toBeUndefined();
+			expect(harness.find(node => node.k === "elapsed" && node.p?.age === 5000)).toBeDefined();
 
 			now = 12000;
 			await update("thinking_start", 1);
 			expect(harness.find(node => node.k === "elapsed" && node.p?.age === 2000)).toBeDefined();
-			expect(harness.find(node => node.k === "elapsed" && node.p?.age === 0)).toBeDefined();
+			expect(harness.find(node => node.k === "elapsed" && node.p?.age === 7000)).toBeDefined();
 
 			now = 14000;
 			await update("thinking_end", 1);
 			now = 20000;
 			message = { ...message, content: [...message.content, { type: "thinking", thinking: "" }] };
 			await update("thinking_start", 2);
-			expect(harness.find(node => /Thought.*5s/.test(texts(node)))).toBeDefined();
-			expect(harness.find(node => /Thought.*4s/.test(texts(node)))).toBeDefined();
+			expect(harness.find(node => node.k === "elapsed" && node.p?.age === 9000)).toBeDefined();
+			expect(harness.find(node => /^Thought/.test(texts(node)))).toBeUndefined();
 			expect(harness.errors).toEqual([]);
 
 			now = 23000;
 			component.updateContent({ ...message, content: [...message.content, { type: "text", text: "Answer" }] });
 			component.markTranscriptBlockFinalized();
 			await harness.render();
-			expect(harness.find(node => /Thought.*5s/.test(texts(node)))).toBeDefined();
-			expect(harness.find(node => /Thought.*4s/.test(texts(node)))).toBeDefined();
-			expect(harness.find(node => /Thought.*3s/.test(texts(node)))).toBeDefined();
+			expect(harness.find(node => /Thought.*3s.*12(?:\.0)?s total/.test(texts(node)))).toBeDefined();
+			expect(harness.find(node => /Thought.*[45]s/.test(texts(node)))).toBeUndefined();
 			expect(harness.find(node => node.k === "elapsed")).toBeUndefined();
+			expect(harness.errors).toEqual([]);
+		} finally {
+			nowSpy.mockRestore();
+			component.dispose();
+		}
+	});
+
+	it("keeps all consecutive thinking summaries under one section and preserves its fold state", async () => {
+		const component = new AssistantMessageComponent();
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		let now = 1000;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+		let message: AssistantMessage = {
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content: [{ type: "thinking", thinking: "First reasoning summary" }],
+		};
+		try {
+			component.updateContent(message, { transient: true, streamUpdatedAt: now });
+			await harness.render();
+			component.handleNativeEvent({ type: "toggle", key: "k0", collapsed: true });
+			now = 4000;
+			message = {
+				...message,
+				content: [...message.content, { type: "thinking", thinking: "Second reasoning summary" }],
+			};
+			component.updateContent(message, { transient: true, streamUpdatedAt: now });
+			await harness.render();
+			const sections = harness.findAll(node => node.k === "section");
+			expect(sections).toHaveLength(1);
+			expect(prop(sections[0], "collapsed")).toBe(true);
+			expect(texts(sections[0])).toContain("First reasoning summary");
+			expect(texts(sections[0])).toContain("Second reasoning summary");
+
+			now = 7000;
+			component.updateContent({ ...message, content: [...message.content, { type: "text", text: "Answer" }] });
+			component.markTranscriptBlockFinalized();
+			await harness.render();
+			const done = harness.find(node => node.k === "section" && node.p?.role === "omp.thinking");
+			expect(prop(done, "took")).toBe(6000);
+			expect(texts(done)).toMatch(/Thought.*3s.*6(?:\.0)?s total/);
 			expect(harness.errors).toEqual([]);
 		} finally {
 			nowSpy.mockRestore();
@@ -275,6 +318,51 @@ describe("native transcript redesign", () => {
 		}
 	});
 
+	it("preserves the observed total when a later thinking item is first seen at completion", async () => {
+		const component = new AssistantMessageComponent();
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		let now = 1000;
+		const nowSpy = vi.spyOn(performance, "now").mockImplementation(() => now);
+		let message: AssistantMessage = {
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content: [{ type: "thinking", thinking: "Observed summary" }],
+		};
+		try {
+			component.updateContent(message, { transient: true, streamUpdatedAt: now });
+			now = 4000;
+			component.updateContent(message, {
+				transient: true,
+				streamUpdatedAt: now,
+				streamUpdateType: "thinking_end",
+				streamUpdateContentIndex: 0,
+			});
+			now = 6000;
+			message = { ...message, content: [...message.content, { type: "thinking", thinking: "" }] };
+			component.updateContent(message, {
+				transient: true,
+				streamUpdatedAt: now,
+				streamUpdateType: "thinking_end",
+				streamUpdateContentIndex: 1,
+			});
+			await harness.render();
+			expect(harness.find(node => node.k === "elapsed" && node.p?.stopped === 3000)).toBeDefined();
+			expect(harness.find(node => node.k === "elapsed" && node.p?.age === 2000)).toBeUndefined();
+			component.markTranscriptBlockFinalized();
+			await harness.render();
+			const done = harness.find(node => node.k === "section" && node.p?.role === "omp.thinking");
+			expect(prop(done, "took")).toBe(3000);
+			expect(texts(done)).toMatch(/Thought.*3(?:\.0)?s total/);
+			expect(texts(done)).not.toMatch(/Thought for/);
+			expect(harness.errors).toEqual([]);
+		} finally {
+			nowSpy.mockRestore();
+			component.dispose();
+		}
+	});
+
 	it("closes the indexed older item without stopping newer thinking or extending duplicate completions", async () => {
 		const component = new AssistantMessageComponent();
 		harness = await TspHarness.start();
@@ -303,14 +391,14 @@ describe("native transcript redesign", () => {
 			await update("thinking_start", 1);
 			now = 4000;
 			await update("thinking_end", 0);
-			expect(harness.find(node => /Thought.*3s/.test(texts(node)))).toBeDefined();
+			expect(harness.find(node => node.k === "elapsed" && node.p?.age === 4000)).toBeDefined();
 			expect(
 				harness.find(node => node.k === "elapsed" && node.p?.age === 1000 && node.p.stopped === undefined),
 			).toBeDefined();
 
 			now = 5000;
 			await update("thinking_end", 0);
-			expect(harness.find(node => /Thought.*3s/.test(texts(node)))).toBeDefined();
+			expect(harness.find(node => node.k === "elapsed" && node.p?.age === 5000)).toBeDefined();
 			expect(
 				harness.find(node => node.k === "elapsed" && node.p?.age === 2000 && node.p.stopped === undefined),
 			).toBeDefined();
@@ -384,11 +472,42 @@ describe("native transcript redesign", () => {
 		await harness.render();
 		const frame = harness.find(node => node.k === "card" && node.p?.role === "omp.user");
 		expect(prop(frame, "head")).toBeUndefined();
-		const tool = (label: string) =>
-			harness!.find(node => node.p?.role === "omp.user.tool" && prop(node, "text") === label)!;
-		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("Copy").id, act: "copy-message" });
-		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("Rewind").id, act: "rewind" });
+		const tool = (icon: string) =>
+			harness!.find(node => node.p?.role === "omp.user.tool" && prop(node, "name") === icon)!;
+		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("copy").id, act: "copy-message" });
+		harness.event({ ev: "action", sf: harness.terminal.surface!, id: tool("rewind").id, act: "rewind" });
 		expect(actions).toEqual([{ act: "copy", text: "Fix the build" }, { act: "rewind" }]);
+	});
+
+	it("copies a turn's answer from its footer: the text blocks a blank line apart, no thinking", async () => {
+		const actions: TranscriptAction[] = [];
+		setTranscriptActionHandler(action => actions.push(action));
+		const answer = (...content: AssistantMessage["content"]): AssistantMessage => ({
+			...failed(""),
+			stopReason: "stop",
+			errorMessage: undefined,
+			content,
+		});
+		const component = new AssistantMessageComponent(
+			answer(
+				{ type: "text", text: "First part.\n" },
+				{ type: "thinking", thinking: "Checking the rest" },
+				{ type: "text", text: "  Second part." },
+			),
+		);
+		component.setTurnUsage({ elapsedMs: 133_000, input: 70_000, output: 1_000, cost: 0.85 });
+		harness = await TspHarness.start();
+		harness.tui.addChild(component);
+		await harness.render();
+		const copy = harness.find(node => node.p?.role === "omp.turn.copy");
+		harness.event({ ev: "action", sf: harness.terminal.surface!, id: copy!.id, act: "copy-answer" });
+		expect(actions).toEqual([{ act: "copy", text: "First part.\n\nSecond part." }]);
+
+		component.updateContent(answer({ type: "thinking", thinking: "Nothing to say" }));
+		await harness.render();
+		expect(harness.find(node => node.p?.role === "omp.turn.usage")).toBeDefined();
+		expect(harness.find(node => node.p?.role === "omp.turn.copy")).toBeUndefined();
+		expect(harness.errors).toEqual([]);
 	});
 
 	it("shows a user message's time on the terminal's clock", async () => {

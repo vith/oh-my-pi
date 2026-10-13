@@ -161,7 +161,7 @@ Artifacts and side channels:
 - Per-subagent output truncation: `MAX_OUTPUT_BYTES = 500_000` and `MAX_OUTPUT_LINES = 5000` in `packages/coding-agent/src/task/types.ts` (overridable via `PI_TASK_MAX_OUTPUT_BYTES` / `PI_TASK_MAX_OUTPUT_LINES`). Full raw output is still written to `<id>.md`.
 - Progress coalescing: `PROGRESS_COALESCE_MS = 150`; recent-output tail: `RECENT_OUTPUT_TAIL_BYTES = 8 * 1024` (last 8 non-empty lines).
 - Missing-`yield` reminder retries: `MAX_YIELD_RETRIES = 3` in `packages/coding-agent/src/task/executor.ts`.
-- Soft request budget: `task.softRequestBudget` defaults to 200 requests (`0` disables). Crossing it injects a wrap-up notice when `task.softRequestBudgetNotice` is enabled; at 1.5× the budget the run is force-stopped to yield partial findings. Bundled scout/sonic agents may impose a lower built-in cap.
+- Soft request budget: `task.softRequestBudget` defaults to 200 requests (`0` disables). Crossing it injects a wrap-up notice when `task.softRequestBudgetNotice` is enabled; at 1.5× the budget the run is force-stopped to yield partial findings. Bundled scout/sonic agents cap it at 100; the setting can lower that cap but not raise it. An exact-name `task.agentSoftRequestBudget` entry (`lead: 400`) replaces both for that agent, in either direction; `0` there disables its guard.
 - Hard wall clock: `task.maxRuntimeMs` applies to every spawn; default `0` disables it.
 - Recursion depth: `task.maxRecursionDepth` defaults to `2`; negative values disable the cap. The tool registry and shared preflight enforce it, and `runSubprocess(...)` strips child `task` access at max depth.
 - Inline summaries use `FULL_OUTPUT_THRESHOLD = 5000` characters in `packages/coding-agent/src/task/result-summary.ts`; truncation requires a full output artifact. `agent://<id>` points to that artifact.
@@ -178,6 +178,8 @@ Artifacts and side channels:
 - Job registration failure returns `Failed to start background task job(s): ...`; a batch that schedules only some jobs reports the failed ids in the immediate text and keeps the started ones running.
 - Child failures surface as `SingleResult.exitCode = 1` with `stderr`/`error` populated; the async job is marked failed but the delivery text still carries the output plus a follow-up/transcript hint.
 - If the child omits `yield`, `finalizeSubprocessOutput(...)` injects warnings such as `SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.`
+- A successful recoverable pause is separate from a delivered result: retained structured and message-result workers become idle with `SingleResult.paused`, without missing-yield or empty-message validation. The exact live session and its owner jobs remain available for resumption. Caller cancellation, runtime limits, and failures supersede pause; one-shot (`keepAlive=false`) workers cannot accept one.
+- Caller-keyed durable follow-ups share ordinary custom-prompt setup and maintenance. Their custom-message marker is appended and flushed after pre-prompt compaction but before provider dispatch; competing turns remain fenced through cancellation reconciliation. Retries inspect the active transcript branch before revival and never redispatch an appended key. Keys serialize within the process only; “answered” means a later assistant message, not guaranteed successful completion.
 - `agent://<id>` reads report unavailable sessions/artifact directories, missing ids, or invalid JSON for field extraction. `agent://all` is write-only; message targets cannot carry JSON-path suffixes.
 
 ## Notes

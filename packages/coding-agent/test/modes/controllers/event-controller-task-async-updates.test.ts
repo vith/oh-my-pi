@@ -16,11 +16,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { parksAsBackground, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { isNativeRendering, setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -31,6 +33,23 @@ function taskResult(asyncState: "running" | "completed" | "failed" | undefined, 
 		results: [],
 		totalDurationMs: 5,
 		...(asyncState ? { async: { state: asyncState, jobId: "Job1", type: "task" as const } } : {}),
+	};
+	return { content: [{ type: "text" as const, text }], details };
+}
+
+interface BashFrame {
+	content: { type: "text"; text: string }[];
+	details: BashToolDetails;
+}
+
+function bashResult(
+	text: string,
+	state: "running" | "completed" | "failed" | "cancelled" = "running",
+	exitCode?: number,
+): BashFrame {
+	const details: BashToolDetails = {
+		async: { state, jobId: "bash-1", type: "bash" },
+		...(exitCode === undefined ? {} : { exitCode }),
 	};
 	return { content: [{ type: "text" as const, text }], details };
 }
@@ -202,6 +221,218 @@ describe("EventController async update finalization", () => {
 			});
 		}
 	}
+
+	it("parks Bash in either renderer while keeping Eval native-only", () => {
+		const wasNative = isNativeRendering();
+		try {
+			for (const native of [false, true]) {
+				setNativeRendering(native);
+				const details = { async: { state: "running" } };
+				expect(parksAsBackground("bash", details)).toBe(true);
+				expect(parksAsBackground("task", details)).toBe(true);
+				expect(parksAsBackground("eval", details)).toBe(native);
+			}
+		} finally {
+			setNativeRendering(wasNative);
+		}
+	});
+
+	for (const native of [false, true]) {
+		for (const state of ["running", "completed", "failed", "cancelled"] as const) {
+			it(`rebuilds cached ${state} Bash output in ${native ? "native" : "legacy"} rendering`, () => {
+				const wasNative = isNativeRendering();
+				setNativeRendering(native);
+				try {
+					const { ctx, pendingTools, chatContainer } = createFixture();
+					const helpers = new UiHelpers(ctx);
+					ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+					const frame = bashResult("cached job output", state, state === "failed" ? 3 : undefined);
+					ctx.viewSession.activeToolExecutionUpdates = () => [
+						{
+							type: "tool_execution_update",
+							toolCallId: "tc-bash",
+							toolName: "bash",
+							args: { command: "sleep 30" },
+							partialResult: frame,
+						},
+					];
+					const assistant: AssistantMessage = {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: { command: "sleep 30" } }],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "test",
+						stopReason: "toolUse",
+						timestamp: 1,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+					};
+					const result: ToolResultMessage = {
+						role: "toolResult",
+						toolCallId: "tc-bash",
+						toolName: "bash",
+						...bashResult(formatBackgroundNotice("bash-1", 300)),
+						isError: false,
+						timestamp: 2,
+					};
+					helpers.renderSessionContext({ messages: [assistant, result] } as SessionContext);
+					const component = chatContainer.children.find(
+						(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
+					)!;
+					sealed.push(component);
+					const output = native
+						? JSON.stringify(component.describe())
+						: Bun.stripANSI(component.render(120).join("\n"));
+					expect(output).toContain("cached job output");
+					expect(output).not.toContain("Do NOT poll");
+					expect(pendingTools.has("tc-bash")).toBe(state === "running");
+					if (state !== "running") expect(component.isTranscriptBlockFinalized()).toBe(true);
+					if (native && state === "cancelled") expect(output).toContain('"Cancelled"');
+				} finally {
+					setNativeRendering(wasNative);
+				}
+			});
+		}
+	}
+
+	it("keeps a legacy backgrounded Bash block tracked through its final job update", async () => {
+		const { controller, pendingTools } = createFixture();
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-bash",
+			toolName: "bash",
+			args: { command: "sleep 30" },
+		});
+		const component = pendingTools.get("tc-bash")!;
+		sealed.push(component);
+
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-bash",
+			toolName: "bash",
+			result: bashResult(formatBackgroundNotice("bash-1", 300)),
+			isError: false,
+		});
+
+		expect(pendingTools.get("tc-bash")).toBe(component);
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-bash",
+			toolName: "bash",
+			args: {},
+			partialResult: bashResult("late legacy output"),
+		});
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("late legacy output");
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-bash",
+			toolName: "bash",
+			args: {},
+			partialResult: bashResult("legacy final output", "failed", 3),
+		});
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("legacy final output");
+		expect(pendingTools.has("tc-bash")).toBe(false);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	for (const native of [false, true])
+		describe(`${native ? "native" : "legacy"} rendering`, () => {
+			let wasNative = false;
+			beforeEach(() => {
+				wasNative = isNativeRendering();
+				setNativeRendering(native);
+			});
+			afterEach(() => setNativeRendering(wasNative));
+
+			async function backgroundBash(controller: EventController, pendingTools: Map<string, ToolExecutionComponent>) {
+				await controller.handleEvent({
+					type: "tool_execution_start",
+					toolCallId: "tc-bash",
+					toolName: "bash",
+					args: { command: "hyperfine bench" },
+				});
+				const component = pendingTools.get("tc-bash")!;
+				sealed.push(component);
+				return component;
+			}
+
+			const jobFrame = (partialResult: BashFrame) => ({
+				type: "tool_execution_update" as const,
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				args: {},
+				partialResult,
+			});
+
+			const rendered = (component: ToolExecutionComponent) =>
+				native ? JSON.stringify(component.describe()) : Bun.stripANSI(component.render(120).join("\n"));
+
+			it("keeps filling a backgrounded Bash card with its job's output until the job settles", async () => {
+				const { controller, pendingTools } = createFixture();
+				const component = await backgroundBash(controller, pendingTools);
+				await controller.handleEvent({
+					type: "tool_execution_end",
+					toolCallId: "tc-bash",
+					toolName: "bash",
+					result: bashResult(`Benchmark 1\n\n${formatBackgroundNotice("bash-1", 300)}`),
+					isError: false,
+				});
+				expect(pendingTools.get("tc-bash")).toBe(component);
+
+				await controller.handleEvent(jobFrame(bashResult("Benchmark 1\nBenchmark 2")));
+				expect(rendered(component)).toContain("Benchmark 2");
+				expect(pendingTools.get("tc-bash")).toBe(component);
+
+				await controller.handleEvent(jobFrame(bashResult("Benchmark 1\nBenchmark 2\nSummary", "failed", 1)));
+				expect(rendered(component)).toContain("Summary");
+				expect(rendered(component)).toContain(native ? "exit 1" : "Exit: 1");
+				expect(pendingTools.has("tc-bash")).toBe(false);
+				expect(component.isTranscriptBlockFinalized()).toBe(true);
+			});
+
+			it("seals a backgrounded Bash card as cancelled when its job is killed, keeping its output", async () => {
+				const { controller, pendingTools } = createFixture();
+				const component = await backgroundBash(controller, pendingTools);
+				await controller.handleEvent({
+					type: "tool_execution_end",
+					toolCallId: "tc-bash",
+					toolName: "bash",
+					result: bashResult(formatBackgroundNotice("bash-1", 300)),
+					isError: false,
+				});
+				await controller.handleEvent(jobFrame(bashResult("[Command cancelled]\nBenchmark 1", "cancelled")));
+
+				expect(rendered(component)).toContain("Benchmark 1");
+				if (native) expect(rendered(component)).toContain('"Cancelled"');
+				expect(rendered(component)).not.toContain("In background");
+				expect(pendingTools.has("tc-bash")).toBe(false);
+				expect(component.isTranscriptBlockFinalized()).toBe(true);
+			});
+
+			it("settles a Bash card whose job finished before the call returned", async () => {
+				const { controller, pendingTools } = createFixture();
+				const component = await backgroundBash(controller, pendingTools);
+				await controller.handleEvent(jobFrame(bashResult("all done", "completed", 0)));
+				await controller.handleEvent({
+					type: "tool_execution_end",
+					toolCallId: "tc-bash",
+					toolName: "bash",
+					result: bashResult(formatBackgroundNotice("bash-1", 300)),
+					isError: false,
+				});
+
+				expect(rendered(component)).toContain("all done");
+				expect(rendered(component)).not.toContain("In background");
+				expect(pendingTools.has("tc-bash")).toBe(false);
+				expect(component.isTranscriptBlockFinalized()).toBe(true);
+			});
+		});
 
 	it("settles an early wait result while another reported job remains running", async () => {
 		const { controller, pendingTools, chatContainer } = createFixture();

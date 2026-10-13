@@ -24,6 +24,9 @@ describe("background bash output", () => {
 			auth.keys.setRuntime("anthropic", "test-key");
 			const late = Promise.withResolvers<void>();
 			const terminal = Promise.withResolvers<void>();
+			const quiet = Promise.withResolvers<void>();
+			let quietAfter: number | undefined;
+			let lastOutputTime: number | undefined;
 			const settings = Settings.isolated({
 				"bash.autoBackground.enabled": true,
 				"bash.autoBackground.thresholdMs": 10,
@@ -44,7 +47,6 @@ describe("background bash output", () => {
 				getSessionId: () => sessionManager.getSessionId(),
 				getSessionSpawns: () => "*",
 				asyncJobManager: manager,
-				emitBackgroundToolUpdate: event => session.emitBackgroundToolUpdate(event),
 			};
 			const tool = new BashTool(toolSession);
 			const mockModel = createMockModel({
@@ -85,6 +87,14 @@ describe("background bash output", () => {
 					event.partialResult.content.find((block: { type: string; text?: string }) => block.type === "text")
 						?.text ?? "";
 				if (text.includes("late-progress")) late.resolve();
+				if (
+					quietAfter !== undefined &&
+					Date.now() >= quietAfter &&
+					event.partialResult.details?.async?.state === "running" &&
+					event.partialResult.details.lastOutputAt === lastOutputTime
+				) {
+					quiet.resolve();
+				}
 				if (event.partialResult.details?.async?.state === "failed") terminal.resolve();
 			});
 			try {
@@ -98,12 +108,24 @@ describe("background bash output", () => {
 				expect(update?.partialResult.details.async.state).toBe("running");
 				const lastOutputAt = update?.partialResult.details.lastOutputAt;
 				expect(typeof lastOutputAt).toBe("number");
+				expect(typeof update?.partialResult.details.startTime).toBe("number");
+				lastOutputTime = lastOutputAt;
+				quietAfter = Date.now() + 1_000;
+				await quiet.promise;
+				expect(calls).toBe(callsAtReturn);
+				const heartbeat = session
+					.activeToolExecutionUpdates()
+					.find(event => event.toolCallId === "background-output");
+				expect(heartbeat?.partialResult.details.lastOutputAt).toBe(lastOutputAt);
+				expect(heartbeat?.partialResult.content[0].text).toContain("late-progress");
 				await Bun.write(path.join(dir, "finish"), "finish");
 				await terminal.promise;
 				const final = session.activeToolExecutionUpdates().find(event => event.toolCallId === "background-output");
 				expect(final?.partialResult.content[0].text).toContain("Command exited with code 3");
 				expect(final?.partialResult.details.exitCode).toBe(3);
 				expect(final?.partialResult.details.lastOutputAt).toBe(lastOutputAt);
+				expect(final?.partialResult.details.startTime).toBe(update?.partialResult.details.startTime);
+				expect(typeof final?.partialResult.details.endTime).toBe("number");
 			} finally {
 				unsubscribe();
 				await session.dispose();

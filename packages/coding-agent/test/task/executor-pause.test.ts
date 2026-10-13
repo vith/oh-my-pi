@@ -205,62 +205,71 @@ describe("runSubprocess recoverable terminal pause", () => {
 		};
 	}
 
-	it("keeps the first successful pause result recorded and the session revivable without a yield reminder", async () => {
-		const id = "PausedExtension";
-		const toolName = "test_pause_extension";
-		const firstToolCallId = "pause-first";
-		const sessionFile = path.join(tempDir.path(), `${id}.jsonl`);
-		const eventBus = new EventBus();
-		const lifecycleStatuses: SubagentLifecyclePayload["status"][] = [];
-		eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, event => {
-			lifecycleStatuses.push((event as SubagentLifecyclePayload).status);
-		});
-		subprocessToolRegistry.register(toolName, {
-			terminalDisposition: event => (event.isError ? undefined : "pause"),
-			// A disposition must win over this compatibility handler: the old
-			// boolean would otherwise route the paused turn through hard abort.
-			shouldTerminate: () => true,
-		});
-		const harness = createPauseSession(({ promptIndex, harness: session }) => {
-			if (promptIndex !== 1) return;
-			session.recordAssistant([
-				{ id: firstToolCallId, name: toolName },
-				{ id: "pause-second", name: toolName },
-			]);
-			session.recordToolResult(firstToolCallId, toolName, false);
-			session.recordToolResult("pause-second", toolName, false);
-		});
-		mockCreateAgentSession(harness);
-		registerRunning(id, harness.session, sessionFile);
+	it.each([true, false])(
+		"retains the first successful pause without result validation (structured=%s)",
+		async structured => {
+			const id = "PausedExtension";
+			const toolName = "test_pause_extension";
+			const firstToolCallId = "pause-first";
+			const sessionFile = path.join(tempDir.path(), `${id}.jsonl`);
+			const eventBus = new EventBus();
+			const lifecycleStatuses: SubagentLifecyclePayload["status"][] = [];
+			eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, event => {
+				lifecycleStatuses.push((event as SubagentLifecyclePayload).status);
+			});
+			subprocessToolRegistry.register(toolName, {
+				terminalDisposition: event => (event.isError ? undefined : "pause"),
+				// A disposition must win over this compatibility handler: the old
+				// boolean would otherwise route the paused turn through hard abort.
+				shouldTerminate: () => true,
+			});
+			const harness = createPauseSession(({ promptIndex, harness: session }) => {
+				if (promptIndex !== 1) return;
+				session.recordAssistant([
+					{ id: firstToolCallId, name: toolName },
+					{ id: "pause-second", name: toolName },
+				]);
+				session.recordToolResult(firstToolCallId, toolName, false);
+				session.recordToolResult("pause-second", toolName, false);
+			});
+			mockCreateAgentSession(harness);
+			registerRunning(id, harness.session, sessionFile);
 
-		const result = await runSubprocess({ ...options(id), eventBus });
+			if (!structured) {
+				Object.assign(harness.session, {
+					getActiveToolNames: () => [],
+					getEnabledToolNames: () => [],
+				});
+			}
+			const result = await runSubprocess({ ...options(id), eventBus, structured });
 
-		const jsonlEntries = (await Bun.file(sessionFile).text())
-			.trim()
-			.split("\n")
-			.map(line => JSON.parse(line) as { type?: string; message?: ToolResultMessage });
-		expect(
-			jsonlEntries.some(
-				entry =>
-					entry.type === "message" &&
-					entry.message?.role === "toolResult" &&
-					entry.message.toolCallId === firstToolCallId &&
-					entry.message.toolName === toolName &&
-					entry.message.isError === false,
-			),
-		).toBe(true);
-		expect(result.exitCode).toBe(0);
-		expect(result.paused).toEqual({ toolName, toolCallId: firstToolCallId });
-		expect(result.aborted).toBeUndefined();
-		expect(result.error).toBeUndefined();
-		expect(harness.prompts).toHaveLength(1);
-		expect(harness.abortCalls()).toBe(1);
-		expect(harness.disposeCalls()).toBe(0);
-		expect(lifecycleStatuses).toEqual(["started", "paused"]);
-		expect(AgentRegistry.global().get(id)?.status).toBe("idle");
-		expect(AgentLifecycleManager.global().has(id)).toBe(true);
-		expect(await AgentLifecycleManager.global().ensureLive(id)).toBe(harness.session);
-	});
+			const jsonlEntries = (await Bun.file(sessionFile).text())
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line) as { type?: string; message?: ToolResultMessage });
+			expect(
+				jsonlEntries.some(
+					entry =>
+						entry.type === "message" &&
+						entry.message?.role === "toolResult" &&
+						entry.message.toolCallId === firstToolCallId &&
+						entry.message.toolName === toolName &&
+						entry.message.isError === false,
+				),
+			).toBe(true);
+			expect(result.exitCode).toBe(0);
+			expect(result.paused).toEqual({ toolName, toolCallId: firstToolCallId });
+			expect(result.aborted).toBeUndefined();
+			expect(result.error).toBeUndefined();
+			expect(harness.prompts).toHaveLength(1);
+			expect(harness.abortCalls()).toBe(1);
+			expect(harness.disposeCalls()).toBe(0);
+			expect(lifecycleStatuses).toEqual(["started", "paused"]);
+			expect(AgentRegistry.global().get(id)?.status).toBe("idle");
+			expect(AgentLifecycleManager.global().has(id)).toBe(true);
+			expect(await AgentLifecycleManager.global().ensureLive(id)).toBe(harness.session);
+		},
+	);
 
 	it("stops immediately when a synthetic yield reminder pauses", async () => {
 		const id = "ReminderPausedExtension";
@@ -342,6 +351,26 @@ describe("runSubprocess recoverable terminal pause", () => {
 		expect(result.paused).toBeUndefined();
 		expect(result.aborted).toBe(true);
 		expect(AgentRegistry.global().get(id)?.status).not.toBe("idle");
+	});
+
+	it.each([true, false])("lets a prompt failure supersede a pause (structured=%s)", async structured => {
+		const id = "PauseThenError";
+		const toolName = "test_pause_then_error";
+		subprocessToolRegistry.register(toolName, { terminalDisposition: () => "pause" });
+		const harness = createPauseSession(({ harness: session }) => {
+			session.recordAssistant([{ id: "pause-before-error", name: toolName }]);
+			session.recordToolResult("pause-before-error", toolName, false);
+			throw new Error("Provider failed after pause");
+		});
+		mockCreateAgentSession(harness);
+		registerRunning(id, harness.session, path.join(tempDir.path(), `${id}.jsonl`));
+
+		const result = await runSubprocess({ ...options(id), structured });
+
+		expect(result.exitCode).toBe(1);
+		expect(result.paused).toBeUndefined();
+		expect(result.error).toContain("Provider failed after pause");
+		expect(harness.prompts).toHaveLength(1);
 	});
 
 	it("does not claim an unrecoverable one-shot helper can be resumed", async () => {
