@@ -22,6 +22,29 @@ insertion using the production command definitions and autocomplete provider.
 Only executed results may be reported as passing; a workflow starting is not
 test-success evidence.
 
+Before merging an internal source PR, MUST watch every applicable GitHub check
+from its feature worktree:
+
+```fish
+set pr (gh pr view --repo vith/oh-my-pi --json number --jq .number)
+gh pr checks $pr --repo vith/oh-my-pi --watch --interval 10 --fail-fast
+```
+
+MUST confirm the checks belong to the current PR head and test a candidate
+containing the current integration base. After a push, old-head results do not
+validate the new head. NEVER restrict the watch to `--required`: applicable
+source jobs remain a merge gate even without required status checks.
+
+If a check fails, MUST inspect its run with
+`gh run view RUN_ID --repo vith/oh-my-pi --log-failed` (replace `RUN_ID` with the
+failed check's run ID), investigate the cause, correct the source, fixture, or
+workflow, push the correction, and repeat the watch until every applicable job
+passes. NEVER bypass a failure by weakening assertions, skipping suites, or
+restarting unchanged jobs. Missing, pending, canceled, or failed checks block
+merge. Immediately before merging, MUST verify the successful checks still
+apply to the exact PR head and current base; changed source or base requires
+fresh validation.
+
 Source CI does not build shipping binaries, invoke `vith/arch-packages`, publish
 packages, or install omp on the workstation. Package validation and delivery
 remain separate from source tests; no ARM source build is added.

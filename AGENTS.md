@@ -262,8 +262,9 @@ For the bash tool specifically:
 - Work in dedicated `.worktrees/<name>` checkouts on `feat/*` branches; NEVER develop directly on `integration`.
 - Reuse a feature's branch for follow-up work. Preserve feature branches after merging.
 - Upstream catch-ups MUST use a branch → GitHub PR against `vith/oh-my-pi:integration` → validation → merge workflow. Verify the live source validation gate; NEVER treat legacy Forgejo jobs or package CI as source validation.
-- Test execution remains disabled until its CI cost is optimized. NEVER run TS/Rust suites or worker smoke tests without an explicit user policy change.
-- A source-only request does not authorize package CI, publication, or installation. An explicit user-approved no-emit TypeScript/lint/format checks plus independent review gate MUST record the exception and evidence in PR `Testing`, with build/runtime validation marked unverified. NEVER describe canceled or failed CI as successful.
+- Source tests MUST run in GitHub CI. Before merging, MUST follow the CI watch and failure-repair workflow in `CONTRIBUTING.md` and verify every applicable job passed for the exact PR head and current integration base.
+- Local TS/Rust suites, worker smoke tests, and native builds remain prohibited unless explicitly authorized. Local lint, formatting checks, and no-emit TypeScript checks are allowed.
+- A source-only request does not authorize package CI, publication, or installation. MUST record executed source-CI evidence in PR `Testing` and distinguish it from unverified shipping builds and package delivery. NEVER describe canceled or failed CI as successful.
 - For a clean-base reconstruction, start from the upstream release tag and port only retained feature-specific changes. NEVER merge old feature branches wholesale: their ancestry may include intentionally dropped features.
 - Preserve retained behavior, not obsolete implementation. Prefer current upstream APIs over resurrected duplicates; redesign poor fork integrations when necessary.
 - The fork permissions rework is retired. Use upstream approval behavior; do not restore its engine, dialogs, commands, or rule migration.
