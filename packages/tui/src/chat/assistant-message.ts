@@ -63,11 +63,14 @@ const STREAM_UPDATE_LABELS: Record<AssistantMessageEvent["type"], string> = {
 	error: "stream error",
 };
 
-/** The native head of a finished thinking block: "Thought for 12s", or "Thought" when it was never seen streaming. */
-function thoughtLabel(clock: { start: number; end?: number } | undefined): string {
-	if (clock?.end === undefined) return "Thought";
-	const ms = clock.end - clock.start;
-	return `Thought for ${ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : formatDuration(ms)}`;
+/** Finished thinking shows the last item's duration and the observed total for its consecutive run. */
+function thoughtLabel(clock: { start: number; end?: number } | undefined, total: number | undefined): string {
+	let label = "Thought";
+	if (clock?.end !== undefined) {
+		const ms = clock.end - clock.start;
+		label = `Thought for ${ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : formatDuration(ms)}`;
+	}
+	return total === undefined ? label : `${label} (${formatDuration(total)} total)`;
 }
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
@@ -730,6 +733,16 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/** Sum observed thinking intervals in this consecutive run, excluding gaps between items. */
+	#thinkingTotal(message: AssistantMessage, index: number, now: number): number | undefined {
+		let total: number | undefined;
+		for (let item = index; item >= 0 && message.content[item]?.type === "thinking"; item--) {
+			const clock = this.#thinkingClock.get(item);
+			if (clock) total = (total ?? 0) + Math.max(0, (clock.end ?? now) - clock.start);
+		}
+		return total;
+	}
+
 	#streamUpdateLabel(): string {
 		const number = this.#streamUpdateNumber === undefined ? "" : ` #${this.#streamUpdateNumber}`;
 		const event =
@@ -744,18 +757,22 @@ export class AssistantMessageComponent extends Container {
 			this.#streamUpdatedAt === undefined
 				? ""
 				: theme.fg(
-						"dim",
-						` · ${this.#streamUpdateLabel()} · ${formatDuration(Math.max(0, Math.floor((performance.now() - this.#streamUpdatedAt) / 1000)) * 1000)} ago`,
-					);
+					"dim",
+					` · ${this.#streamUpdateLabel()} · ${formatDuration(Math.max(0, Math.floor((performance.now() - this.#streamUpdatedAt) / 1000)) * 1000)} ago`,
+				);
 		const tail = this.#displayedMessage ? this.#thinkingTailIndex(this.#displayedMessage) : undefined;
 		const clock = tail === undefined ? undefined : this.#thinkingClock.get(tail);
+		const now = performance.now();
+		const total = tail === undefined || !this.#displayedMessage
+			? undefined
+			: this.#thinkingTotal(this.#displayedMessage, tail, now);
 		const thinkingElapsed =
-			clock === undefined
+			total === undefined
 				? ""
 				: theme.fg(
-						"dim",
-						` · ${formatDuration(Math.max(0, (clock.end ?? performance.now()) - clock.start))} elapsed`,
-					);
+					"dim",
+					` · ${clock === undefined ? "" : `${formatDuration(Math.max(0, (clock.end ?? now) - clock.start))} `}(${formatDuration(total)} total)`,
+				);
 		const thinkingLabel = theme.fg("muted", " Thinking") + thinkingElapsed + updateAge;
 		const rate = Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed());
 		// The numeric badge ("<total> · <rate> toks/s") only renders while this block
@@ -928,10 +945,10 @@ export class AssistantMessageComponent extends Container {
 				cached?.text === source && cached.stream === stream
 					? cached
 					: {
-							text: source,
-							stream,
-							node: node("md", stream ? { text: source, stream: true } : { text: source }, undefined, key),
-						};
+						text: source,
+						stream,
+						node: node("md", stream ? { text: source, stream: true } : { text: source }, undefined, key),
+					};
 			parts.set(slot, entry);
 			return entry.node;
 		};
@@ -983,10 +1000,25 @@ export class AssistantMessageComponent extends Container {
 						else if (chart) children.push(describeTableChart(chart, slot));
 					});
 				} else if (content.type === "thinking") {
-					const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
+					const firstIndex = index;
+					const bodies: NativeChild[] = [];
+					let visible = false;
+					do {
+						const block = message.content[index] as ThinkingContentBlock;
+						const display = resolveThinkingDisplay(block, this.#proseOnlyThinking);
+						if (display.visible) {
+							visible = true;
+							bodies.push(markdown(`k${index}`, `body${index}`, display.text, live && index === tailIndex));
+						}
+						if (!this.#hideThinkingBlock) bodies.push(...(this.#thinkingExtensions.get(index) ?? []));
+						if (message.content[index + 1]?.type !== "thinking") break;
+						index++;
+					} while (index < message.content.length);
 					const thinkingLive = live && thinkingTail === index;
 					const clock = this.#thinkingClock.get(index);
-					if (!display.visible && !thinkingLive && !clock) continue;
+					const now = performance.now();
+					const total = this.#thinkingTotal(message, index, now);
+					if (!visible && !thinkingLive && total === undefined) continue;
 					// Hidden (Ctrl+T): only the live "Thinking…" head shows; a finished thought leaves nothing.
 					if (this.#hideThinkingBlock && !thinkingLive) continue;
 					const tokens = thinkingLive ? this.#thinkingTokens : (clock?.tokens ?? 0);
@@ -994,41 +1026,49 @@ export class AssistantMessageComponent extends Container {
 					// Live: starburst · "Thinking…" · ticking timer · tok/s. Done: "Thought for 12s".
 					const head = thinkingLive
 						? node(
-								"row",
-								{ gap: "sm", title },
-								[
-									node("spinner", { style: "starburst", role: "omp.thinking.spin" }),
-									text([span("Thinking…", "muted")]),
-									...(clock === undefined
-										? []
-										: [
-												elapsed(
-													Math.max(0, (clock.end ?? performance.now()) - clock.start),
-													clock.end !== undefined,
-												),
-											]),
-									...(this.#streamUpdatedAt === undefined
-										? []
-										: [
-												text([span(this.#streamUpdateLabel(), "dim")]),
-												elapsed(Math.max(0, performance.now() - this.#streamUpdatedAt)),
-												text([span("ago", "dim")]),
-											]),
-									...(rate >= 0.05 ? [node("rate", { value: rate, unit: "tok/s" })] : []),
-								],
-								display.visible ? "head" : `k${index}`,
-							)
+							"row",
+							{ gap: "sm", title },
+							[
+								node("spinner", { style: "starburst", role: "omp.thinking.spin" }),
+								text([span("Thinking…", "muted")]),
+								...(clock === undefined
+									? []
+									: [
+										elapsed(
+											Math.max(0, (clock.end ?? now) - clock.start),
+											clock.end !== undefined,
+										),
+									]),
+								...(total === undefined
+									? []
+									: [
+										node("row", { gap: "none" }, [
+											text([span("(", "dim")]),
+											elapsed(total, clock === undefined || clock.end !== undefined),
+											text([span(" total)", "dim")]),
+										]),
+									]),
+								...(this.#streamUpdatedAt === undefined
+									? []
+									: [
+										text([span(this.#streamUpdateLabel(), "dim")]),
+										elapsed(Math.max(0, performance.now() - this.#streamUpdatedAt)),
+										text([span("ago", "dim")]),
+									]),
+								...(rate >= 0.05 ? [node("rate", { value: rate, unit: "tok/s" })] : []),
+							],
+							visible ? "head" : `k${firstIndex}`,
+						)
 						: node(
-								"text",
-								{ spans: [span(thoughtLabel(clock), "muted")], title },
-								undefined,
-								display.visible ? "head" : `k${index}`,
-							);
-					if (!display.visible) {
+							"text",
+							{ spans: [span(thoughtLabel(clock, total), "muted")], title },
+							undefined,
+							visible ? "head" : `k${firstIndex}`,
+						);
+					if (!visible) {
 						children.push(head);
 						continue;
 					}
-					const body = markdown(`k${index}`, "body", display.text, streaming);
 					children.push(
 						node(
 							"section",
@@ -1038,16 +1078,18 @@ export class AssistantMessageComponent extends Container {
 								collapsible: true,
 								// Open while it streams; a finished thought folds to its "Thought for 12s" line unless the user keeps thinking expanded.
 								collapsed:
-									this.#thinkingCollapsed.get(index) ??
+									this.#thinkingCollapsed.get(firstIndex) ??
 									(this.#hideThinkingBlock || (!thinkingLive && !this.#expandThinkingBlocks)),
 								// Tern's fold head sums it into "Worked for 12s".
-								took: clock?.end === undefined ? undefined : Math.max(0, Math.round(clock.end - clock.start)),
+								took:
+									total === undefined || (thinkingLive && clock?.end === undefined)
+										? undefined
+										: Math.round(total),
 							},
-							[head, body],
-							`k${index}`,
+							[head, ...bodies],
+							`k${firstIndex}`,
 						),
 					);
-					if (!this.#hideThinkingBlock) children.push(...(this.#thinkingExtensions.get(index) ?? []));
 				} else if (content.type === "image" && content.data && content.mimeType && this.#showImages) {
 					children.push(this.#nativeImages.get(`i${index}`, content.data, content.mimeType));
 				}
@@ -1389,9 +1431,9 @@ export class AssistantMessageComponent extends Container {
 		return kind === "text"
 			? new Markdown(text, 1, 0, this.#getProseTheme(), this.#getProseTextStyle(), 0)
 			: new Markdown(text, 1, 0, getMarkdownTheme(), {
-					color: (value: string) => theme.fg("thinkingText", value),
-					italic: true,
-				});
+				color: (value: string) => theme.fg("thinkingText", value),
+				italic: true,
+			});
 	}
 
 	/**
@@ -1911,10 +1953,14 @@ export class AssistantMessageComponent extends Container {
 			} else if (content.type === "thinking") {
 				const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
 				if (this.#hideThinkingBlock || !display.visible) {
-					const clock = this.#thinkingClock.get(i);
-					if (clock?.end !== undefined && i !== thinkingTail) {
-						this.#contentContainer.addChild(new Text(theme.fg("muted", thoughtLabel(clock)), 1, 0));
-						hasRenderedContent = true;
+					if (i !== thinkingTail && message.content[i + 1]?.type !== "thinking") {
+						const total = this.#thinkingTotal(message, i, performance.now());
+						if (total !== undefined) {
+							this.#contentContainer.addChild(
+								new Text(theme.fg("muted", thoughtLabel(this.#thinkingClock.get(i), total)), 1, 0),
+							);
+							hasRenderedContent = true;
+						}
 					}
 					thinkingIndex += 1;
 					continue;
