@@ -26,7 +26,7 @@ Before merging an internal source PR, MUST watch every applicable GitHub check
 from its feature worktree:
 
 ```fish
-set pr (gh pr view --repo vith/oh-my-pi --json number --jq .number)
+set pr (gh pr view (git branch --show-current) --repo vith/oh-my-pi --json number --jq .number)
 gh pr checks $pr --repo vith/oh-my-pi --watch --interval 10 --fail-fast
 ```
 
