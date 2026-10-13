@@ -593,6 +593,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 	}, 30_000);
 
 	test("does not call a cancelled run's page listeners for the requests the cancel stops", async () => {
+		const trace = (phase: string, error?: unknown) => console.info("[browser-cancel-listener]", phase, error ?? "");
 		const requested = Promise.withResolvers<void>();
 		const slow = Bun.serve({
 			port: 0,
@@ -604,7 +605,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 		});
 		try {
 			const invoke = createHost();
+			trace("opening");
 			await invoke({ action: "open", name: "cancelled-listener", url: `${baseUrl}/one` });
+			trace("opened; starting run");
 			const cancel = new AbortController();
 			const run = invoke(
 				{
@@ -618,14 +621,22 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser navigation, frames, dialogs, and t
 				},
 				cancel.signal,
 			);
+			void run.then(
+				() => trace("run resolved"),
+				(error: unknown) => trace("run rejected", error),
+			);
+			trace("waiting for request");
 			await requested.promise;
+			trace("request received; cancelling");
 			cancel.abort();
 			expect(await run.catch((error: unknown) => error)).toMatchObject({ message: "Operation aborted" });
+			trace("cancel acknowledged; reading page state");
 			const after = await invoke({
 				action: "run",
 				name: "cancelled-listener",
 				code: "return { url: page.url(), failedCalls: globalThis.failedCalls ?? 0 };",
 			});
+			trace("page state received");
 			expect(valueOf(after)).toEqual({ url: `${baseUrl}/one`, failedCalls: 0 });
 		} finally {
 			slow.stop(true);
