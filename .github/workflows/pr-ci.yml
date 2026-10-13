@@ -98,12 +98,6 @@ jobs:
             console.log(JSON.stringify({ line: edited.lines[0], cursorColumn: edited.cursorCol }));
           ' 2>&1 | tee "$CI_LOG_DIR/autocomplete-smoke.log"
 
-      - name: Trace browser cancellation regression
-        if: matrix.suite == 'typescript'
-        env:
-          OMP_TEST_SHARD: 70/92
-        run: bun scripts/ci-test-ts.ts coding-agent-native --full 2>&1 | tee "$CI_LOG_DIR/browser-cancel-diagnostic.log"
-
       - name: Run full local-scope TypeScript suites
         if: matrix.suite == 'typescript'
         run: bun run test:ts 2>&1 | tee "$CI_LOG_DIR/typescript.log"
