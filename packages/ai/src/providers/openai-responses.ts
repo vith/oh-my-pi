@@ -1,4 +1,3 @@
-import { scheduler } from "node:timers/promises";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	$flag,
@@ -40,6 +39,7 @@ import {
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
 import { notifyProviderResponse } from "../utils/provider-response";
+import { waitForRetry } from "../utils/retry-wait";
 import {
 	adaptSchemaForStrict,
 	findStrictToolSchemaViolation,
@@ -249,8 +249,7 @@ export async function pollOpenAIResponsesResultForCompletion(args: {
 		if (attempt > 0) {
 			if (Date.now() + OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS >= deadline) return undefined;
 			try {
-				if (args.wait) await args.wait(OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
-				else await scheduler.wait(OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, { signal: args.signal });
+				await waitForRetry(args.wait, OPENAI_RESPONSES_RESUME_POLL_INTERVAL_MS, args.signal);
 			} catch {
 				return undefined;
 			}
@@ -495,6 +494,27 @@ function getOpenAIResponsesProviderSessionState(
 	const created = createOpenAIResponsesProviderSessionState(model);
 	providerSessionState.set(key, created);
 	return created;
+}
+
+/**
+ * Whether the next request for `model` replays native Responses history items
+ * (encrypted reasoning, item ids), as {@link buildParams} decides it. A session
+ * is cold, rebuilding turns from message content, from the first request on a
+ * connection-bound host (`compat.connectionBoundNativeHistory`, GitHub Copilot)
+ * and after `close()` on any host, until a response succeeds. Without session
+ * state every request replays.
+ */
+export function openAIResponsesReplaysNativeHistory(
+	model: Pick<Model, "api" | "provider" | "compat"> | null | undefined,
+	providerSessionState: Map<string, ProviderSessionState> | undefined,
+): boolean {
+	if (model?.api !== "openai-responses" || !providerSessionState) return true;
+	const state = providerSessionState.get(`${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`) as
+		| OpenAIResponsesProviderSessionState
+		| undefined;
+	if (state) return state.nativeHistoryReplayWarmed;
+	const compat = model.compat;
+	return !(compat && "connectionBoundNativeHistory" in compat && compat.connectionBoundNativeHistory);
 }
 
 /** Host per-provider storage defaults; see {@link configureProviderStoreResponses}. */
@@ -1268,11 +1288,11 @@ const streamOpenAIResponsesOnce = (
 					firstTokenTime = undefined;
 					nativeOutputItems.length = 0;
 
-					if (options?.providerRetryWait) {
-						await options.providerRetryWait(OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS, options.signal);
-					} else {
-						await scheduler.wait(OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS, { signal: options?.signal });
-					}
+					await waitForRetry(
+						options?.providerRetryWait,
+						OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS,
+						options?.signal,
+					);
 					if (abortTracker.wasCallerAbort()) throw new AIError.AbortError();
 					openaiStream = await openResponsesStreamWithFallbacks();
 				}

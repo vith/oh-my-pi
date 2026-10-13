@@ -1,10 +1,4 @@
-import type {
-	AgentEvent,
-	AgentOptions,
-	AgentTelemetryConfig,
-	AgentTool,
-	AgentToolContext,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -306,8 +300,6 @@ export interface ToolSession {
 	hasEditTool?: boolean;
 	/** Event bus for tool/extension communication */
 	eventBus?: EventBus;
-	/** UI-only updates from managed tools after their foreground call has returned. */
-	emitBackgroundToolUpdate?: (event: Extract<AgentEvent, { type: "tool_execution_update" }>) => void;
 	/**
 	 * Root-scoped bus for `task:subagent:*` observability frames. The root
 	 * session creates it; every spawned subagent session inherits it, so RPC
@@ -363,6 +355,8 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Parent cache identity for sibling sharing, only when the parent model opts in. */
+	getPromptCacheKey?: () => string | undefined;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */

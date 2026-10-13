@@ -3,6 +3,7 @@ import {
 	formatBackgroundNotice,
 	formatWallTimeNotice,
 	formatExitCodeNotice,
+	WALL_TIME_NOTICE_MIN_MS,
 } from "@oh-my-pi/pi-tui/tools/bash";
 import * as fs from "node:fs";
 import { type } from "@oh-my-pi/omptype";
@@ -429,11 +430,14 @@ interface ManagedBashJobHandle {
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	getLatestDetails: () => BashToolDetails;
+	/** Hand the call's card to the job: later frames carry `details.async` and the last one settles it. */
 	background: () => void;
 }
 
 interface BashProgressDetails extends BashToolDetails {
 	images?: ImageContent[];
+	/** A running job's output so far (`proc://` shows it). */
+	output?: string;
 }
 
 /** Pid probe of a background job with no command in flight. */
@@ -697,8 +701,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		const outputLines = [this.#formatResultOutput(result)];
 		const notices: string[] = [];
-		if (options.wallTimeMs !== undefined) {
-			notices.push(formatWallTimeNotice(options.wallTimeMs));
+		const wallTimeMs = options.wallTimeMs;
+		const wallTimeNoticeEmitted = wallTimeMs !== undefined && wallTimeMs >= WALL_TIME_NOTICE_MIN_MS;
+		if (wallTimeNoticeEmitted) {
+			notices.push(formatWallTimeNotice(wallTimeMs));
 		}
 		if (options.notices) {
 			for (const notice of options.notices) {
@@ -716,7 +722,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// executor/PTY layer.
 		const isTimeout = result.timedOut === true;
 
-		const details: BashToolDetails = {};
+		const details: BashToolDetails = { wallTimeNoticeEmitted };
 		if (timeoutSec === undefined) {
 			details.timeoutDisabled = true;
 		} else {
@@ -725,8 +731,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (options.requestedTimeoutSec !== undefined && options.requestedTimeoutSec !== timeoutSec) {
 			details.requestedTimeoutSeconds = options.requestedTimeoutSec;
 		}
-		if (options.wallTimeMs !== undefined) {
-			details.wallTimeMs = options.wallTimeMs;
+		if (wallTimeMs !== undefined) {
+			details.wallTimeMs = wallTimeMs;
 		}
 		if (failedExit) {
 			details.exitCode = exitCode;
@@ -823,7 +829,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		requestedTimeoutSec?: number;
 		notices?: readonly string[];
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
-		/** Foreground calls use the loop callback; promoted jobs use session display events. */
+		/** Promoted jobs continue through the loop callback's detached display-event route. */
 		foreground: boolean;
 		approvalTier: ToolTier;
 	}): ManagedBashJobHandle {
@@ -839,8 +845,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		let pids: () => readonly number[] = NO_PIDS;
 		let latestText = "";
 		let latestProgressDetails: BashProgressDetails = { startTime };
-		let foreground = options.foreground;
-		let heartbeat: NodeJS.Timeout | undefined;
+		let backgrounded = !options.foreground;
 		let settled = false;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
 		const runningDetails = (jobId: string): BashProgressDetails => ({
@@ -854,16 +859,32 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			"bash",
 			label,
 			async ({ jobId, signal: runSignal, reportProgress }) => {
+				// Records the job's progress and shows it on the call's card: plain output
+				// while the call still waits on it, the job frame (`details.async`) once
+				// backgrounded, so the card keeps filling and settles with the job.
+				const report = async (text: string, details: BashProgressDetails): Promise<void> => {
+					latestText = text;
+					latestProgressDetails = details;
+					const reported = reportProgress(text, { ...details, output: text });
+					// `output` feeds job listings; the card already shows `text`.
+					const { output: _output, ...frame } = details;
+					if (!this.session.isDisposed?.() && this.session.getSessionId?.() === sessionId) {
+						options.onUpdate?.({
+							content: [{ type: "text", text }],
+							details: backgrounded ? frame : { ...frame, async: undefined },
+						});
+					}
+					await reported;
+				};
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 				const wallTimeStart = performance.now();
 				const reportRunning = () => {
-					latestProgressDetails = runningDetails(jobId);
-					void reportProgress(latestText, { ...latestProgressDetails, output: latestText });
+					void report(latestText, runningDetails(jobId));
 				};
 				// A heartbeat updates activity timing, not the last-output timestamp.
 				// No log reads, extra output, or model wake-ups are involved.
-				heartbeat = setInterval(() => {
-					if (!foreground && !runSignal.aborted) reportRunning();
+				const heartbeat = setInterval(() => {
+					if (backgrounded && !runSignal.aborted) reportRunning();
 				}, 1_000);
 				heartbeat.unref();
 				try {
@@ -882,8 +903,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							lastOutputAt = Date.now();
 						},
 						onPreview: text => {
-							latestText = text;
-							reportRunning();
+							void report(text, runningDetails(jobId));
 						},
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 						onStart: probe => {
@@ -892,6 +912,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					}).finally(() => {
 						pids = NO_PIDS;
 					});
+					// Unfinished results throw during shaping; keep capture failures
+					// available to terminal frames and async delivery even then.
+					if (result.artifactError) {
+						latestProgressDetails = {
+							...latestProgressDetails,
+							meta: { ...latestProgressDetails.meta, artifactError: result.artifactError },
+						};
+					}
 					const finalResult = await this.#buildCompletedResult(result, options.timeoutSec, {
 						requestedTimeoutSec: options.requestedTimeoutSec,
 						notices: options.notices ?? [],
@@ -909,21 +937,25 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						async: { state: finalResult.isError ? "failed" : "completed", jobId, type: "bash" },
 					};
 					completion.resolve({ kind: "completed", result: finalResult });
-					if (finalResult.isError) throw new ToolError(finalText);
-					await reportProgress(finalText, { ...latestProgressDetails, output: finalText });
+					if (finalResult.isError === true) {
+						// Preserve the completed result for foreground callers, but let
+						// the manager classify the non-zero exit as a failed job.
+						throw new ToolError(finalText);
+					}
+					await report(finalText, latestProgressDetails);
 					return finalText;
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
-					latestText = message;
-					latestProgressDetails = {
+					completion.resolve({ kind: "failed", error });
+					// Only explicit cancellation aborts the job signal; deadlines
+					// produce a timed-out result and retain its final metadata.
+					await report(message, {
 						...latestProgressDetails,
 						startTime,
 						lastOutputAt,
-						endTime: Date.now(),
-						async: { state: "failed", jobId, type: "bash" },
-					};
-					completion.resolve({ kind: "failed", error });
-					await reportProgress(message, { ...latestProgressDetails, output: message });
+						endTime: latestProgressDetails.endTime ?? Date.now(),
+						async: { state: runSignal.aborted ? "cancelled" : "failed", jobId, type: "bash" },
+					});
 					throw error;
 				} finally {
 					settled = true;
@@ -934,24 +966,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				foreground: options.foreground,
 				process: { command: options.command, cwd: options.commandCwd, pids: () => pids() },
-				onProgress: async text => {
-					if (this.session.isDisposed?.() || this.session.getSessionId?.() !== sessionId) return;
-					const update = {
-						content: [{ type: "text" as const, text }],
-						details: foreground ? { ...latestProgressDetails, async: undefined } : latestProgressDetails,
-					};
-					if (!foreground && this.session.emitBackgroundToolUpdate) {
-						this.session.emitBackgroundToolUpdate({
-							type: "tool_execution_update",
-							toolCallId: options.toolCallId,
-							toolName: this.name,
-							args: { command: options.command, cwd: options.commandCwd },
-							partialResult: update,
-						});
-					} else {
-						await options.onUpdate?.(update);
-					}
-				},
 			},
 		);
 
@@ -961,7 +975,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			getLatestText: () => latestText,
 			getLatestDetails: () => (settled ? latestProgressDetails : runningDetails(jobId)),
 			background: () => {
-				foreground = false;
+				backgrounded = true;
 			},
 		};
 	}
