@@ -7,6 +7,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import { renderedDurationsMs } from "./helpers/rendered-durations";
 
 import { cfgSpeechEnabled, cfgSpeechMode } from "@oh-my-pi/pi-coding-agent/tts/settings";
 
@@ -218,13 +219,11 @@ describe("EventController message_update coalescing", () => {
 			now = 10000;
 			message = { ...message, content: [...message.content, { type: "thinking", thinking: "" }] };
 			await update("thinking_start", 1);
-			expect(rendered()).toMatch(/Thought.*5s/);
+			expect(renderedDurationsMs(rendered())).toContain(5_000);
 
 			now = 12000;
 			await update("thinking_start", 1);
-			expect(rendered()).toMatch(/Thought.*5s/);
-			expect(rendered()).toContain("2.0s elapsed");
-			expect(rendered()).toContain("0ms ago");
+			expect(renderedDurationsMs(rendered())).toEqual(expect.arrayContaining([2_000, 7_000]));
 
 			now = 14000;
 			await update("thinking_end", 1);
@@ -233,8 +232,7 @@ describe("EventController message_update coalescing", () => {
 			emit({ type: "message_end", message });
 			await flushMicrotasks();
 			const final = Bun.stripANSI(ctx.chatContainer.render(180).join("\n"));
-			expect(final).toMatch(/Thought.*5s/);
-			expect(final).toMatch(/Thought.*4s/);
+			expect(renderedDurationsMs(final)).toEqual(expect.arrayContaining([4_000, 9_000]));
 			expect(final).toContain("Answer");
 			expect(final).not.toContain("stream update");
 		} finally {

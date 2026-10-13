@@ -20,6 +20,7 @@ import {
 import "@oh-my-pi/pi-coding-agent/tools/yield";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const baseAgent: AgentDefinition = {
 	name: "task",
@@ -119,6 +120,7 @@ function createPauseSession(
 	};
 
 	const session = {
+		...createSessionDefaults(),
 		state: { messages },
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
@@ -126,7 +128,6 @@ function createPauseSession(
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],
-		setActiveToolsByName: async () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -138,22 +139,13 @@ function createPauseSession(
 			prompts.push({ text, options });
 			await onPrompt({ promptIndex: prompts.length, harness });
 		},
-		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages.at(-1),
-		hasPendingAsyncWork: () => false,
 		abort: async () => {
 			abortCount += 1;
 		},
-		isAdvisorActive: () => false,
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => {},
 		dispose: async () => {
 			disposeCount += 1;
 		},
-		setIrcWakeTurnObserver: () => {},
-		setIrcWakeTurnAdmission: (_next: unknown) => {},
-		setIrcWakeTurnSettlement: (_next: unknown) => {},
-		subscribeRunState: () => () => {},
 	};
 	harness.session = session as unknown as AgentSession;
 	return harness;

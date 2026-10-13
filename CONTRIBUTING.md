@@ -13,9 +13,41 @@ Maintainer-authored internal fork PRs do not require additional human approval.
 The assistant may merge the user's requested, verified changes through the
 protected PR path, including PRs it prepares under the maintainer's account.
 External and bot-authored contributions remain subject to maintainer review.
-Compilation and runtime verification run through the hosted x86_64 OMP package
-build in `vith/arch-packages`; there is no separate ARM source build. Source test
-suites remain disabled and must not be reported as passed.
+Source tests run through `.github/workflows/pr-ci.yml` on GitHub-hosted x86_64
+Linux runners for PRs targeting `integration` and manual dispatch. CI runs the
+full local-scope TypeScript suites, root script tests, Rust nextest suites and
+doctests, and the vendored napi unit tests. The TypeScript job builds its native
+test addon with Wayland/PipeWire support and smoke-checks command autocomplete
+insertion using the production command definitions and autocomplete provider.
+Only executed results may be reported as passing; a workflow starting is not
+test-success evidence.
+
+Before merging an internal source PR, MUST watch every applicable GitHub check
+from its feature worktree:
+
+```fish
+set pr (gh pr view (git branch --show-current) --repo vith/oh-my-pi --json number --jq .number)
+gh pr checks $pr --repo vith/oh-my-pi --watch --interval 10 --fail-fast
+```
+
+MUST confirm the checks belong to the current PR head and test a candidate
+containing the current integration base. After a push, old-head results do not
+validate the new head. NEVER restrict the watch to `--required`: applicable
+source jobs remain a merge gate even without required status checks.
+
+If a check fails, MUST inspect its run with
+`gh run view RUN_ID --repo vith/oh-my-pi --log-failed` (replace `RUN_ID` with the
+failed check's run ID), investigate the cause, correct the source, fixture, or
+workflow, push the correction, and repeat the watch until every applicable job
+passes. NEVER bypass a failure by weakening assertions, skipping suites, or
+restarting unchanged jobs. Missing, pending, canceled, or failed checks block
+merge. Immediately before merging, MUST verify the successful checks still
+apply to the exact PR head and current base; changed source or base requires
+fresh validation.
+
+Source CI does not build shipping binaries, invoke `vith/arch-packages`, publish
+packages, or install omp on the workstation. Package validation and delivery
+remain separate from source tests; no ARM source build is added.
 
 ## GitHub fork validation and catch-up
 
@@ -23,8 +55,9 @@ The ongoing source destination is `github.com/vith/oh-my-pi`, with canonical
 branch `integration`. Historical feature refs preserve their original objects.
 The existing `.woodpecker.yml` remains until replacement
 package delivery is proved; old source automation must not mutate concurrently
-with GitHub catch-up. Repository Actions policy permits only the pinned actions
-used by the migration workflows, prohibiting inherited build/publish actions.
+with GitHub catch-up. Repository Actions policy permits only the reviewed
+SHA-pinned action allowlist, which the source test workflow reuses. Inherited
+package build/publish workflows remain disabled.
 
 Maintainer-authored source PRs may be verified and merged by the assistant
 without additional approval. There is no separate workflow approval prerequisite.

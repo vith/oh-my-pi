@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { cfgHideThinkingBlock } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { renderedDurationsMs } from "./helpers/rendered-durations";
 
 beforeAll(async () => {
 	await initTheme(false);
@@ -64,7 +65,7 @@ describe("InputController thinking visibility", () => {
 			// Refresh the cached ANSI pulse without introducing another provider update.
 			assistant.invalidate();
 			const frame = Bun.stripANSI(assistant.render(160).join("\n"));
-			expect(frame).toContain("8.0s elapsed");
+			expect(renderedDurationsMs(frame)).toEqual([8_000, 8_000, 8_000]);
 			expect(frame).toContain("#7: reasoning item started");
 			expect(frame).toContain("8.0s ago");
 			expect(frame).not.toContain("Thought for");

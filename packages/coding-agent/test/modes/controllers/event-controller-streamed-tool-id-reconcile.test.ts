@@ -19,6 +19,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { messageUpdateFromSnapshot } from "../../helpers/assistant-message-events";
 
 beforeAll(async () => {
 	await initTheme();
@@ -78,11 +79,7 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 		const minted = makeStreamingMessage([{ type: "toolCall", id: "call_1", name: "write", arguments: args }]);
 		const { controller, ctx } = createFixture(streamed);
 
-		await controller.handleEvent({
-			type: "message_update",
-			message: streamed,
-			assistantMessageEvent: undefined as never,
-		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		await controller.handleEvent(messageUpdateFromSnapshot(streamed));
 		const streamedCard = ctx.pendingTools.get("");
 		expect(streamedCard).toBeDefined();
 
@@ -133,11 +130,7 @@ describe("EventController reconciles streamed tool-call ids at message_end", () 
 		]);
 		const { controller, ctx } = createFixture(streamed);
 
-		await controller.handleEvent({
-			type: "message_update",
-			message: streamed,
-			assistantMessageEvent: undefined as never,
-		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		await controller.handleEvent(messageUpdateFromSnapshot(streamed));
 		// During streaming BOTH indices share the one `call-1` entry.
 		const sharedCard = ctx.pendingTools.get("call-1");
 		expect(sharedCard).toBeDefined();

@@ -8,12 +8,12 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { messageUpdateFromSnapshot } from "./helpers/assistant-message-events";
 
 /**
  * Regression for issue #3656 — running `/shake` (or any mid-stream rebuild)
@@ -135,10 +135,8 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 		const updateArgs = vi.spyOn(pendingTool, "updateArgs");
 
 		mode.rebuildChatFromMessages();
-		await mode.eventController.handleEvent({
-			type: "message_update",
-			message: assistantWithBash("echo after"),
-		} as AgentSessionEvent);
+		const message = assistantWithBash("echo after");
+		await mode.eventController.handleEvent(messageUpdateFromSnapshot(message));
 
 		expect(mode.pendingTools.get("call-1")).toBe(pendingTool);
 		expect(updateArgs).toHaveBeenCalledWith({ command: "echo after" }, "call-1");

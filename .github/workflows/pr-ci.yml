@@ -1,0 +1,148 @@
+name: PR source tests
+
+on:
+  pull_request:
+    branches: [integration]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-source-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source_tests:
+    name: Source tests (${{ matrix.suite }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [typescript, rust]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
+      OMP_NATIVE_CARGO_PROFILE: ci
+    steps:
+      - name: Prepare test directories
+        env:
+          CI_WORK_DIR: ${{ runner.temp }}/omp-pr-ci
+        run: |
+          mkdir -p "$CI_WORK_DIR/tmp" "$CI_WORK_DIR/logs"
+          {
+            for name in TMPDIR TMP TEMP; do
+              printf '%s=%s/tmp\n' "$name" "$CI_WORK_DIR"
+            done
+            printf 'CI_LOG_DIR=%s/logs\n' "$CI_WORK_DIR"
+          } >> "$GITHUB_ENV"
+
+      - name: Check out candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev libpipewire-0.3-dev
+
+      - name: Install pinned Bun and frozen dependencies
+        uses: ./.github/actions/bun-install
+
+      - name: Install repository Rust toolchain
+        run: rustup show
+
+      - name: Select host CPU floor
+        run: |
+          bun -e 'import { detectHostAvx2Support } from "./scripts/host-detect.ts"; console.log("RUSTFLAGS=-C target-cpu=" + (detectHostAvx2Support() ? "x86-64-v3" : "x86-64-v2"));' >> "$GITHUB_ENV"
+
+      - name: Restore Cargo test cache
+        id: cargo-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: source-tests-${{ runner.os }}-${{ matrix.suite }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml') }}
+
+      - name: Build native addon with Wayland support
+        id: native
+        if: matrix.suite == 'typescript'
+        env:
+          OMP_NATIVE_FEATURES: wayland-pipewire
+        run: bun --cwd=packages/natives run build:bindings 2>&1 | tee "$CI_LOG_DIR/native-build.log"
+
+      - name: Smoke builtin autocomplete insertion
+        if: matrix.suite == 'typescript'
+        run: |
+          bun -e '
+            import * as assert from "node:assert/strict";
+            import { BUILTIN_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+            import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
+            const input = "/memory mm h";
+            const provider = new CombinedAutocompleteProvider([...BUILTIN_SLASH_COMMANDS], process.cwd());
+            const suggestions = await provider.getSuggestions([input], 0, input.length);
+            const item = suggestions?.items.find(item => item.value === "mm history ");
+            if (!suggestions || !item) throw new Error("Declared memory history completion is missing");
+            const edited = provider.applyCompletion([input], 0, input.length, item, suggestions.prefix);
+            assert.deepEqual(edited.lines, ["/memory mm history "]);
+            assert.equal(edited.cursorLine, 0);
+            assert.equal(edited.cursorCol, 19);
+            console.log(JSON.stringify({ line: edited.lines[0], cursorColumn: edited.cursorCol }));
+          ' 2>&1 | tee "$CI_LOG_DIR/autocomplete-smoke.log"
+
+      - name: Run full local-scope TypeScript suites
+        if: matrix.suite == 'typescript'
+        run: bun run test:ts 2>&1 | tee "$CI_LOG_DIR/typescript.log"
+
+      - name: Run root script tests
+        if: ${{ !cancelled() && matrix.suite == 'typescript' && steps.native.outcome == 'success' }}
+        env:
+          PI_TEST_RUNTIME: "1"
+        run: bun run test:scripts 2>&1 | tee "$CI_LOG_DIR/scripts.log"
+
+      - name: Install pinned nextest
+        id: nextest
+        if: matrix.suite == 'rust'
+        run: |
+          archive="$TMPDIR/cargo-nextest.tar.gz"
+          curl -fsSL https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.148/cargo-nextest-0.9.148-x86_64-unknown-linux-gnu.tar.gz -o "$archive"
+          printf '%s  %s\n' 223ba936714cc861a9cdedad5a8eb664dfdd69d6fbdf6cea6aa8184f523290dc "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$HOME/.cargo/bin" cargo-nextest
+          cargo nextest --version
+
+      - name: Run Rust nextest suites and doctests
+        if: matrix.suite == 'rust'
+        run: bun run test:rs 2>&1 | tee "$CI_LOG_DIR/rust.log"
+
+      - name: Run vendored napi unit tests
+        # The standard runner excludes napi; its doctests need a JS host,
+        # but the repository contract still requires its working unit tests.
+        if: ${{ !cancelled() && matrix.suite == 'rust' && steps.nextest.outcome == 'success' }}
+        run: cargo nextest run -p napi 2>&1 | tee "$CI_LOG_DIR/napi-units.log"
+
+      - name: Save completed Cargo build cache
+        if: ${{ !cancelled() && steps.cargo-cache.outputs.cache-hit != 'true' && (steps.native.outcome == 'success' || success()) }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+      - name: Preserve test logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: source-test-logs-${{ matrix.suite }}
+          path: ${{ env.CI_LOG_DIR }}
+          if-no-files-found: warn
+          retention-days: 14
