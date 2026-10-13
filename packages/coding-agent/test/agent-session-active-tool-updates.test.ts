@@ -97,6 +97,17 @@ describe("AgentSession.activeToolExecutionUpdates cache lifecycle", () => {
 		expect(session.activeToolExecutionUpdates().map(event => event.toolCallId)).toEqual(["task-1"]);
 	});
 
+	it("keeps an early terminal frame when the background call subsequently returns a running result", async () => {
+		session = await makeSession();
+
+		session.agent.emitExternalEvent(taskUpdate("failed"));
+		session.agent.emitExternalEvent(taskEnd("running"));
+
+		const [frame] = session.activeToolExecutionUpdates();
+		expect(frame?.partialResult.details.async.state).toBe("failed");
+		expect(frame?.partialResult.content).toEqual([{ type: "text", text: "Task failed" }]);
+	});
+
 	it("clears snapshots across a new session", async () => {
 		session = await makeSession();
 

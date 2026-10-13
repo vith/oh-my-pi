@@ -58,8 +58,16 @@ describe("AgentSession persisted custom prompt", () => {
 		expect(await Bun.file(sessionFile).exists()).toBe(false);
 
 		let transcriptAtProviderStart = "";
+		let providerCalls = 0;
+		let durableMessagesAtProvider = 0;
 		const mock = createMockModel({
-			handler: async () => {
+			handler: async context => {
+				providerCalls++;
+				durableMessagesAtProvider = context.messages.reduce(
+					(count, message) =>
+						count + (textFromProviderContent(message.content).match(/Use port 8080\./g)?.length ?? 0),
+					0,
+				);
 				transcriptAtProviderStart = await Bun.file(sessionFile).text();
 				return { content: ["Done"] };
 			},
@@ -67,6 +75,7 @@ describe("AgentSession persisted custom prompt", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
 			streamFn: mock.stream,
 		});
 		session = new AgentSession({
@@ -83,6 +92,8 @@ describe("AgentSession persisted custom prompt", () => {
 			details: { deliveryKey: "resolution:r1" },
 			attribution: "user",
 		});
+		expect(providerCalls).toBe(1);
+		expect(durableMessagesAtProvider).toBe(1);
 		expect(transcriptAtProviderStart.match(/resolution:r1/g)).toHaveLength(1);
 		await sessionManager.flush();
 		expect((await Bun.file(sessionFile).text()).match(/resolution:r1/g)).toHaveLength(1);
