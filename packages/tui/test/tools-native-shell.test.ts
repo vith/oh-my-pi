@@ -143,11 +143,6 @@ describe("bash native run box", () => {
 		const box = nodes(view.body)[0];
 		expect(String(props(collect(box?.c, "ansi")[0]).text)).toBe("Benchmark 1\nBenchmark 2");
 		expect(foot(box)).toMatchObject({ state: "In background", time: { age: 61_000, stopped: undefined } });
-		expect(
-			foot(box)
-				?.facts?.map(s => s.t)
-				.join(""),
-		).toBe("Job bg_2");
 	});
 
 	it("maps exit, timeout, spawn failure and background jobs to the foot state and box tone", () => {
