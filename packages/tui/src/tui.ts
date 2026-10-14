@@ -492,8 +492,6 @@ export interface OverlayOptions {
 	 * when native terminal text selection takes precedence over pointer events.
 	 */
 	mouseTracking?: boolean;
-	/** Yield when another overlay opens or focus leaves this one. */
-	onYield?: () => void;
 }
 
 /**
@@ -1222,10 +1220,6 @@ export class TUI extends Container {
 	}
 
 	setFocus(component: Component | null): void {
-		const yielding = this.#getTopmostVisibleOverlay();
-		if (yielding?.options?.onYield && !isOverlayFocusTarget(yielding.component, component)) {
-			yielding.options.onYield();
-		}
 		const holder = this.#getKeyHolderOverlay();
 		if (holder && !isOverlayFocusTarget(holder.component, component)) {
 			const currentFocus = this.#focusedComponent;
@@ -1283,7 +1277,6 @@ export class TUI extends Container {
 	 * Returns a handle to control the overlay's visibility.
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
-		this.#getTopmostVisibleOverlay()?.options?.onYield?.();
 		component.setIgnoreTight?.(true);
 		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false, released: false };
 		this.overlayStack.push(entry);

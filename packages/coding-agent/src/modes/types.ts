@@ -518,8 +518,6 @@ export interface InteractiveModeContext {
 	showHookConfirm(title: string, message: string, dialogOptions?: InteractiveSelectorDialogOptions): Promise<boolean>;
 	showDebugSelector(): Promise<void>;
 	showAgentHub(options?: AgentHubOpenOptions): void;
-	/** Scroll the conversation from the live tail. */
-	openTranscriptScroll(delta: -1 | 1, mode?: "prompt" | "wheel" | "page"): void;
 	/** Run a manual recap of the active session. */
 	handleRecapCommand(): Promise<void>;
 	resetObserverRegistry(): void;

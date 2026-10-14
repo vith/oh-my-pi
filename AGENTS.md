@@ -268,6 +268,7 @@ For the bash tool specifically:
 - For a clean-base reconstruction, start from the upstream release tag and port only retained feature-specific changes. NEVER merge old feature branches wholesale: their ancestry may include intentionally dropped features.
 - Preserve retained behavior, not obsolete implementation. Prefer current upstream APIs over resurrected duplicates; redesign poor fork integrations when necessary.
 - The fork permissions rework is retired. Use upstream approval behavior; do not restore its engine, dialogs, commands, or rule migration.
+- In-app conversation scrolling is retired. Use terminal scrollback; do not restore the transcript viewer, prompt-hop routing, or selection-color probes. Keep unrelated fullscreen views such as `/jobs follow`.
 - Fork versions use `<upstream tag, verbatim>+vith-fork.<commits since tag>.<HEAD short hash>`. Keep upstream versions during catch-up; run `release:fork` only in CI when cutting a release.
 
 ## Commands
