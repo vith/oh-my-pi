@@ -1389,17 +1389,6 @@ export function isOsc99Supported(): boolean {
 	return osc99CapabilitiesConfirmed;
 }
 
-/** OSC 17 selection highlight background, reported by the terminal. */
-let terminalSelectionBackground: string | undefined;
-
-export function setTerminalSelectionBackground(color: string | undefined): void {
-	terminalSelectionBackground = color;
-}
-
-export function getTerminalSelectionBackground(): string | undefined {
-	return terminalSelectionBackground;
-}
-
 /** Collapse a structured notification to a single line for non-OSC-99 sinks. */
 function notificationToLine(n: TerminalNotification): string {
 	if (n.title && n.body) return `${n.title}: ${n.body}`;

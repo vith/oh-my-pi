@@ -64,9 +64,9 @@ app.stt.toggle: Ctrl+Shift+S
 
 While speech-to-text is enabled, non-printable keys and chords assigned to `app.stt.pushToTalk` are reserved: a tap is swallowed instead of running its normal editing or application action. A plain printable key tap still types normally. Text-assistance transformations from initial taps are preserved; only unchanged literal repeat text is removed when a hold is recognized. Each configured alternative is independent; alternating between alternatives does not combine them into one hold. Hold detection requires a terminal that delivers key auto-repeat.
 
-## Scroll the conversation
+## Background output and recaps
 
-Press Page Up from the main prompt to scroll the conversation. Page Up/Page Down navigate the transcript; Escape or typing returns to the live prompt with your draft preserved. Autocomplete keeps its own page-key navigation while open. Normal mouse-wheel scrolling remains available in the main session.
+Use your terminal's scrollback to navigate the main conversation. omp does not open an in-app transcript viewer.
 
 To scroll a bash job's output independently, open its fullscreen view with `/jobs follow <job-id>`. The mouse wheel, arrow keys, and Page Up/Page Down scroll that view; `End` resumes following new output, and `Escape` returns to the main session.
 

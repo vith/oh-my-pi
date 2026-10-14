@@ -96,13 +96,16 @@ integration advanced independently to
 merge of the installed Forgejo revision onto that GitHub base, retaining both
 complete histories rather than cherry-picking features or rewriting integration.
 
-The retained Forgejo changes are PRs #14 and #16–#19: wheel scrolling with
+Reconciliation incorporated Forgejo PRs #14 and #16–#19: wheel scrolling with
 click-to-focus, accurate reasoning stream status/update age, handled-event
 explanations, terminal-owned chat scrolling/fullscreen bash/slash dispatch, and
-Page Up/Page Down from the live prompt without losing its draft. Superseded
-PR #15 is archival history, not a feature to restore. The retired permissions
-work remains retired. Draft GitHub PRs #1 (old ARM CI) and #2 (v18.4.9 catch-up)
-are not prerequisites and are not merged by this reconciliation.
+Page Up/Page Down from the live prompt without losing its draft. In-app
+conversation scrolling has since been retired: use terminal scrollback instead,
+and do not restore its viewer, prompt hops, or selection-color probes.
+Fullscreen bash output and the other retained features remain supported.
+Superseded PR #15 is archival history, not a feature to restore. The retired
+permissions work remains retired. Draft GitHub PRs #1 (old ARM CI) and #2
+(v18.4.9 catch-up) are not prerequisites and are not merged by this reconciliation.
 
 The existing `migration/forgejo-history` archive preserves attributed historical
 records; these are not fresh GitHub approvals. Supplemental records for PRs

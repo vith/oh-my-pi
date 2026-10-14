@@ -4,7 +4,6 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type AutocompleteProvider,
 	type Component,
-	isKeyRelease,
 	matchesKey,
 	parseSgrMouse,
 	type PasteOptions,
@@ -280,7 +279,6 @@ export class InputController {
 	#btwCopyListenerInstalled = false;
 	#globalEditorActionsListenerInstalled = false;
 	#expandToolsListenerInstalled = false;
-	#transcriptScrollListenerInstalled = false;
 	#inlineMouseListenerInstalled = false;
 	#lastHoverClickId: string | undefined;
 
@@ -322,18 +320,6 @@ export class InputController {
 	setupKeyHandlers(): void {
 		this.#draftText ??= this.ctx.editor.getText();
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
-		if (!this.#transcriptScrollListenerInstalled) {
-			this.#transcriptScrollListenerInstalled = true;
-			this.ctx.ui.addInputListener(data => {
-				if (isKeyRelease(data)) return undefined;
-				const delta = matchesKey(data, "pageUp") ? -1 : matchesKey(data, "pageDown") ? 1 : 0;
-				if (delta === 0) return undefined;
-				if (this.ctx.ui.hasOverlay() || this.ctx.ui.getFocused() !== this.ctx.editor) return undefined;
-				if (this.ctx.editor.isAutocompleteActive()) return undefined;
-				this.ctx.openTranscriptScroll(delta, "page");
-				return { consume: true };
-			});
-		}
 		if (!this.#focusedLeftTapListenerInstalled) {
 			this.#focusedLeftTapListenerInstalled = true;
 			this.ctx.ui.addInputListener(data => {
@@ -772,9 +758,7 @@ export class InputController {
 		if (this.ctx.ui.hasOverlay()) return undefined;
 		const event = parseSgrMouse(data);
 		if (!event) return undefined;
-		if (event.wheel) {
-			this.ctx.openTranscriptScroll(event.wheel, "wheel");
-		} else if (event.motion) this.#updateHoverHighlight(event.row);
+		if (event.motion) this.#updateHoverHighlight(event.row);
 		else if (event.leftClick) this.#focusClickedAgent(event.row);
 		return { consume: true };
 	}

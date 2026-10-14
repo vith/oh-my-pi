@@ -26,7 +26,6 @@ import {
 	setCellDimensions,
 	setOsc99Supported,
 	setTerminalGlyphProtocol,
-	setTerminalSelectionBackground,
 	TERMINAL,
 } from "./terminal-capabilities";
 import { tmuxMultiplexer } from "./multiplexers/tmux";
@@ -717,22 +716,10 @@ type Da1SentinelOwner =
 	| { kind: "osc11" }
 	| { kind: "privateMode"; mode: number }
 	| { kind: "osc99Probe"; id: string }
-	| { kind: "osc17" }
 	| { kind: "glyphProtocol"; phase: "support" | "confirm" }
 	| { kind: "tsp" };
 
 let nextOsc99ProbeId = 1;
-
-/** OSC 17 highlight-color reply with 1–4 hex digits per channel. */
-const osc17ResponsePattern =
-	/^\x1b\]17;rgba?:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})(?:\/[0-9a-fA-F]{1,4})?(?:\x07|\x1b\\)$/;
-
-function x11ChannelToByte(hex: string): string {
-	const value = parseInt(hex, 16);
-	return Math.round((value / (16 ** hex.length - 1)) * 255)
-		.toString(16)
-		.padStart(2, "0");
-}
 
 function parseOsc99KeyValues(section: string): Map<string, string> {
 	const values = new Map<string, string>();
@@ -883,7 +870,6 @@ export class ProcessTerminal implements Terminal {
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
 	#osc99Capabilities = new Map<string, string>();
-	#osc17ResponseBuffer = "";
 	/**
 	 * Handshake phase: `support` awaits the `s` reply, `confirm` awaits the `q`
 	 * coverage reply sent after the bundle was written.
@@ -1186,7 +1172,6 @@ export class ProcessTerminal implements Terminal {
 		// same DA1 sentinel FIFO as OSC 11/DECRQM so unsupported terminals resolve
 		// without leaking probe bytes to application input.
 		this.#queryOsc99Support();
-		this.#querySelectionBackground();
 
 		// Glyph Protocol support query (`s` verb), same DA1 sentinel FIFO. A reply
 		// triggers the bundled icon registration so the nerd symbol preset renders
@@ -1343,7 +1328,6 @@ export class ProcessTerminal implements Terminal {
 				this.#inBandResizeBuffer.length === 0 &&
 				this.#osc11ResponseBuffer.length === 0 &&
 				this.#osc99ResponseBuffer.length === 0 &&
-				this.#osc17ResponseBuffer.length === 0 &&
 				this.#glyphProtocolReplyBuffer.length === 0 &&
 				this.#tspReplyBuffer.length === 0
 			) {
@@ -1517,10 +1501,6 @@ export class ProcessTerminal implements Terminal {
 						this.#resolveOsc99Support(owner.id, false);
 						break;
 					}
-					case "osc17": {
-						this.#osc17ResponseBuffer = "";
-						break;
-					}
 					case "glyphProtocol": {
 						// The support-phase sentinel is answered after the `s` reply that
 						// already advanced the handshake; only a sentinel from the phase
@@ -1600,23 +1580,6 @@ export class ProcessTerminal implements Terminal {
 					this.#osc11ActiveToken = undefined;
 					this.#osc11ResponseBuffer = "";
 					this.#handleOsc11Response(rHex!, gHex!, bHex!, requestToken);
-					return;
-				}
-			}
-
-			// OSC 17 is terminal-to-host data even if its DA1 sentinel has
-			// already arrived. Reassemble split replies and keep them out of input.
-			if (this.#osc17ResponseBuffer || sequence.startsWith("\x1b]17;")) {
-				if (this.#osc17ResponseBuffer && sequence.startsWith("\x1b") && sequence !== "\x1b\\") {
-					this.#osc17ResponseBuffer = "";
-				} else {
-					this.#osc17ResponseBuffer += sequence;
-					const match = this.#osc17ResponseBuffer.match(osc17ResponsePattern);
-					if (!match) return;
-					this.#osc17ResponseBuffer = "";
-					setTerminalSelectionBackground(
-						`#${x11ChannelToByte(match[1]!)}${x11ChannelToByte(match[2]!)}${x11ChannelToByte(match[3]!)}`,
-					);
 					return;
 				}
 			}
@@ -1806,14 +1769,6 @@ export class ProcessTerminal implements Terminal {
 		// The probe never runs under a multiplexer (see #shouldQueryOsc99Support),
 		// so it is always sent directly to the terminal.
 		this.#safeWrite(`\x1b]99;i=${id}:p=?;\x1b\\\x1b[c`);
-	}
-
-	#querySelectionBackground(): void {
-		this.#osc17ResponseBuffer = "";
-		if (this.#dead || isInsideTerminalMultiplexer($env)) return;
-		if (isBunTestRuntime() && $env.PI_TUI_OSC17_PROBE !== "1") return;
-		this.#da1SentinelOwners.push({ kind: "osc17" });
-		this.#safeWrite("\x1b]17;?\x07\x1b[c");
 	}
 
 	#handleOsc99CapabilityResponse(metaRaw: string, payload: string): boolean {
@@ -2343,8 +2298,6 @@ export class ProcessTerminal implements Terminal {
 		this.#osc99ResponseBuffer = "";
 		this.#osc99Capabilities.clear();
 		setOsc99Supported(false);
-		this.#osc17ResponseBuffer = "";
-		setTerminalSelectionBackground(undefined);
 		this.#glyphProtocolPhase = "idle";
 		this.#glyphProtocolResult = undefined;
 		this.#glyphProtocolReplyBuffer = "";
