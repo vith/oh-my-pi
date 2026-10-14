@@ -5,6 +5,12 @@
 ### Changed
 
 - Documented the fork's Wayland capture packaging contract: distro-specific Cargo builds must include `wayland-pipewire`, provide the target PipeWire libraries, and check the packaged addon rather than relying on a different CI platform's build. Portable Bazel addons remain feature-less.
+## [18.10.4] - 2026-10-13
+
+### Fixed
+
+- Fixed `pwsh` code blocks rendering without PowerShell syntax colors ([#15008](https://github.com/can1357/oh-my-pi/issues/15008)).
+
 ## [18.10.2] - 2026-10-12
 
 ### Added
