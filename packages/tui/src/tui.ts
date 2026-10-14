@@ -48,6 +48,7 @@ import {
 	TERMINAL,
 } from "./terminal-capabilities";
 import { compositeLineAt } from "./render/composite";
+import { tmuxMultiplexer } from "./multiplexers/tmux";
 import {
 	Ellipsis,
 	getWidthConfigEpoch,
@@ -58,6 +59,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "./utils";
+import { tmuxClientRendersSixel } from "./tmux";
 
 /** Full-attribute reset terminating each rendered content row. */
 export const SEGMENT_RESET = "\x1b[0m";
@@ -1532,6 +1534,9 @@ export class TUI extends Container {
 		this.terminal.onSixelSupport?.(supported => {
 			if (!supported || this.#stopped || this.#nativeLive || this.terminal.tspExpected) return;
 			if (isImageProtocolForced()) return;
+			// tmux answers DA1 for its own emulator; only its record of the
+			// attached client says whether SIXEL reaches the outer terminal.
+			if (tmuxMultiplexer.isInside() && !tmuxClientRendersSixel()) return;
 			// Keep consuming an already-requested XTSMGRAPHICS reply until it
 			// arrives or times out, even though DA1 has established support.
 			this.#enableSixelProtocol();
