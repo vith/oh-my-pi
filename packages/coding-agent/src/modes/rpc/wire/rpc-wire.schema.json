@@ -2770,6 +2770,9 @@
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
+				},
+				"providerReplayThroughEntryId": {
+					"type": "string"
 				}
 			},
 			"required": [
