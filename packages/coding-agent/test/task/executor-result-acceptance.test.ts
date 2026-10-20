@@ -645,26 +645,21 @@ describe("runSubprocess result acceptance", () => {
 	it("keeps the accepted artifact and sidecar when an unstructured follow-up starts aborted", async () => {
 		const tempDir = TempDir.createSync("@omp-aborted-agent-result-");
 		const artifactsDir = tempDir.path();
-		const harness = createHarness();
-		registerRunning(harness.session);
-		vi.spyOn(harness.session, "prompt").mockImplementation(async () => {
-			harness.emitAssistantText("cancelled replacement");
-			return true;
-		});
 		const accepted = '{"report":"accepted verdict"}';
 
 		try {
 			await Bun.write(path.join(artifactsDir, `${AGENT_ID}.md`), accepted);
 			await Bun.write(path.join(artifactsDir, `${AGENT_ID}.json`), accepted);
-			const result = await runSubagentFollowUpTurn({
-				id: AGENT_ID,
-				agent: baseAgent,
-				message: "continue",
-				structured: false,
-				artifactsDir,
-				signal: AbortSignal.abort("cancelled"),
-			});
-			expect(result.aborted).toBe(true);
+			await expect(
+				runSubagentFollowUpTurn({
+					id: AGENT_ID,
+					agent: baseAgent,
+					message: "continue",
+					structured: false,
+					artifactsDir,
+					signal: AbortSignal.abort("cancelled"),
+				}),
+			).rejects.toBe("cancelled");
 			expect(await Bun.file(path.join(artifactsDir, `${AGENT_ID}.md`)).text()).toBe(accepted);
 			expect(await Bun.file(path.join(artifactsDir, `${AGENT_ID}.json`)).text()).toBe(accepted);
 		} finally {
