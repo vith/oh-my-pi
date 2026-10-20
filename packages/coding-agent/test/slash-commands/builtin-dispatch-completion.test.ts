@@ -22,9 +22,11 @@ function createHarness() {
 	const ctx = {
 		session: {
 			getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
+		},
+		viewSession: {
+			getAsyncJobSnapshot: () => snapshot,
 			configuredThinkingLevel: () => undefined,
 		},
-		viewSession: { getAsyncJobSnapshot: () => snapshot },
 		editor: {
 			setText: (text: string) => {
 				editorText = text;
