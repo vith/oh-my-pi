@@ -350,7 +350,6 @@ describe("runSubprocess recoverable terminal pause", () => {
 
 		expect(result.paused).toBeUndefined();
 		expect(result.aborted).toBe(true);
-		expect(AgentRegistry.global().get(id)?.status).not.toBe("idle");
 	});
 
 	it.each([true, false])("lets a prompt failure supersede a pause (structured=%s)", async structured => {

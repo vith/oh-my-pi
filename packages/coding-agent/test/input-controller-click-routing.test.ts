@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
@@ -30,6 +30,7 @@ function makeHarness(composer: Composer): void {
 		isPythonMode: false,
 		session: {
 			extensionRunner: undefined,
+			prewarmModelConnection: vi.fn(),
 		},
 		focusedAgentId: undefined,
 	} as unknown as InteractiveModeContext;

@@ -84,15 +84,16 @@ sleep 30
 			const cleanupProcesses: Process[] = [];
 
 			try {
-				// A BunFile handle caches a negative `exists()`; stat fresh each poll.
-				const pidFileExists = () =>
+				// Opening the file precedes printf's write; wait for PID bytes, not mere existence.
+				// Stat fresh each poll: a BunFile handle caches a negative `exists()`.
+				const pidFileReady = () =>
 					fs.stat(pidFile).then(
-						() => true,
+						stat => stat.size > 0,
 						() => false,
 					);
 				const setupDeadline = Date.now() + 2_000;
-				while (!(await pidFileExists()) && Date.now() < setupDeadline) await Bun.sleep(10);
-				expect(await pidFileExists(), "the launcher must create its worker").toBe(true);
+				while (!(await pidFileReady()) && Date.now() < setupDeadline) await Bun.sleep(10);
+				expect(await pidFileReady(), "the launcher must publish its worker PID").toBe(true);
 
 				const workerPid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
 				const subreaper = Process.fromPid(child.pid);
