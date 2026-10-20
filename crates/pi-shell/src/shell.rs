@@ -7045,11 +7045,13 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let root = tempfile::tempdir().expect("cleanup directory");
 		// The trap writes once the readers' old 500 ms cancel would have closed
 		// them, and finishes well inside the 1 s TERM grace even when a loaded
-		// runner is slow to start `sleep`.
+		// runner is slow to start `sleep`. Group and pinned-tree signalling can
+		// deliver TERM more than once; ignore repeats instead of restarting the
+		// cleanup delay and exceeding the grace period.
 		fs::write(
 			root.path().join("cleanup.sh"),
-			"trap 'sleep 0.55; echo flushing; printf cleaned > cleaned; exit 0' TERM\n: > \
-			 ready\nwhile :; do :; done\n",
+			"trap 'trap \"\" TERM; sleep 0.55; echo flushing; printf cleaned > cleaned; exit 0' \
+			 TERM\n: > ready\nwhile :; do :; done\n",
 		)
 		.expect("cleanup script");
 		let shell = Shell::new(None);
