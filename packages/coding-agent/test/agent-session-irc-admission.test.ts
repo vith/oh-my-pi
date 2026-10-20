@@ -1,3 +1,4 @@
+import { setImmediate as yieldImmediate } from "node:timers/promises";
 import { afterAll, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -306,6 +307,66 @@ describe("AgentSession IRC wake admission", () => {
 			]);
 		} finally {
 			await session.dispose();
+			tempDir.removeSync();
+		}
+	});
+
+	it("settles an aborted pre-dispatch wake only after its requeued turn runs", async () => {
+		const firstProviderRelease = Promise.withResolvers<void>();
+		const { session, providerStarts, firstProviderStarted, tempDir } = await createParkedSession({
+			holdFirstProvider: firstProviderRelease.promise,
+		});
+		const firstYieldEntered = Promise.withResolvers<void>();
+		const firstYieldRelease = Promise.withResolvers<void>();
+		const requeuedYieldEntered = Promise.withResolvers<void>();
+		const requeuedYieldRelease = Promise.withResolvers<void>();
+		const yieldSettled = vi
+			.spyOn(session, "whenWorkPoolYieldSettled")
+			.mockImplementationOnce(() => {
+				firstYieldEntered.resolve();
+				return firstYieldRelease.promise;
+			})
+			.mockImplementationOnce(() => {
+				requeuedYieldEntered.resolve();
+				return requeuedYieldRelease.promise;
+			});
+		try {
+			const settlements: Array<{ bodies: string[]; error: unknown }> = [];
+			const settled = Promise.withResolvers<void>();
+			session.setIrcWakeTurnSettlement((records, error) => {
+				settlements.push({ bodies: records.map(record => ircRecordBody(record)), error });
+				settled.resolve();
+			});
+
+			await session.deliverIrcMessage(message("irc-aborted-before-dispatch", "requeue this wake"));
+			await firstYieldEntered.promise;
+			await session.abort();
+			expect(providerStarts()).toBe(0);
+
+			firstYieldRelease.resolve();
+			await requeuedYieldEntered.promise;
+			// Drain the abandoned attempt's finalizer while the redriven wake remains explicitly held.
+			await yieldImmediate();
+			expect(providerStarts()).toBe(0);
+			expect(settlements).toEqual([]);
+
+			requeuedYieldRelease.resolve();
+			await firstProviderStarted;
+			expect(providerStarts()).toBe(1);
+			expect(settlements).toEqual([]);
+
+			firstProviderRelease.resolve();
+			await settled.promise;
+			await session.waitForIdle();
+			await yieldImmediate();
+			expect(settlements).toEqual([{ bodies: ["requeue this wake"], error: undefined }]);
+			expect(deliveredIrcBodies(session)).toEqual(["requeue this wake"]);
+		} finally {
+			firstYieldRelease.resolve();
+			requeuedYieldRelease.resolve();
+			firstProviderRelease.resolve();
+			await session.dispose();
+			yieldSettled.mockRestore();
 			tempDir.removeSync();
 		}
 	});

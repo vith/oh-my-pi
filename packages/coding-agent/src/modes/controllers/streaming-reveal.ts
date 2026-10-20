@@ -1,4 +1,5 @@
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
+import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { type Component, getSegmenter } from "@oh-my-pi/pi-tui";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { formatThinkingForDisplay, hasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
@@ -302,6 +303,8 @@ export class StreamingRevealController {
 	begin(component: StreamingRevealComponent, message: AssistantMessage, hasToolCalls: boolean): void {
 		this.stop();
 		this.#component = component;
+		// Reveal counts narration as answer text, matching how the component renders it.
+		message = presentNarrationAsAnswer(message);
 		this.#target = message;
 		this.#streamUpdatedAt = performance.now();
 		this.#streamUpdateNumber = 0;
@@ -347,6 +350,7 @@ export class StreamingRevealController {
 		eventType?: AssistantMessageEvent["type"],
 		contentIndex?: number,
 	): void {
+		message = presentNarrationAsAnswer(message);
 		this.#target = message;
 		this.#streamUpdatedAt = performance.now();
 		this.#streamUpdateNumber++;

@@ -15,6 +15,7 @@ export function createSessionDefaults() {
 		setIrcWakeTurnAdmission: () => {},
 		setIrcWakeTurnSettlement: () => {},
 		setIrcWakeTurnObserver: () => {},
+		isParentIrcSteer: () => false,
 		isAdvisorActive: () => false,
 		subscribeRunState: () => () => {},
 		addDisposer: () => {},

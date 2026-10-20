@@ -30,12 +30,20 @@ Scope fake timers to the deadline a test exercises, then restore real timers
 before real socket listeners are started. Bun's mocked clock can defer
 `server.listen` callbacks, leaving registry publication and teardown waiting.
 
+Tests that call `setAgentDir()` must snapshot and restore `PI_CODING_AGENT_DIR`,
+`OMP_PROFILE`, and `PI_PROFILE` for each test, then call
+`__resetDirsFromEnvForTests()` after restoration. Home-directory discovery fixtures
+must clear and restore `PI_CODING_AGENT_DIR` so inherited overrides cannot bypass
+the fixture. Reuse `restoreEnvValue()` from `test/helpers/settings-test-state.ts`
+to preserve unset values.
+
 ## Fork package builds
 
-Source-only catch-up does not authorize builds, test execution, packaging, or
-installation. The GitHub fork has no source-build workflow; package delivery
-through `vith/arch-packages` requires separate authorization. Test execution,
-including worker smoke tests, remains disabled until its CI cost is optimized.
+Source catch-up uses hosted source-test CI before integration, as described in
+[`CONTRIBUTING.md`](../../CONTRIBUTING.md). Local TS/Rust suites, worker smoke
+tests, shipping builds, packaging, publication, and installation remain separately
+scoped. Package delivery through `vith/arch-packages` requires separate
+authorization.
 
 For a separately authorized CI build, install frozen dependencies in its
 disposable source checkout first, then run `bun scripts/prepare-fork-build.ts`
