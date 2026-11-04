@@ -2,6 +2,7 @@ import { rm } from "node:fs/promises";
 import * as path from "node:path";
 import { type ApiKeyResolver, completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
 import type { MnemopiLlmCompleteOptions } from "@oh-my-pi/pi-mnemopi/core/runtime-options";
 import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
@@ -26,6 +27,7 @@ import mnemopiInstructions from "../prompts/system/mnemopi-instructions.md" with
 import type { AgentSession } from "../session/agent-session";
 import { tinyModelClient } from "../tiny/title-client";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import {
 	loadMnemopiConfig,
 	type MnemopiBackendConfig,
@@ -344,9 +346,9 @@ export const mnemopiBackend: MemoryBackend = {
 		return { backend: "mnemopi", stored: 1, ids: [id] };
 	},
 
-	async preCompactionContext(messages, _settings, session): Promise<string | undefined> {
+	async preCompactionContext(messages, _settings, session, signal): Promise<string | undefined> {
 		const state = getMnemopiSessionState(session);
-		return await state?.recallForCompaction(messages);
+		return await state?.recallForCompaction(messages, signal);
 	},
 };
 
@@ -601,7 +603,7 @@ async function resolveMnemopiProviderOptions(
 						: undefined,
 			};
 
-			for (const { model } of candidates) {
+			for (const { model, thinkingLevel } of candidates) {
 				if (signal?.aborted) return null;
 				try {
 					if (model.api === "local-inference") {
@@ -627,6 +629,8 @@ async function resolveMnemopiProviderOptions(
 						});
 						continue;
 					}
+					// `auto` has no per-request classifier here, so it sends no effort, like an omitted suffix.
+					const level = concreteThinkingLevel(thinkingLevel);
 					const message = await retryTransientCompletion(
 						() =>
 							withLoopPhase("mnemopi.extract", () =>
@@ -641,6 +645,8 @@ async function resolveMnemopiProviderOptions(
 										sessionId,
 										maxTokens: opts?.maxTokens,
 										temperature: opts?.temperature,
+										reasoning: clampThinkingLevelForModel(model, toReasoningEffort(level)),
+										disableReasoning: shouldDisableReasoning(level) ? true : undefined,
 										signal,
 										onAttempt: message =>
 											onUsage?.({

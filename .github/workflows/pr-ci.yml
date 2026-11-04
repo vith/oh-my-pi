@@ -55,6 +55,10 @@ jobs:
       - name: Install pinned Bun and frozen dependencies
         uses: ./.github/actions/bun-install
 
+      - name: Install project-local TUI tool dependencies
+        if: matrix.suite == 'typescript'
+        run: bun install --cwd .omp/tools --frozen-lockfile
+
       - name: Install repository Rust toolchain
         run: rustup show
 

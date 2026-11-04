@@ -1,3 +1,4 @@
+import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import type { RequestPolicy } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
@@ -25,6 +26,7 @@ import {
 } from "../google-shared";
 import type { GenerateContentResponse, Part } from "../google-types";
 import { transformMessages } from "../transform-messages";
+import { factoryDroidToolNamesByWire, sanitizeFactoryDroidToolName } from "./tool-names";
 
 /** Factory's Gemini endpoint speaks native generateContent SSE at `/api/llm/g/v1/generate`. */
 
@@ -39,36 +41,6 @@ function geminiThinkingLevel(effort: string | undefined, supportsMedium: boolean
 		default:
 			return "HIGH";
 	}
-}
-
-/**
- * The CLI sanitizes tool names to `[a-zA-Z0-9_-]`; a name longer than 64
- * chars keeps its first 55 and ends `_` + an 8-char sha256, 64 in all, which
- * stays inside the route's tool-name bound. Applied to declarations and
- * replayed functionCall/functionResponse names.
- */
-function sanitizeFactoryDroidToolName(name: string): string {
-	const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "_");
-	if (sanitized.length <= 64) return sanitized;
-	return `${sanitized.slice(0, 55)}_${Bun.SHA256.hash(sanitized, "hex").slice(0, 8)}`;
-}
-
-/**
- * Wire name -> caller tool name for the declared tools, so returned calls
- * dispatch to the tool that was advertised. Two tools sharing one wire name
- * could not be told apart, so that request is rejected.
- */
-function factoryDroidToolNamesByWire(tools: Tool[] | undefined): Map<string, string> {
-	const names = new Map<string, string>();
-	for (const tool of tools ?? []) {
-		const wire = sanitizeFactoryDroidToolName(tool.name);
-		const existing = names.get(wire);
-		if (existing !== undefined && existing !== tool.name) {
-			throw new Error(`Factory Gemini tool names "${existing}" and "${tool.name}" both encode as "${wire}"`);
-		}
-		names.set(wire, tool.name);
-	}
-	return names;
 }
 
 /** Finish reasons the CLI reports as a content-filter block (with stopDetails). */
@@ -114,6 +86,19 @@ const GOOGLE_APIS: Record<string, true> = {
 	"google-gemini-cli": true,
 };
 
+/** Whether Factory serves `model` on this Gemini generate wire rather than through an inner Anthropic or OpenAI model. */
+export function isFactoryDroidGeminiWire(model: Pick<Model, "id" | "requestModelId">): boolean {
+	return resolveFactoryDroidPolicy(model)?.wire === "google-generate";
+}
+
+/**
+ * Whether {@link adoptFactoryReplay} may keep `turn`'s opaque reasoning payload
+ * (thinking and call signatures): only a Google-origin turn's survive.
+ */
+export function keepsFactoryGeminiReasoning(turn: Pick<AssistantMessage, "api">): boolean {
+	return GOOGLE_APIS[turn.api] === true;
+}
+
 /**
  * Apply Factory's replay provenance before canonical normalization: only
  * signed, Google-origin thinking and Google-origin call signatures survive;
@@ -133,9 +118,9 @@ const GOOGLE_APIS: Record<string, true> = {
  * Responses-origin call), and with its reasoning already gone there is
  * nothing left for a cross-model pass to demote.
  */
-function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">): Message {
+export function adoptFactoryReplay(message: Message, model: Model<"factory-droid-agent">): Message {
 	if (message.role !== "assistant") return message;
-	const googleOrigin = GOOGLE_APIS[message.api] === true;
+	const googleOrigin = keepsFactoryGeminiReasoning(message);
 	const sameModel = googleOrigin && message.provider === model.provider && message.model === model.id;
 	const content: AssistantMessage["content"] = [];
 	for (const block of message.content) {
@@ -279,7 +264,7 @@ function toGeminiContents(
 	};
 }
 
-function toGeminiTools(tools: Tool[] | undefined): Array<{ functionDeclarations: unknown[] }> | undefined {
+export function toGeminiTools(tools: Tool[] | undefined): Array<{ functionDeclarations: unknown[] }> | undefined {
 	if (!tools || tools.length === 0) return undefined;
 	return [
 		{
