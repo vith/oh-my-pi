@@ -65,7 +65,12 @@ async function fixture(): Promise<UploadFixture> {
 	cleanups.push(() => fs.rm(dir, { recursive: true, force: true }));
 	// Copy the real entry and its real imports, keeping relative repository paths.
 	// This isolates generated metadata without test-only production overrides.
-	for (const file of ["scripts/ci-build-upload.ts", "scripts/ci-release-notes.ts", "packages/utils/src/version.ts"]) {
+	for (const file of [
+		"scripts/ci-build-upload.ts",
+		"scripts/ci-release-notes.ts",
+		"packages/utils/src/version.ts",
+		"packages/utils/package.json",
+	]) {
 		await fs.mkdir(path.dirname(path.join(dir, file)), { recursive: true });
 		await fs.copyFile(path.join(repoRoot, file), path.join(dir, file));
 	}

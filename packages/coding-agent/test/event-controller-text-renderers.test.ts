@@ -3,9 +3,9 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AssistantTextRenderer } from "@oh-my-pi/pi-tui/chat/extension-types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { messageUpdateFromSnapshot } from "./helpers/assistant-message-events";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 function assistant(text: string): AssistantMessage {
@@ -59,10 +59,7 @@ describe("EventController with assistant text renderers", () => {
 		const ctx = createInteractiveModeContext({ viewSession: { extensionRunner } });
 		const controller = new EventController(ctx);
 
-		await controller.handleEvent({ type: "message_start", message: assistant("") } as Extract<
-			AgentSessionEvent,
-			{ type: "message_start" }
-		>);
+		await controller.handleEvent({ type: "message_start", message: assistant("") });
 		// Several deltas land before any reveal tick could run.
 		const deltas = [
 			"The cache key",
@@ -70,10 +67,7 @@ describe("EventController with assistant text renderers", () => {
 			"The cache key only hashes package.json, so it drifts.",
 		];
 		for (const text of deltas) {
-			await controller.handleEvent({ type: "message_update", message: assistant(text) } as Extract<
-				AgentSessionEvent,
-				{ type: "message_update" }
-			>);
+			await controller.handleEvent(messageUpdateFromSnapshot(assistant(text)));
 		}
 
 		expect(seen).toEqual(deltas.map(text => [text, true]));
@@ -93,15 +87,9 @@ describe("EventController with assistant text renderers", () => {
 		const ctx = createInteractiveModeContext({ viewSession: { extensionRunner, agent: { state: {} } } });
 		const controller = new EventController(ctx);
 		const full = "The cache key only hashes package.json, so it keeps hitting while the lockfile drifts.";
-		await controller.handleEvent({ type: "message_start", message: assistant("") } as Extract<
-			AgentSessionEvent,
-			{ type: "message_start" }
-		>);
+		await controller.handleEvent({ type: "message_start", message: assistant("") });
 		// Smooth streaming is revealing this; with fake timers no tick has run, so a backlog is pending.
-		await controller.handleEvent({ type: "message_update", message: assistant(full) } as Extract<
-			AgentSessionEvent,
-			{ type: "message_update" }
-		>);
+		await controller.handleEvent(messageUpdateFromSnapshot(assistant(full)));
 
 		renderers = [renderer];
 		controller.applyAssistantTextRenderers();

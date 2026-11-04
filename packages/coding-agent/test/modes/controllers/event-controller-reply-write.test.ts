@@ -9,6 +9,7 @@ import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-messa
 import { ReplyWriteComponent } from "@oh-my-pi/pi-tui/chat/reply-write";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { messageUpdateFromSnapshot } from "../../helpers/assistant-message-events";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(async () => {
@@ -56,11 +57,7 @@ async function fixture() {
 	const controller = new EventController(ctx);
 	const update = (streaming: AssistantMessage) => {
 		ctx.streamingMessage = streaming;
-		return controller.handleEvent({
-			type: "message_update",
-			message: streaming,
-			assistantMessageEvent: undefined as never,
-		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		return controller.handleEvent(messageUpdateFromSnapshot(streaming));
 	};
 	const rendered = (component: Component) => Bun.stripANSI(component.render(100).join("\n"));
 	return { ctx, controller, update, rendered };
