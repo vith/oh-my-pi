@@ -13,6 +13,7 @@ import {
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import "@oh-my-pi/pi-coding-agent/tools/yield";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const agent: AgentDefinition = {
 	name: "task",
@@ -94,6 +95,7 @@ function createDurableSession(manager: SessionManager): DurableSessionHarness {
 		for (const listener of listeners) listener(event);
 	};
 	const session = {
+		...createSessionDefaults(),
 		model: undefined,
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
@@ -179,17 +181,8 @@ function createDurableSession(manager: SessionManager): DurableSessionHarness {
 			} as AgentSessionEvent);
 			await manager.flush();
 		},
-		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages.at(-1),
-		abort: async () => {},
-		isAdvisorActive: () => false,
-		getToolByName: (_name: string) => undefined,
 		setWorkPoolYieldItems: async (_items: readonly unknown[]) => {},
-		hasPendingAsyncWork: () => false,
-		setIrcWakeTurnObserver: () => {},
-		setIrcWakeTurnAdmission: (_next: unknown) => {},
-		setIrcWakeTurnSettlement: (_next: unknown) => {},
-		subscribeRunState: () => () => {},
 	};
 	return { session: session as unknown as AgentSession, modelRequests: () => requests };
 }
@@ -227,6 +220,7 @@ function createDeferredDurableSession(manager: SessionManager): DeferredDurableS
 		await release.promise;
 	};
 	const session = {
+		...createSessionDefaults(),
 		model: undefined,
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
@@ -277,17 +271,8 @@ function createDeferredDurableSession(manager: SessionManager): DeferredDurableS
 			await beginProvider();
 			await finishTurn();
 		},
-		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages.at(-1),
-		abort: async () => {},
-		isAdvisorActive: () => false,
-		getToolByName: (_name: string) => undefined,
 		setWorkPoolYieldItems: async (_items: readonly unknown[]) => {},
-		hasPendingAsyncWork: () => false,
-		setIrcWakeTurnObserver: () => {},
-		setIrcWakeTurnAdmission: (_next: unknown) => {},
-		setIrcWakeTurnSettlement: (_next: unknown) => {},
-		subscribeRunState: () => () => {},
 	};
 	return {
 		session: session as unknown as AgentSession,

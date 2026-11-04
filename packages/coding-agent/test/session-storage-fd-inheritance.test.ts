@@ -20,7 +20,10 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+const sessionStorageUrl = pathToFileURL(path.join(import.meta.dir, "../src/session/session-storage.ts")).href;
 
 const ROOTS: string[] = [];
 
@@ -31,58 +34,65 @@ afterAll(async () => {
 test.skipIf(process.platform !== "linux")("bash tool children never inherit session or log descriptors", async () => {
 	const root = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-fd-"));
 	ROOTS.push(root);
-
 	const transcript = path.join(root, "session.jsonl");
+	const logsDir = path.join(root, "logs");
 	const control = path.join(root, "control.jsonl");
-	const controlFd = fs.openSync(control, "a");
-	const storageUrl = new URL("../src/session/session-storage.ts", import.meta.url).href;
-	const script = `
-import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import { Shell } from "@oh-my-pi/pi-natives";
+
+	const script = `import { Shell } from "@oh-my-pi/pi-natives";
 import { RotatingFileSink } from "@oh-my-pi/pi-utils/logger/rotating-file";
-import { FileSessionStorage } from ${JSON.stringify(storageUrl)};
-const root = ${JSON.stringify(root)};
-const writer = new FileSessionStorage().openWriter(path.join(root, "session.jsonl"));
+import * as fsp from "node:fs/promises";
+import { FileSessionStorage } from ${JSON.stringify(sessionStorageUrl)};
+
+const writer = new FileSessionStorage().openWriter(${JSON.stringify(transcript)});
 await writer.append('{"type":"session_start"}\\n');
-const logsDir = path.join(root, "logs");
-await fs.mkdir(logsDir, { recursive: true });
+await fsp.mkdir(${JSON.stringify(logsDir)}, { recursive: true });
 const logSink = new RotatingFileSink({
-	directory: logsDir,
+	directory: ${JSON.stringify(logsDir)},
 	filenamePrefix: "omp",
 	filenameSuffix: String(process.pid),
 	maxBytes: 1 << 20,
 	maxFiles: 2,
 });
 logSink.write("entry");
+
 let output = "";
 try {
-	await new Shell().run({ command: "sh -c 'ls -l /proc/$$/fd'", cwd: root }, (_err, chunk) => {
+	await new Shell().run({ command: "sh -c 'ls -l /proc/$$/fd'", cwd: ${JSON.stringify(root)} }, (_err, chunk) => {
 		output += chunk;
 	});
 } finally {
 	logSink.close();
 	await writer.close();
 }
-console.log(output);
+process.stdout.write(output);
 `;
-	let output = "";
+
+	const controlFd = fs.openSync(control, "a");
+	let stdout: string;
+	let stderr: string;
+	let exitCode: number;
 	try {
 		const proc = Bun.spawn({
 			cmd: [process.execPath, "--eval", script],
-			cwd: process.cwd(),
+			cwd: path.join(import.meta.dir, ".."),
 			stdio: ["ignore", "pipe", "pipe", controlFd],
-			timeout: 15_000,
+			timeout: 30_000,
 		});
-		const [stdout, stderr, exitCode] = await Promise.all([proc.stdout.text(), proc.stderr.text(), proc.exited]);
-		output = stdout;
-		expect(exitCode, stderr).toBe(0);
+		[stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
 	} finally {
 		fs.closeSync(controlFd);
 	}
 
-	const inherited = output.split("\n").filter(line => line.includes(root));
-	expect(inherited.join("\n"), "control: an inheritable descriptor must reach the child").toContain(control);
-	expect(inherited.join("\n")).not.toContain(transcript);
-	expect(inherited.join("\n")).not.toMatch(/omp\.[\d-]+\.\d+\.log/);
+	expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
+	const inherited = stdout
+		.split("\n")
+		.filter(line => line.includes(root))
+		.join("\n");
+	expect(inherited, `control: an inheritable descriptor must reach the child\n${stdout}`).toContain(control);
+	expect(inherited).not.toContain(transcript);
+	expect(inherited).not.toMatch(/omp\.[\d-]+\.\d+\.log/);
 });

@@ -227,6 +227,9 @@ describe("handleRpcCancelSubagent", () => {
 			sessionManager: { appendSessionInit: () => {} },
 			getActiveToolNames: () => ["read", "yield"],
 			getEnabledToolNames: () => ["read", "yield"],
+			getMountedXdevToolNames: () => [],
+			getToolByName: () => undefined,
+			setActiveToolsByName: async () => {},
 			setWorkPoolYieldItems: () => {},
 			subscribe: (listener: (event: AgentSessionEvent) => void) => {
 				listeners.push(listener);
@@ -238,6 +241,10 @@ describe("handleRpcCancelSubagent", () => {
 			},
 			getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
 			settleAsyncWork: async () => {},
+			abort: async () => {},
+			dispose: async () => {},
+			setIrcWakeTurnObserver: () => {},
+			holdIrcWakes: () => () => {},
 			trackIrcReply: () => {},
 		} as unknown as AgentSession;
 		AgentRegistry.global().register({

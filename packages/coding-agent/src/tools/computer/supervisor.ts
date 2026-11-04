@@ -6,6 +6,12 @@ import { withTimeout } from "@oh-my-pi/pi-utils/async";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
+import {
+	type ApprovalContextSource,
+	type ApprovalPolicy,
+	resolveApproval,
+	resolveApprovalFromContext,
+} from "../approval";
 import type { ToolSession } from "../index";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -31,6 +37,15 @@ const SMOKE_TIMEOUT_MS = 5_000;
 // the first ensure may load the desktop addon, so it shares the start budget.
 const CAPABILITIES_TIMEOUT_MS = 10_000;
 const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were reset";
+
+/**
+ * The user's `tools.approval["computer.control"]` policy. The approval mode never decides it: the default `yolo`
+ * would hand the user's foreground to every headless run, so without an explicit entry the user is asked.
+ */
+function controlPolicy(context: ApprovalContextSource): ApprovalPolicy {
+	const { userPolicies } = resolveApprovalFromContext(context);
+	return resolveApproval({ name: "computer.control", approval: "exec" }, undefined, "always-ask", userPolicies).policy;
+}
 
 /** Runs desktop scripts and owns their persistent worker session. */
 export interface ComputerController {
@@ -387,20 +402,38 @@ export class ComputerSupervisor implements ComputerController {
 		else pending.signal?.addEventListener("abort", onAbort, { once: true });
 		try {
 			const context = pending.context ?? this.#session.getToolContext?.();
+			const policy = controlPolicy(context ?? { settings: this.#session.settings });
 			let verdict: ControlVerdict;
-			if (!context?.ui || context.hasUI === false) {
+			if (policy === "allow") {
+				verdict = "approved";
+			} else if (policy === "deny") {
+				verdict = "denied";
+			} else if (!context?.ui || context.hasUI === false) {
 				verdict = "no-ui";
+			} else if (message.timeoutMs <= 0) {
+				// The run has no time left to wait in; a prompt would close before anyone could answer it.
+				verdict = "unanswered";
 			} else {
-				const approved =
-					!controller.signal.aborted &&
-					(await untilAborted(controller.signal, () =>
-						context.ui!.confirm(
-							"Allow foreground computer control?",
-							`${message.reason}\n\nFor this task only. Use the host interrupt to stop and revoke control. This does not authorize external side effects.`,
-							{ signal: controller.signal },
-						),
-					)) === true;
-				verdict = approved ? "approved" : "denied";
+				// The prompt closes before the run's deadline, so the script hears that nobody answered. The deadline
+				// aborts the dialog rather than riding its `timeout` option: a timed-out TUI confirm picks its
+				// highlighted option, which is Yes.
+				const deadline = AbortSignal.timeout(message.timeoutMs);
+				const signal = AbortSignal.any([controller.signal, deadline]);
+				let approved = false;
+				try {
+					approved =
+						!signal.aborted &&
+						(await untilAborted(signal, () =>
+							context.ui!.confirm(
+								"Allow foreground computer control?",
+								`${message.reason}\n\nFor this task only. Use the host interrupt to stop and revoke control. This does not authorize external side effects.`,
+								{ signal },
+							),
+						)) === true;
+				} catch (error) {
+					if (!deadline.aborted || controller.signal.aborted) throw error;
+				}
+				verdict = approved ? "approved" : deadline.aborted ? "unanswered" : "denied";
 			}
 			if (controller.signal.aborted || this.#pending.get(message.runId) !== pending) verdict = "denied";
 			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: true, value: verdict } });

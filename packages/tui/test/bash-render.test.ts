@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "../src/tools/renderer";
@@ -30,7 +30,7 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("refreshes quiet background activity in ANSI and restores the original clock in native views", () => {
-		const now = vi.spyOn(Date, "now").mockReturnValue(13_000);
+		const now = spyOn(Date, "now").mockReturnValue(13_000);
 		const result = {
 			content: [{ type: "text", text: "" }],
 			details: {
@@ -48,6 +48,14 @@ describe("bashToolRenderer", () => {
 
 		now.mockReturnValue(14_000);
 		expect(sanitizeText(component.render(120).join("\n"))).toContain("Elapsed: 13.00s");
+		// The call's elapsed clock and background activity clock invalidate independently.
+		options.elapsedMs = 2_000;
+		const afterElapsedTick = component.render(120);
+		expect(sanitizeText(afterElapsedTick.join("\n"))).toContain("elapsed 2.0s");
+		now.mockReturnValue(15_000);
+		const afterActivityTick = component.render(120);
+		expect(sanitizeText(afterActivityTick.join("\n"))).toContain("Elapsed: 14.00s");
+		expect(sanitizeText(afterActivityTick.join("\n"))).toContain("elapsed 2.0s");
 		const settled = {
 			...result,
 			details: {
@@ -456,5 +464,50 @@ describe("bashToolRenderer", () => {
 		const expandedFinal = render({ expanded: true, isPartial: false });
 		expect(expandedFinal).toContain("echo step_0");
 		expect(expandedFinal).not.toContain("earlier line");
+	});
+
+	it("shows a minimizer filter label as one sanitized, width-bounded footer fact", () => {
+		const filter = `\x1b[31mlint\x1b[0m\tun\x07safe\nfooter ${"界".repeat(30)}`;
+		const label = `lint unsafe footer ${"界".repeat(10)}…`;
+		const result = {
+			content: [{ type: "text" as const, text: "1 error\n[raw output: artifact://2]" }],
+			details: { meta: { minimized: { filter, inputBytes: 1960, outputBytes: 27, artifactId: "2" } } },
+		};
+		const args = { command: "pnpm lint" };
+		const options = { expanded: false, isPartial: false };
+		const rendered = bashToolRenderer.renderResult(result, options, uiTheme, args).render(200).join("\n");
+		expect(rendered).not.toContain("\x1b[31m");
+		expect(rendered).not.toContain("\x07");
+		const footer = Bun.stripANSI(rendered)
+			.split("\n")
+			.find(line => line.includes("Minimized:"));
+		expect(footer).toContain(`Minimized: ${label} 1.9KB → 27B`);
+		expect(footer).not.toContain("\t");
+		const view = JSON.stringify(bashToolRenderer.describeResult(result, options, args));
+		expect(view).toContain(`Minimized ${label} 1.9KB → 27B`);
+		expect(view).not.toContain("\\u001b[31m");
+	});
+
+	it("shows a home path in a minimizer filter label as ~", () => {
+		const home = spyOn(os, "homedir").mockReturnValue("/home/alice");
+		try {
+			const result = {
+				content: [{ type: "text" as const, text: "ok\n[raw output: artifact://3]" }],
+				details: {
+					meta: {
+						minimized: { filter: "/home/alice/bin/lint", inputBytes: 1960, outputBytes: 27, artifactId: "3" },
+					},
+				},
+			};
+			const options = { expanded: false, isPartial: false };
+			const rendered = bashToolRenderer
+				.renderResult(result, options, uiTheme, { command: "lint" })
+				.render(200)
+				.join("\n");
+			expect(Bun.stripANSI(rendered)).toContain("Minimized: ~/bin/lint 1.9KB → 27B");
+			expect(rendered).not.toContain("/home/alice");
+		} finally {
+			home.mockRestore();
+		}
 	});
 });
