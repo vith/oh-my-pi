@@ -10,9 +10,7 @@ import * as path from "node:path";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { resetHangulCompatibilityJamoWidthForTests, setHangulCompatibilityJamoWidth } from "@oh-my-pi/pi-tui";
 import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
-import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-coding-agent/task/output-manager";
 import {
 	InteractiveMode,
 	layoutPinnedHud,

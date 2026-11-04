@@ -25,6 +25,7 @@ async function createParkedSession(options?: { holdFirstProvider?: Promise<void>
 	session: AgentSession;
 	providerStarts: () => number;
 	firstProviderStarted: Promise<void>;
+	providerMessages: string[];
 	tempDir: TempDir;
 }> {
 	const tempDir = TempDir.createSync("@pi-irc-admission-");
@@ -36,6 +37,7 @@ async function createParkedSession(options?: { holdFirstProvider?: Promise<void>
 		],
 	});
 	let providerStarts = 0;
+	const providerMessages: string[] = [];
 	const firstProviderStarted = Promise.withResolvers<void>();
 	const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false, "todo.enabled": false });
 	settings.setModelRole("default", `${model.provider}/${model.id}`);
@@ -49,6 +51,7 @@ async function createParkedSession(options?: { holdFirstProvider?: Promise<void>
 		},
 		convertToLlm,
 		streamFn: async (...args) => {
+			providerMessages.push(JSON.stringify(args[1].messages));
 			providerStarts++;
 			if (providerStarts === 1) firstProviderStarted.resolve();
 			if (providerStarts === 1) await options?.holdFirstProvider;
@@ -64,6 +67,7 @@ async function createParkedSession(options?: { holdFirstProvider?: Promise<void>
 		}),
 		providerStarts: () => providerStarts,
 		firstProviderStarted: firstProviderStarted.promise,
+		providerMessages,
 		tempDir,
 	};
 }
@@ -159,6 +163,80 @@ describe("AgentSession IRC wake admission", () => {
 			tempDir.removeSync();
 		}
 	});
+
+	it.each([false, true])(
+		"preserves arrival order across a newly acquired hold when first admission refuses: %s",
+		async refuseFirst => {
+			const { session, providerStarts, providerMessages, tempDir } = await createParkedSession();
+			const registry = AgentRegistry.global();
+			const childId = `held-admission-child-${refuseFirst}`;
+			registry.register({
+				id: childId,
+				displayName: childId,
+				parentId: "Owner",
+				kind: "sub",
+				session,
+				sessionFile: `${tempDir.path()}/${childId}.jsonl`,
+				status: "idle",
+			});
+			const firstAdmissionEntered = Promise.withResolvers<void>();
+			const firstAdmissionRelease = Promise.withResolvers<void>();
+			const settled = Promise.withResolvers<void>();
+			const observed: string[][] = [];
+			let releaseHold: (() => void) | undefined;
+			try {
+				let admissionCount = 0;
+				session.setIrcWakeTurnAdmission(async () => {
+					admissionCount++;
+					if (admissionCount === 1) {
+						firstAdmissionEntered.resolve();
+						await firstAdmissionRelease.promise;
+						if (refuseFirst) throw new Error("first admission refused");
+					}
+				});
+				session.setIrcWakeTurnObserver(records => {
+					observed.push(records.map(ircRecordBody));
+					return undefined;
+				});
+				session.setIrcWakeTurnSettlement(() => settled.resolve());
+
+				await session.deliverIrcMessage({ ...message("held-first", "held first"), to: childId });
+				await firstAdmissionEntered.promise;
+				releaseHold = session.holdIrcWakes();
+				await session.deliverIrcMessage({ ...message("held-second", "held second"), to: childId });
+				await yieldImmediate();
+				expect(admissionCount).toBe(2);
+				expect(providerStarts()).toBe(0);
+				expect(observed).toEqual([]);
+
+				firstAdmissionRelease.resolve();
+				await yieldImmediate();
+				// Even completed admission must not wake peers during the driven run's hold.
+				expect(providerStarts()).toBe(0);
+				expect(observed).toEqual([]);
+
+				releaseHold();
+				await settled.promise;
+				await session.waitForIdle();
+				await yieldImmediate();
+
+				expect(providerStarts()).toBe(1);
+				expect(observed).toEqual([["held first", "held second"]]);
+				expect(deliveredIrcBodies(session)).toEqual(["held first", "held second"]);
+				const providerInput = providerMessages[0]!;
+				expect(providerInput).toContain("held first");
+				expect(providerInput).toContain("held second");
+				expect(providerInput.indexOf("held first")).toBeLessThan(providerInput.indexOf("held second"));
+				expect(session.hasQueuedIrcFrom("Main")).toBe(false);
+			} finally {
+				firstAdmissionRelease.resolve();
+				releaseHold?.();
+				registry.unregister(childId);
+				await session.dispose();
+				tempDir.removeSync();
+			}
+		},
+	);
 
 	it("defers a concurrently admitted wake until the active wake settles, then observes its own turn", async () => {
 		const firstProviderRelease = Promise.withResolvers<void>();

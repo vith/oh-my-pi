@@ -1779,10 +1779,13 @@ export class AgentSession implements SettingsScope {
 				});
 			return;
 		}
-		// While a driven run holds wakes, its monitor would take this turn's answer
-		// as the run's result: park a non-parent message for a turn of its own.
+		// Reserve arrival order through admission before applying a driven run's hold.
+		// Otherwise a newly held peer can enter deferred wakes ahead of an older
+		// record whose asynchronous admission is still pending.
+		// Once admitted, park peers so the driven run's monitor cannot take their
+		// wake turn's answer as its own result.
 		let records = wakeRecords;
-		if (this.#ircWakeHolds > 0) {
+		if (admitted && this.#ircWakeHolds > 0) {
 			const held = records.filter(record => this.#irc.isPeerMessage(record));
 			if (held.length > 0) {
 				this.#irc.queueDeferredWake(held);

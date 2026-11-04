@@ -26,9 +26,11 @@ import {
 } from "./context-settings";
 import { isSessionSettled, type SessionSettleHost, waitForSessionSettlement } from "./session-settle";
 
-/** Probes the owner of the session supplies. Both are re-read whenever work could start. */
+/** Probes the owner of the session supplies. Re-read whenever work could start or a recap reply lands. */
 export interface IdleMaintenanceOptions {
-	/** True while the owner does not want autonomous work (a draft being composed, the view left, startup unfinished). */
+	/** Whether this session still belongs to the requesting owner. Omitted for sessions without a view owner. */
+	isOwnerValid?: () => boolean;
+	/** True while the owner does not want autonomous work (for example a draft being composed). */
 	isBlocked?: () => boolean;
 	/** True while the owner has decided to start a turn it has not yet admitted (for example a scheduled goal continuation). */
 	scheduledTurn?: () => boolean;
@@ -109,8 +111,11 @@ export class IdleMaintenance {
 	 * work that is no longer wanted and re-arm whatever the current stretch still owes, with a fresh delay.
 	 */
 	refresh(): void {
-		if (this.#disposed || !this.#pending) return;
-		if (this.#recapRun && !this.#recapManual && !this.#recapWanted()) this.#cancelRecap();
+		if (this.#disposed) return;
+		if (this.#recapRun && (!this.#isOwnerValid() || (!this.#recapManual && !this.#recapWanted()))) {
+			this.#cancelRecap();
+		}
+		if (!this.#pending) return;
 		this.#schedule();
 	}
 
@@ -175,10 +180,19 @@ export class IdleMaintenance {
 		this.#recapManual = false;
 	}
 
+	#isOwnerValid(): boolean {
+		return this.#options.isOwnerValid?.() !== false;
+	}
+
 	/** Compaction or a session transition is under way, or the owner does not want autonomous work. */
 	#isBlocked(): boolean {
 		const session = this.#session;
-		return this.#options.isBlocked?.() === true || session.isCompacting || session.isSessionTransitioning;
+		return (
+			!this.#isOwnerValid() ||
+			this.#options.isBlocked?.() === true ||
+			session.isCompacting ||
+			session.isSessionTransitioning
+		);
 	}
 
 	/**
@@ -346,7 +360,7 @@ export class IdleMaintenance {
 	async #runRecap(manual = false): Promise<void> {
 		const pending = this.#pending ?? (manual ? { recap: true, compaction: false } : undefined);
 		const session = this.#session;
-		if (this.#disposed || !pending) return;
+		if (this.#disposed || !pending || !this.#isOwnerValid()) return;
 		if (manual) {
 			if (!session.model) throw new Error("No active model for recap");
 			if (session.messages.length === 0) throw new Error("No conversation to recap yet");
@@ -367,7 +381,7 @@ export class IdleMaintenance {
 				task: nextActionableTask(session.getTodoPhases())?.content ?? "",
 			});
 			const { replyText } = await session.runEphemeralTurn({ promptText, signal: run.signal });
-			if (this.#recapRun !== run || run.signal.aborted) return;
+			if (this.#recapRun !== run || run.signal.aborted || !this.#isOwnerValid()) return;
 			if (!manual && this.#isBlocked()) return;
 			if (!manual && !this.#isQuiet()) {
 				this.#recapRun = undefined;

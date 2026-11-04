@@ -162,8 +162,8 @@ describe("issue #3656 /shake mid-stream preserves the in-flight assistant turn",
 		};
 		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
 		Object.defineProperty(session.agent.state, "streamMessage", { configurable: true, value: reply });
-		await mode.eventController.handleEvent({ type: "message_start", message: reply } as AgentSessionEvent);
-		await mode.eventController.handleEvent({ type: "message_update", message: reply } as AgentSessionEvent);
+		await mode.eventController.handleEvent({ type: "message_start", message: reply });
+		await mode.eventController.handleEvent(messageUpdateFromSnapshot(reply));
 		const drawsAfter = (child: unknown) =>
 			child instanceof AssistantMessageComponent &&
 			Bun.stripANSI(child.render(80).join("\n")).includes("After the call.");

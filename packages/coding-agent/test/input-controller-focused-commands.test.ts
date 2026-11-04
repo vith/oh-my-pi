@@ -22,7 +22,6 @@ import { TUI } from "@oh-my-pi/pi-tui";
 import { initTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { VirtualRenderScheduler } from "../../tui/test/virtual-render-scheduler";
-import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 import { beginSettingsTest, restoreSettingsTestState } from "./helpers/settings-test-state";
 
 beforeAll(async () => {

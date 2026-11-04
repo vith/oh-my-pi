@@ -1842,9 +1842,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		activity.target = target;
 		activity.isComposing = this.editor.getText().trim() !== "";
 		target.enableIdleMaintenance({
-			isBlocked: () => !activity.ready || activity.target !== target || activity.isComposing,
+			isOwnerValid: () => activity.ready && activity.target === target,
+			isBlocked: () => activity.isComposing,
 			scheduledTurn: () => activity.scheduledTurn?.(target) === true,
-			// Delivered only while unblocked, so `target` is the session on screen.
+			// Delivered only while ownership is valid, so `target` is the session on screen.
 			onRecap: recap => activity.presentRecap?.(recap),
 		});
 		if (previous !== target) previous?.refreshIdleMaintenance();

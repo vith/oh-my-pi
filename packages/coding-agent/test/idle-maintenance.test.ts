@@ -4,10 +4,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { IdleMaintenance, type IdleMaintenanceSession } from "@oh-my-pi/pi-coding-agent/session/idle-maintenance";
 
-function recapHarness() {
+function recapHarness(isOwnerValid?: () => boolean, presentRecap?: (recap: string) => void) {
 	const requests: Array<{ signal: AbortSignal | undefined; resolve: (value: { replyText: string }) => void }> = [];
 	const recordRecap = vi.fn();
-	const onRecap = vi.fn();
+	const onRecap = vi.fn((recap: string) => presentRecap?.(recap));
 	let listener: ((event: AgentSessionEvent) => void) | undefined;
 	const session = {
 		settings: Settings.isolated({ recap: { enabled: false } }),
@@ -35,19 +35,76 @@ function recapHarness() {
 			return pending.promise;
 		},
 	} as unknown as IdleMaintenanceSession;
-	const maintenance = new IdleMaintenance(session, { isBlocked: () => true, onRecap });
+	const maintenance = new IdleMaintenance(session, { isOwnerValid, isBlocked: () => true, onRecap });
 	return { maintenance, requests, recordRecap, onRecap, emit: (event: AgentSessionEvent) => listener?.(event) };
 }
 
 describe("requested session recap", () => {
 	it("ignores idle settings, drafts and active-turn gates and journals the full reply", async () => {
-		const h = recapHarness();
+		const h = recapHarness(() => true);
 		try {
 			const run = h.maintenance.runRecap();
+			h.maintenance.refresh();
+			expect(h.requests[0]!.signal?.aborted).toBe(false);
 			h.requests[0]!.resolve({ replyText: "A requested recap\nwith details" });
 			await run;
 			expect(h.recordRecap).toHaveBeenCalledWith("A requested recap\nwith details");
 			expect(h.onRecap).toHaveBeenCalledWith("A requested recap\nwith details");
+		} finally {
+			h.maintenance.dispose();
+		}
+	});
+
+	it("cancels a manual recap when focus leaves its owner before any idle stretch exists", async () => {
+		const presentA = vi.fn();
+		const presentB = vi.fn();
+		const activity = { target: "A", ready: true, presentRecap: presentA };
+		const h = recapHarness(
+			() => activity.ready && activity.target === "A",
+			recap => activity.presentRecap(recap),
+		);
+		try {
+			const run = h.maintenance.runRecap();
+			expect(h.requests).toHaveLength(1);
+			expect(h.requests[0]!.signal?.aborted).toBe(false);
+			activity.target = "B";
+			activity.presentRecap = presentB;
+			h.maintenance.refresh();
+			expect(h.requests[0]!.signal?.aborted).toBe(true);
+			// A provider may still deliver its result after the focus change and cancellation.
+			h.requests[0]!.resolve({ replyText: "Recap of A" });
+			await run;
+			expect(h.recordRecap).not.toHaveBeenCalled();
+			expect(h.onRecap).not.toHaveBeenCalled();
+			expect(presentA).not.toHaveBeenCalled();
+			expect(presentB).not.toHaveBeenCalled();
+		} finally {
+			h.maintenance.dispose();
+		}
+	});
+
+	it("rejects a stale manual reply even before the owner refreshes maintenance", async () => {
+		let ready = true;
+		const h = recapHarness(() => ready);
+		try {
+			const run = h.maintenance.runRecap();
+			ready = false;
+			h.requests[0]!.resolve({ replyText: "Recap from the outgoing view" });
+			await run;
+			expect(h.recordRecap).not.toHaveBeenCalled();
+			expect(h.onRecap).not.toHaveBeenCalled();
+		} finally {
+			h.maintenance.dispose();
+		}
+	});
+
+	it("does not start a manual request for an invalid owner", async () => {
+		const h = recapHarness(() => false);
+		try {
+			await h.maintenance.runRecap();
+			expect(h.requests).toHaveLength(0);
+			expect(h.recordRecap).not.toHaveBeenCalled();
+			expect(h.onRecap).not.toHaveBeenCalled();
 		} finally {
 			h.maintenance.dispose();
 		}
